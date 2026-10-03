@@ -1,0 +1,8 @@
+node_modules/
+dist/
+native/build*/
+release/
+*.wav
+.DS_Store
+playwright-report/
+test-results/
