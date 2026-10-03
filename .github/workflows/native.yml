@@ -1,0 +1,226 @@
+name: Plugins
+
+# Adapted from SSB: one tested editor build feeds the universal native bundles.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'native/**'
+      - 'src/**'
+      - 'index.html'
+      - 'package*.json'
+      - 'tsconfig.json'
+      - 'vite.config.ts'
+      - '.github/workflows/native.yml'
+  pull_request:
+    paths:
+      - 'native/**'
+      - 'src/**'
+      - 'index.html'
+      - 'package*.json'
+      - 'tsconfig.json'
+      - 'vite.config.ts'
+      - '.github/workflows/native.yml'
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: Sign and notarize the build (also done for version tags)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  page:
+    name: Editor and core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Check release version
+        if: github.ref_type == 'tag'
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'
+          const tag = process.env.GITHUB_REF_NAME.replace(/^v/, '')
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')).version
+          const cmake = fs.readFileSync('native/CMakeLists.txt', 'utf8').match(/project\(RoliDrummer VERSION ([\d.]+)/)?.[1]
+          if (tag !== pkg || tag !== cmake) throw Error(`Version mismatch: tag=${tag}, package=${pkg}, CMake=${cmake}`)
+          JS
+      - run: npm run build
+      - name: Portable scheduler and MIDI queue tests
+        run: |
+          cmake -S native -B native/build-core -G Ninja -DRD_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build native/build-core --parallel 2
+          ctest --test-dir native/build-core --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: editor
+          path: dist/
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal AU, VST3 and standalone
+    needs: page
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: editor
+          path: dist
+      - uses: actions/cache@v4
+        with:
+          path: native/build/_deps/juce-src
+          key: juce-source-macos-${{ hashFiles('native/CMakeLists.txt') }}
+      - name: Configure and build
+        run: |
+          cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          cmake --build native/build --parallel 3
+      - name: Native tests
+        run: ctest --test-dir native/build --output-on-failure
+      - name: Check signing capabilities
+        id: creds
+        # Never expose publishing credentials to a pull-request build.
+        if: github.event_name != 'pull_request'
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          REQUIRE_NOTARY: ${{ github.ref_type == 'tag' || inputs.notarize }}
+        run: |
+          sign=false; notary=false
+          if [ -n "$CERT" ]; then sign=true; fi
+          if { [ -n "$NOTARY_KEY_P8" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER_ID" ]; } ||
+             { [ -n "$NOTARY_APPLE_ID" ] && [ -n "$NOTARY_PASSWORD" ] && [ -n "$NOTARY_TEAM_ID" ]; }; then
+            notary=true
+          fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "notary=$notary" >> "$GITHUB_OUTPUT"
+          if [ "$REQUIRE_NOTARY" = true ] && { [ "$sign" != true ] || [ "$notary" != true ]; }; then
+            echo '::error::Signed releases require the signing certificate and complete notarization credentials.'
+            exit 1
+          fi
+      - name: Import signing certificate
+        if: steps.creds.outputs.sign == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          umask 077
+          keychain="$RUNNER_TEMP/rolidrummer-signing.keychain-db"
+          password="$(openssl rand -base64 24)"
+          echo "::add-mask::$password"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          cert="$RUNNER_TEMP/rolidrummer-certificate.p12"
+          trap 'rm -f "$cert"' EXIT
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$cert"
+          security import "$cert" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          # Signing scripts receive the explicit keychain; no search-list mutation is needed.
+          echo "KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
+      - name: Sign
+        if: steps.creds.outputs.sign == 'true'
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: native/tools/macos-sign.sh native/build/plugin Release
+      - name: Validate AU and VST3
+        run: |
+          artifacts=native/build/plugin/RoliDrummer_artefacts/Release
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components" validation
+          ditto "$artifacts/AU/Roli Drummer.component" "$HOME/Library/Audio/Plug-Ins/Components/Roli Drummer.component"
+          killall AudioComponentRegistrar 2>/dev/null || true
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/pluginval.zip" \
+            https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_macOS.zip
+          unzip -q "$RUNNER_TEMP/pluginval.zip" -d "$RUNNER_TEMP/pluginval"
+          for bundle in "$HOME/Library/Audio/Plug-Ins/Components/Roli Drummer.component" "$artifacts/VST3/Roli Drummer.vst3"; do
+            "$RUNNER_TEMP/pluginval/pluginval.app/Contents/MacOS/pluginval" \
+              --strictness-level 5 --timeout-ms 300000 --output-dir "$GITHUB_WORKSPACE/validation" \
+              --validate "$bundle"
+          done
+      - name: Notarize and staple
+        id: notary
+        if: steps.creds.outputs.sign == 'true' && steps.creds.outputs.notary == 'true' && (github.ref_type == 'tag' || inputs.notarize)
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          native/tools/macos-notarize.sh native/build/plugin "$RUNNER_TEMP/notarized" Release
+          echo "done=true" >> "$GITHUB_OUTPUT"
+      - name: Package verified universal bundles
+        env:
+          SIGNED: ${{ steps.creds.outputs.sign || 'false' }}
+          NOTARIZED: ${{ steps.notary.outputs.done || 'false' }}
+        run: |
+          native/tools/package-macos.sh native/build release
+          printf 'Commit: %s\nSigned: %s\nNotarized: %s\n' "$GITHUB_SHA" "$SIGNED" "$NOTARIZED" > release/BUILD.txt
+          cat release/BUILD.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rolidrummer-macos-universal
+          path: release/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: macos-validation-logs
+          path: |
+            validation/
+            native/build/Testing/Temporary/
+          if-no-files-found: ignore
+      - name: Remove signing material
+        if: always() && steps.creds.outputs.sign == 'true'
+        run: |
+          rm -f "$RUNNER_TEMP/rolidrummer-certificate.p12"
+          security delete-keychain "$RUNNER_TEMP/rolidrummer-signing.keychain-db" 2>/dev/null || true
+
+  release:
+    name: Publish tagged release
+    if: github.ref_type == 'tag'
+    needs: macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rolidrummer-macos-universal
+          path: release
+      - name: Release notes
+        run: |
+          {
+            cat native/packaging/release-notes.md
+            printf '\nThese macOS downloads contain universal arm64/x86_64 AU, VST3, and standalone builds, signed with Developer ID and notarized by Apple.\n'
+          } > release-notes.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: release-notes.txt
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

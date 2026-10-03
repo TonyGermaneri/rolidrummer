@@ -6,7 +6,7 @@ Place `Roli Drummer.component` in `~/Library/Audio/Plug-Ins/Components` for AU h
 
 The editor uses a vector Seaboard, SSB sound controls, and jamin's graph and data grid. Audio continues with the editor closed. DAW state embeds assigned sample data; portable `.rolidrummer` files include patterns, mappings, zones, and sounds.
 
-Development archives are signed ad hoc. See `SIGNING.md` for Developer ID signing and notarization before public distribution.
+Build signing and notarization status is recorded in `BUILD.txt`. Version-tag releases are signed with Developer ID and notarized; local development archives may be signed ad hoc. See `SIGNING.md` for details.
 
 October 2 update: live finger and sample-playback indicators; CC74 diagnostics and held-slide tests for Live's default MPE Lower Zone; distinct factory pattern densities for every part; sound/pattern audition buttons; SSB themes and coordinated zone colors; automatic five-surface mappings; a clearer Drum part selector. Restart the host after replacing the plug-in. Physical Seaboard verification remains a hardware test.
 

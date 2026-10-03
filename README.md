@@ -29,7 +29,7 @@ cmake --build native/build-universal -j 4
 native/tools/package-macos.sh
 ```
 
-The packaging script verifies signatures and both CPU slices before creating archives under `release`. Developer ID signing and notarization are separate release steps described in [SIGNING.md](native/packaging/SIGNING.md).
+The packaging script verifies signatures and both CPU slices before creating archives under `release`. GitHub Actions builds native artifacts on `main` and publishes signed, notarized macOS releases on matching `v*` version tags. The editor preview deploys separately to GitHub Pages. Credentials and manual signing/notarization are described in [SIGNING.md](native/packaging/SIGNING.md).
 
 ## Play and edit
 
