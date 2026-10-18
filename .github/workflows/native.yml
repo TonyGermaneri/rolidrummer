@@ -42,6 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Signing workflow regression tests
+        run: python3 native/tools/test-macos-signing.py
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -134,6 +136,10 @@ jobs:
         run: |
           umask 077
           keychain="$RUNNER_TEMP/rolidrummer-signing.keychain-db"
+          # Match SSB: preserve the search list, including the runner's normal
+          # certificate-chain sources, and restore it in the always-run cleanup.
+          original_search_list="$(security list-keychains -d user)"
+          printf '%s\n' "$original_search_list" > "$RUNNER_TEMP/rolidrummer-keychain-search-list"
           password="$(openssl rand -base64 24)"
           echo "::add-mask::$password"
           security create-keychain -p "$password" "$keychain"
@@ -145,8 +151,19 @@ jobs:
           security import "$cert" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
-          # Signing scripts receive the explicit keychain; no search-list mutation is needed.
+          # --keychain selects the identity; codesign still uses the search list
+          # to resolve its certificate chain. Arrays preserve paths without eval.
+          signing_keychains=("$keychain")
+          while IFS= read -r entry; do
+            entry="${entry#*\"}"
+            entry="${entry%\"*}"
+            if [ -n "$entry" ] && [ "$entry" != "$keychain" ]; then
+              signing_keychains+=("$entry")
+            fi
+          done < "$RUNNER_TEMP/rolidrummer-keychain-search-list"
+          security list-keychains -d user -s "${signing_keychains[@]}"
           echo "KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning "$keychain" | grep "Developer ID Application"
       - name: Sign
         if: steps.creds.outputs.sign == 'true'
         env:
@@ -205,6 +222,15 @@ jobs:
         if: always() && steps.creds.outputs.sign == 'true'
         run: |
           rm -f "$RUNNER_TEMP/rolidrummer-certificate.p12"
+          if [ -f "$RUNNER_TEMP/rolidrummer-keychain-search-list" ]; then
+            original_keychains=()
+            while IFS= read -r entry; do
+              entry="${entry#*\"}"
+              entry="${entry%\"*}"
+              [ -z "$entry" ] || original_keychains+=("$entry")
+            done < "$RUNNER_TEMP/rolidrummer-keychain-search-list"
+            security list-keychains -d user -s ${original_keychains[@]+"${original_keychains[@]}"} || true
+          fi
           security delete-keychain "$RUNNER_TEMP/rolidrummer-signing.keychain-db" 2>/dev/null || true
 
   release:

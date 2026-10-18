@@ -30,6 +30,10 @@ The workflows are adapted from SSB and use the same repository secrets:
 
 The API-key route takes precedence when both notarization methods are configured. Pull-request builds do not receive these credentials. Certificate imports use a temporary keychain, cleaned up even if a later step fails.
 
+As in SSB, CI adds the temporary signing keychain to the existing user search list and restores the original list during cleanup. Passing `--keychain` to `codesign` selects the identity; the search list must also contain the certificates needed to build its chain. The import step checks for a valid Developer ID Application identity before signing. See [GitHub's macOS certificate setup](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications).
+
+Run `python3 native/tools/test-macos-signing.py` to exercise the actual workflow setup/cleanup blocks and signing script with mocked system commands. These tests cover nested signing, paths with spaces and restoration after failures without using real credentials or keychains. They also run in CI before the editor build.
+
 Pushes to `main` build and validate universal macOS AU, VST3 and standalone artifacts, signing them when credentials are present. Version tags (`v0.1.0`, for example) additionally require signing/notarization credentials, notarize and staple the bundles, and publish a GitHub Release with archives and SHA-256 checksums. A tag must match both `package.json` and `native/CMakeLists.txt`; update both before tagging a new version. No release is published if validation or notarization fails.
 
 The **Plugins** workflow can also be dispatched manually with **notarize** enabled to produce notarized artifacts without creating a release. Development artifacts report their actual signing/notarization status in `BUILD.txt`. Windows publishing is not configured.
