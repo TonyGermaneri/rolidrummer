@@ -7,11 +7,50 @@ namespace {
 double boundary(double beat, double step) { return step > 0 ? std::ceil((beat - 1e-10) / step) * step : beat; }
 float source(const Expression& e, int s) { switch(s) { case 0:return e.strike;case 1:return e.glide;case 3:return e.press;case 4:return e.lift;default:return e.slide; } }
 int zoneAt(const Key& k, float x) { for(int z=0;z<k.zoneCount-1;++z) if(x<k.zones[(size_t)z].upper) return z;return k.zoneCount-1; }
-uint64_t token(uint32_t clip,int note,int64_t cycle) {
-    // Stable across block sizes; the off for a note extending past wrap names its original onset.
-    uint64_t h = uint64_t(cycle) * 0x9e3779b97f4a7c15ULL;
-    h ^= uint64_t(clip) * 0xbf58476d1ce4e5b9ULL; h ^= uint64_t(note+1) * 0x94d049bb133111ebULL;
-    return h == 0 ? 1 : h;
+constexpr double intentTick = 1.0/32;
+PatternIntent intentTarget(const Expression& e) {return {{.65f*e.press+.35f*e.strike,e.press,e.glide,e.strike}};}
+const PatternGroup* group(const Configuration& cfg,const Zone& zone) {
+    return zone.group>=0 && zone.group<(int)cfg.groups.size()?&cfg.groups[(size_t)zone.group]:nullptr;
+}
+int selectedClip(const Configuration& cfg,const Key& key,const Contact& contact) {
+    const auto& zone=key.zones[(size_t)contact.zone];
+    if(key.intentEnabled)if(const auto* candidates=group(cfg,zone))
+        for(int i=0;i<std::clamp(candidates->count,0,maxCandidates);++i)if(candidates->candidates[(size_t)i].clip==contact.clip)return contact.clip;
+    return zone.clip;
+}
+int chooseClip(const Configuration& cfg,const Key& key,int region,const PatternIntent& intent,int previous) {
+    const auto& zone=key.zones[(size_t)region];
+    if(!key.intentEnabled)return zone.clip;
+    const auto* candidates=group(cfg,zone);if(!candidates || candidates->count<=0)return zone.clip;
+    double best=std::numeric_limits<double>::infinity();int result=zone.clip;
+    for(int i=0;i<std::clamp(candidates->count,0,maxCandidates);++i){
+        const auto& candidate=candidates->candidates[(size_t)i];if(candidate.clip<0 || candidate.clip>=(int)cfg.clips.size())continue;
+        double distance=candidate.clip==previous?0:key.intentPenalty;
+        for(int d=0;d<intentDimensions;++d){const double delta=candidate.position[(size_t)d]-intent[(size_t)d];distance+=key.intentWeights[(size_t)d]*delta*delta;}
+        if(distance<best-1e-10 || (std::abs(distance-best)<=1e-10 && candidate.clip<result)){best=distance;result=candidate.clip;}
+    }
+    return result;
+}
+void advanceIntent(const Key& key,Contact& contact,double beat,double bpm) {
+    if(!key.intentEnabled)return;
+    const auto target=intentTarget(contact.values);
+    const double seconds=std::max(0.,beat-contact.intentBeat)*60/bpm;
+    const float alpha=key.intentSlewMs<=0?1.f:(float)-std::expm1(-std::min(1.,seconds)/(key.intentSlewMs*.001));
+    for(int d=0;d<intentDimensions;++d)contact.intent[(size_t)d]+=alpha*(target[(size_t)d]-contact.intent[(size_t)d]);
+    contact.intentBeat=beat;
+}
+void choose(const Configuration& cfg,const Key& key,Contact& contact,double beat) {
+    const float value=source(contact.values,key.zoneSource);
+    int next=zoneAt(key,value);
+    if(next>contact.zone && value<key.zones[(size_t)contact.zone].upper+cfg.hysteresis)next=contact.zone;
+    if(next<contact.zone && value>key.zones[(size_t)(contact.zone-1)].upper-cfg.hysteresis)next=contact.zone;
+    const int previous=next==contact.zone?selectedClip(cfg,key,contact):-1;
+    const int clip=chooseClip(cfg,key,next,contact.intent,previous);
+    if(next!=contact.wanted || clip!=contact.wantedClip){
+        contact.wanted=next;contact.wantedClip=clip;
+        const double earliest=key.intentEnabled&&next==contact.zone?std::max(beat,contact.changedAt+key.intentDwell):beat;
+        contact.switches=boundary(earliest,cfg.switchGrid);
+    }
 }
 }
 void prepareClip(Clip& clip) {
@@ -24,15 +63,72 @@ void prepareClip(Clip& clip) {
     }
     std::sort(clip.timeline.begin(),clip.timeline.end(),[](const auto&a,const auto&b){if(a.beat!=b.beat)return a.beat<b.beat;return a.off>b.off;});
 }
-void Scheduler::reset() noexcept { fingers = {};wasPlaying = false;expected = 0; }
-void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,Sink sink,void* ctx) noexcept {
+void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};wasPlaying = false;expected = 0;pendingOffCount=0; }
+bool Scheduler::hasHeldNotes() const noexcept {
+    for (const auto& f : fingers) if (f.held) return true;
+    for (const auto& f : sustained) if (f.held) return true;
+    return false;
+}
+void Scheduler::reconfigure(const Configuration& previous,const Configuration& next,double beat,Sink sink,void* ctx) noexcept {
+    auto identity=[](const Configuration& cfg,int clip){return clip>=0&&clip<(int)cfg.clips.size()?cfg.clips[(size_t)clip].id:uint64_t(0);};
+    for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if((!f.down&&!f.held)||f.key<0||f.key>=128)continue;
+        const auto& old=previous.keys[(size_t)f.key];const auto& key=next.keys[(size_t)f.key];
+        const bool wasHeld=f.held;const int oldZone=std::clamp(f.zone,0,std::max(0,old.zoneCount-1));
+        auto oldContact=f;oldContact.zone=oldZone;
+        const auto oldId=wasHeld&&old.enabled?identity(previous,selectedClip(previous,old,oldContact)):0;
+        if(!key.enabled){f.clip=f.wantedClip=-1;continue;} // process emits the owner's release.
+        bool sameLayout=old.enabled&&old.zoneCount==key.zoneCount&&old.zoneSource==key.zoneSource;
+        for(int zone=0;sameLayout&&zone<key.zoneCount;++zone)sameLayout=old.zones[(size_t)zone].upper==key.zones[(size_t)zone].upper;
+        f.held=wasHeld||f.down;if(!wasHeld){f.opens=beat;f.intent=intentTarget(f.values);f.intentBeat=beat;f.nextIntent=beat+intentTick;}
+        auto select=[&](int zone,uint64_t preferred){
+            if(key.intentEnabled)if(const auto* choices=group(next,key.zones[(size_t)zone]))
+                for(int n=0;preferred&&n<std::clamp(choices->count,0,maxCandidates);++n){const int clip=choices->candidates[(size_t)n].clip;if(identity(next,clip)==preferred)return clip;}
+            return chooseClip(next,key,zone,f.intent,-1);
+        };
+        const bool keepSwitch=sameLayout&&(f.wanted!=oldZone||identity(previous,f.wantedClip)!=oldId)&&f.switches>beat+1e-10;
+        const int wanted=keepSwitch?std::clamp(f.wanted,0,key.zoneCount-1):-1;
+        const auto wantedId=keepSwitch?identity(previous,f.wantedClip):0;
+        f.zone=sameLayout?oldZone:zoneAt(key,source(f.values,key.zoneSource));f.clip=select(f.zone,oldId);
+        if(keepSwitch){f.wanted=wanted;f.wantedClip=select(wanted,wantedId);}
+        else{f.wanted=f.zone;f.wantedClip=f.clip;f.switches=beat;}
+        if(!wasHeld||oldId!=identity(next,f.clip)||oldZone!=f.zone){
+            f.changedAt=beat;
+            if(wasHeld){Event e;e.type=Event::switchZone;e.owner=f.owner;e.key=f.key;e.channel=f.channel;e.values=f.values;sink(ctx,e);}
+        }
+    }
+}
+void Scheduler::release(Contact& f,int offset,Event::Type type,Sink sink,void* ctx) noexcept {
+    if(f.held){Event e;e.type=type;e.offset=offset;e.owner=f.owner;e.key=f.key;e.channel=f.channel;e.values=f.values;e.values.lift=f.releaseVelocity;sink(ctx,e);}
+    f.held=false;
+}
+void Scheduler::lift(Contact& f,int offset,Sink sink,void* ctx) noexcept {
+    f.down=false;
+    if(!f.held)return;
+    if(!pedalDown(f.channel)){release(f,offset,Event::releaseContact,sink,ctx);return;}
+    auto slot=std::find_if(sustained.begin(),sustained.end(),[](const auto& c){return !c.held;});
+    if(slot==sustained.end()){
+        slot=std::min_element(sustained.begin(),sustained.end(),[](const auto&a,const auto&b){return a.owner<b.owner;});
+        release(*slot,offset,Event::releaseContact,sink,ctx);
+    }
+    *slot=f;f.held=false; // Keep its owner/expression independent when the MPE channel is reused.
+}
+void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double bpm,Sink sink,void* ctx) noexcept {
     if(m.a>127 || m.b>127)return;
     const int ch=m.status&15, op=m.status&240;
     auto& f=fingers[(size_t)ch];
     Event e; e.offset=m.offset;e.channel=ch;e.owner=f.owner;e.key=f.key;e.values=f.values;
     if(op==0xb0 && (m.a==120 || m.a==123)) {
-        if(ch==cfg.masterChannel){e.type=Event::panic;sink(ctx,e);fingers={};}
-        else {if(f.held){e.type=m.a==120?Event::killContact:Event::releaseContact;sink(ctx,e);}f.held=false;f.down=false;}
+        if(ch==cfg.masterChannel){e.type=Event::panic;sink(ctx,e);fingers={};sustained={};pedals={};pendingOffCount=0;}
+        else {const auto type=m.a==120?Event::killContact:Event::releaseContact;
+            release(f,m.offset,type,sink,ctx);f.down=false;pedals[(size_t)ch]=false;
+            for(auto& held:sustained)if(held.channel==ch)release(held,m.offset,type,sink,ctx);
+        }
+        return;
+    }
+    if(op==0xb0 && m.a==pedalCC) {
+        pedals[(size_t)ch]=m.b>=64;
+        if(m.b<64)for(auto& held:sustained)
+            if(held.held && !pedalDown(held.channel))release(held,m.offset,Event::releaseContact,sink,ctx);
         return;
     }
     // CC74 is per-channel note expression, never a global controller or a
@@ -42,19 +138,21 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,Sink si
         return;
     }
     if(op==0x90 && m.b>0) {
-        if(f.held) { e.type=Event::releaseContact;sink(ctx,e); }
+        if(f.held)lift(f,m.offset,sink,ctx);
         const auto& k=cfg.keys[m.a];
-        f.down=true;f.held=k.enabled;f.key=m.a;f.owner=++generation;
-        f.values.strike=m.b/127.f;f.values.lift=0;
+        f.down=true;f.held=k.enabled;f.key=m.a;f.channel=ch;f.owner=++generation;
+        f.values.strike=m.b/127.f;f.values.lift=0;f.releaseVelocity=0;
         f.zone=f.wanted=zoneAt(k,source(f.values,k.zoneSource));
+        f.intent=intentTarget(f.values);f.intentBeat=beat;f.nextIntent=beat+intentTick;f.changedAt=beat;
+        f.clip=f.wantedClip=chooseClip(cfg,k,f.zone,f.intent,k.zones[(size_t)f.zone].clip);
         f.opens=boundary(beat,cfg.launchGrid);f.switches=f.opens;
         return;
     }
     if(op==0x80 || (op==0x90 && m.b==0)) {
-        if(f.key==m.a)f.down=false;
-        if(f.held && f.key==m.a) { f.values.lift=m.b/127.f;e.values=f.values;e.type=Event::releaseContact;sink(ctx,e);f.held=false; }
+        if(f.key==m.a){f.releaseVelocity=m.b/127.f;lift(f,m.offset,sink,ctx);}
         return;
     }
+    if(f.held)advanceIntent(cfg.keys[(size_t)f.key],f,beat,bpm);
     if(op==0xe0){const int raw=(int(m.b)<<7)|m.a;f.values.glide=.5f+.5f*float(raw-8192)/float(raw<8192?8192:8191);}
     else if(op==0xd0) f.values.press=m.a/127.f;
     else if(op==0xa0 && f.key==m.a) f.values.press=m.b/127.f;
@@ -62,85 +160,118 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,Sink si
     else return;
     if(!f.held) return; // Pre-note expression remains available for the next contact.
     const auto& k=cfg.keys[(size_t)f.key];
-    const float x=source(f.values,k.zoneSource);
-    int next=zoneAt(k,x);
-    if(next>f.zone && x<k.zones[(size_t)f.zone].upper+cfg.hysteresis) next=f.zone;
-    if(next<f.zone && x>k.zones[(size_t)(f.zone-1)].upper-cfg.hysteresis) next=f.zone;
-    if(next!=f.wanted) { f.wanted=next;f.switches=boundary(beat,cfg.switchGrid); }
+    if(k.intentSlewMs<=0)advanceIntent(k,f,beat,bpm);
+    choose(cfg,k,f,beat);
     e.type=Event::expression;e.values=f.values;sink(ctx,e);
 }
 void Scheduler::process(const Configuration& cfg,Clock clock,int frames,const Midi* midi,int count,Sink sink,void* ctx) noexcept {
     evaluations=0;overflow=false;dueCount=0;
-    if(frames<=0 || !(clock.sampleRate>0) || !(clock.bpm>0) || !std::isfinite(clock.ppq)) return;
-    const double step=clock.bpm/(60*clock.sampleRate), end=clock.ppq+frames*step;
+    if(frames<=0 || !(clock.sampleRate>0) || !(clock.bpm>0) || !std::isfinite(clock.ppq) || !std::isfinite(clock.sampleRate) || !std::isfinite(clock.bpm)) return;
+    auto panic=[&]{Event e;e.type=Event::panic;sink(ctx,e);pendingOffCount=0;};
+    if(cfg.clips.size()>maxRuntimeClips){overflow=true;panic();return;}
+    if(pedalCC!=cfg.sustainCC || pedalMaster!=cfg.masterChannel){
+        for(auto& f:sustained)release(f,0,Event::releaseContact,sink,ctx);
+        pedals={};pedalCC=cfg.sustainCC;pedalMaster=cfg.masterChannel;
+    }
+    const double step=clock.bpm/(60*clock.sampleRate),end=clock.ppq+frames*step;
     const bool discontinuity=clock.discontinuity || (wasPlaying && clock.playing && std::abs(clock.ppq-expected)>step*2);
-    if((wasPlaying && !clock.playing) || discontinuity) {
-        Event e;e.type=Event::panic;sink(ctx,e);
-        for(auto& f:fingers) if(f.held) { f.opens=boundary(clock.ppq,cfg.launchGrid);f.switches=f.opens; }
+    if((wasPlaying && !clock.playing) || discontinuity){
+        panic();
+        for(int i=0;i<maxContacts+maxSustained;++i)if(auto& f=contact(i);f.held){f.opens=boundary(clock.ppq,cfg.launchGrid);f.switches=f.opens;f.intentBeat=clock.ppq;f.nextIntent=clock.ppq+intentTick;f.changedAt=clock.ppq;}
     }
-    if(!wasPlaying && clock.playing) for(auto& f:fingers) if(f.held) { f.opens=boundary(clock.ppq,cfg.launchGrid);f.switches=f.opens; }
+    if(!wasPlaying && clock.playing)for(int i=0;i<maxContacts+maxSustained;++i)if(auto& f=contact(i);f.held){f.opens=boundary(clock.ppq,cfg.launchGrid);f.switches=f.opens;f.intentBeat=clock.ppq;f.nextIntent=clock.ppq+intentTick;f.changedAt=clock.ppq;}
     wasPlaying=clock.playing;expected=end;
-    if(clock.playing) for(int c=0;c<(int)cfg.clips.size();++c) {
-        const auto& clip=cfg.clips[(size_t)c];
-        if(!(clip.length>0) || !std::isfinite(clip.length)) continue;
-        ++evaluations;
-        // A rounded sample at the right edge belongs to the next block.
-        // Look back another sample for sub-sample notes whose off is extended
-        // to one sample after their onset; this also avoids early edge clamping.
-        double from=clock.ppq-step*1.5;const double finish=end-step*.5;
-        while(from<finish-1e-12) {
-            const int64_t cycle=(int64_t)std::floor((from-clip.origin)/clip.length);
-            const double origin=clip.origin+cycle*clip.length,phase=std::max(0.,from-origin);
-            const double until=std::min(finish,origin+clip.length);
-            if(until<=from)break;
-            auto first=std::lower_bound(clip.timeline.begin(),clip.timeline.end(),phase-1e-10,[](const ClipEvent& e,double p){return e.beat<p;});
-            for(auto it=first;it!=clip.timeline.end() && origin+it->beat<until+1e-10;++it) {
-                int offset=(int)std::floor((origin+it->beat-clock.ppq)/step+.5+1e-9);
-                if(it->off){
-                    const double onset=clip.origin+(cycle-it->cycleShift)*clip.length+clip.notes[(size_t)it->note].beat;
-                    offset=std::max(offset,(int)std::floor((onset-clock.ppq)/step+.5+1e-9)+1);
-                }
-                if(offset<0 || offset>=frames)continue;
-                if(dueCount==capacity){overflow=true;break;}
-                due[(size_t)dueCount++]={offset,c,it->note,cycle-it->cycleShift,it->off};
-            }
-            if(overflow)break;
-            from=until;
-        }
-        if(overflow) break;
-    }
-    if(overflow) { Event e;e.type=Event::panic;sink(ctx,e);return; }
-    std::sort(due.begin(),due.begin()+dueCount,[](const Due& a,const Due& b){
-        if(a.offset!=b.offset)return a.offset<b.offset;if(a.off!=b.off)return a.off; if(a.clip!=b.clip)return a.clip<b.clip;return a.note<b.note;
-    });
-    int mi=0,di=0;
-    // A zone transition is itself an event, even if neither clip has a hit there.
-    for(;;) {
-        int transition=frames,contact=-1;
-        for(int ch=0;ch<maxContacts;++ch){auto& f=fingers[(size_t)ch];if(!f.held)continue;
+    std::array<bool,maxRuntimeClips> evaluated{};
+    auto offOrder=[](const PendingOff& a,const PendingOff& b){return a.beat!=b.beat?a.beat>b.beat:a.token>b.token;};
+    auto offOffset=[&]{if(!pendingOffCount)return frames;const double at=(pendingOffs[0].beat-clock.ppq)/step;return at>=frames-.5-1e-9?frames:at<=0?0:(int)std::floor(at+.5+1e-9);};
+    auto sendOff=[&](int offset){
+        std::pop_heap(pendingOffs.begin(),pendingOffs.begin()+pendingOffCount,offOrder);
+        Event e;e.type=Event::endHit;e.offset=offset;e.token=pendingOffs[(size_t)--pendingOffCount].token;sink(ctx,e);
+    };
+    int cursor=0,mi=0;
+    while(cursor<frames){
+        // Transitions precede MIDI at the same sample, just as they precede a
+        // coincident onset. No hit is needed to make a quantized switch happen.
+        int nextTransition=frames,nextIntent=frames;
+        for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if(!f.held)continue;
             const auto& key=cfg.keys[(size_t)f.key];
-            if(!key.enabled){Event e;e.type=Event::releaseContact;e.owner=f.owner;e.key=f.key;e.values=f.values;sink(ctx,e);f.held=false;continue;}
+            if(!key.enabled){release(f,cursor,Event::releaseContact,sink,ctx);continue;}
             f.zone=std::clamp(f.zone,0,key.zoneCount-1);f.wanted=std::clamp(f.wanted,0,key.zoneCount-1);
-            if(f.zone!=f.wanted){int at=std::max(0,(int)std::llround((f.switches-clock.ppq)/step));if(at<transition){transition=at;contact=ch;}}
+            if(key.intentEnabled){
+                const double tickAt=(f.nextIntent-clock.ppq)/step;
+                if(tickAt<=cursor+.5){advanceIntent(key,f,clock.ppq+cursor*step,clock.bpm);choose(cfg,key,f,clock.ppq+cursor*step);f.nextIntent=clock.ppq+cursor*step+intentTick;}
+                const double position=(f.nextIntent-clock.ppq)/step;
+                nextIntent=std::min(nextIntent,position>=frames-.5?frames:std::max(cursor+1,(int)std::llround(position)));
+            }
+            if(f.zone==f.wanted && (!key.intentEnabled || f.clip==f.wantedClip))continue;
+            const double position=(f.switches-clock.ppq)/step;
+            const int at=position>=frames-.5?frames:position<=cursor?cursor:std::max(cursor,(int)std::llround(position));
+            if(at==cursor){Event e;e.type=Event::switchZone;e.offset=cursor;e.owner=f.owner;e.key=f.key;e.channel=f.channel;e.values=f.values;sink(ctx,e);f.zone=f.wanted;f.clip=f.wantedClip;f.changedAt=clock.ppq+cursor*step;}
+            else nextTransition=std::min(nextTransition,at);
         }
-        const int nextMidi=mi<count?midi[mi].offset:frames,nextDue=di<dueCount?due[(size_t)di].offset:frames;
-        if(contact>=0 && transition<=nextMidi && transition<=nextDue){auto& f=fingers[(size_t)contact];Event e;e.type=Event::switchZone;e.offset=transition;e.owner=f.owner;e.key=f.key;e.values=f.values;sink(ctx,e);f.zone=f.wanted;continue;}
-        if(mi==count && di==dueCount)break;
-        if(mi<count && (di==dueCount || midi[mi].offset<=due[(size_t)di].offset)) {
-            auto m=midi[mi++];m.offset=std::clamp(m.offset,0,frames-1);
-            input(cfg,m,clock.ppq+m.offset*step,sink,ctx);continue;
+        bool readMidi=false;
+        while(mi<count && std::clamp(midi[mi].offset,0,frames-1)<=cursor){auto m=midi[mi++];m.offset=cursor;input(cfg,m,clock.ppq+cursor*step,clock.bpm,sink,ctx);readMidi=true;}
+        // A new immediate switch must be applied before collecting this sample.
+        if(readMidi)continue;
+        const int nextMidi=mi<count?std::clamp(midi[mi].offset,0,frames-1):frames;
+        const int finish=std::min({frames,nextMidi,nextTransition,nextIntent});
+        if(finish<=cursor)continue;
+        dueCount=0;
+        if(clock.playing){
+            std::array<bool,maxRuntimeClips> active{};
+            for(int i=0;i<maxContacts+maxSustained;++i)if(const auto& f=contact(i);f.held){
+                const auto& key=cfg.keys[(size_t)f.key];const int clip=selectedClip(cfg,key,f);
+                if(clip>=0 && clip<(int)cfg.clips.size())active[(size_t)clip]=true;
+            }
+            for(int c=0;c<(int)cfg.clips.size();++c){
+                if(!active[(size_t)c])continue;
+                const auto& clip=cfg.clips[(size_t)c];
+                if(!(clip.length>0) || !std::isfinite(clip.length))continue;
+                if(!evaluated[(size_t)c]){evaluated[(size_t)c]=true;++evaluations;}
+                double from=clock.ppq+(cursor-1.5)*step;const double untilBeat=clock.ppq+(finish-.5)*step;
+                while(from<untilBeat-1e-12){
+                    const int64_t cycle=(int64_t)std::floor((from-clip.origin)/clip.length);
+                    const double origin=clip.origin+cycle*clip.length,phase=std::max(0.,from-origin),until=std::min(untilBeat,origin+clip.length);
+                    if(until<=from)break;
+                    auto first=std::lower_bound(clip.timeline.begin(),clip.timeline.end(),phase-1e-10,[](const ClipEvent& event,double position){return event.beat<position;});
+                    for(auto it=first;it!=clip.timeline.end() && origin+it->beat<until+1e-10;++it){
+                        if(it->off)continue;
+                        const int offset=(int)std::floor((origin+it->beat-clock.ppq)/step+.5+1e-9);
+                        if(offset<cursor || offset>=finish)continue;
+                        if(dueCount==capacity){overflow=true;break;}
+                        due[(size_t)dueCount++]={offset,c,it->note,cycle-it->cycleShift,false};
+                    }
+                    if(overflow)break;
+                    from=until;
+                }
+                if(overflow)break;
+            }
         }
-        const auto& d=due[(size_t)di++];const auto& clip=cfg.clips[(size_t)d.clip];const auto& note=clip.notes[(size_t)d.note];
-        Event e;e.offset=d.offset;e.token=token(clip.id,d.note,d.cycle);
-        if(d.off) { e.type=Event::endHit;sink(ctx,e);continue; }
-        const double beat=clock.ppq+d.offset*step;
-        for(int ch=0;ch<maxContacts;++ch) {
-            auto& f=fingers[(size_t)ch];if(!f.held || beat+step*.51<f.opens)continue;
-            if(beat+step*.51>=f.switches) f.zone=f.wanted;
-            const auto& k=cfg.keys[(size_t)f.key];
-            if(!k.parts[(size_t)note.note] || k.zones[(size_t)f.zone].clip!=d.clip)continue;
-            e.type=Event::hit;e.key=f.key;e.channel=ch;e.owner=f.owner;e.drumNote=note.note;e.velocity=note.velocity;e.values=f.values;sink(ctx,e);
+        if(overflow){panic();return;}
+        std::sort(due.begin(),due.begin()+dueCount,[](const Due& a,const Due& b){if(a.offset!=b.offset)return a.offset<b.offset;if(a.clip!=b.clip)return a.clip<b.clip;return a.note<b.note;});
+        for(int di=0;di<dueCount;++di){
+            const auto& hit=due[(size_t)di];
+            while(pendingOffCount && offOffset()<=hit.offset)sendOff(offOffset());
+            const auto& clip=cfg.clips[(size_t)hit.clip];const auto& note=clip.notes[(size_t)hit.note];
+            const double beat=clock.ppq+hit.offset*step;
+            Event e;e.type=Event::hit;e.offset=hit.offset;e.drumNote=note.note;e.velocity=note.velocity;
+            bool fired=false;
+            for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if(!f.held || beat+step*.51<f.opens)continue;
+                const auto& key=cfg.keys[(size_t)f.key];
+                if(!key.parts[(size_t)note.note] || selectedClip(cfg,key,f)!=hit.clip)continue;
+                if(!fired){e.token=++hitGeneration;if(!e.token)e.token=++hitGeneration;fired=true;}
+                e.key=f.key;e.channel=f.channel;e.owner=f.owner;e.values=f.values;sink(ctx,e);
+            }
+            if(fired){
+                if(pendingOffCount==capacity){overflow=true;panic();return;}
+                const double onset=clip.origin+hit.cycle*clip.length+note.beat;
+                const double off=std::max(onset+note.duration,clock.ppq+(hit.offset+1)*step);
+                pendingOffs[(size_t)pendingOffCount++]={off,e.token};
+                std::push_heap(pendingOffs.begin(),pendingOffs.begin()+pendingOffCount,offOrder);
+            }
         }
+        while(pendingOffCount && offOffset()<finish)sendOff(offOffset());
+        cursor=finish;
     }
 }
 }

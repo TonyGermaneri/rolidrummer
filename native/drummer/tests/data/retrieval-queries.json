@@ -1,0 +1,15 @@
+{
+  "description": "Personal-library path-label relevance proxy. This does not replace listening or human relevance judgments. No corpus MIDI data is redistributed.",
+  "queries": [
+    {"query": "Heavy Rock", "labels": ["hard rock", "heavy rock"]},
+    {"query": "Bossa Nova", "labels": ["bossa"]},
+    {"query": "Swinging Jazz", "labels": ["jazz", "swing"]},
+    {"query": "Thrash Metal", "labels": ["metal", "thrash"]},
+    {"query": "Shuffled Blues", "labels": ["blues"]},
+    {"query": "Funky Drums", "labels": ["funk"]},
+    {"query": "Punk Rock", "labels": ["punk"]},
+    {"query": "Disco", "labels": ["disco"]},
+    {"query": "Reggae", "labels": ["reggae"]},
+    {"query": "Heavy Rock", "role": "fill", "labels": ["hard rock", "heavy rock"]}
+  ]
+}

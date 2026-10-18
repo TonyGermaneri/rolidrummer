@@ -28,6 +28,6 @@ ModMatrix matrixFromJson (const juce::var& json);
     playable, padNotes: [[note, id]], pads: [id] }, resolved against `sounds` (which also resolves
     every sound's VCO links).
 */
-PerformancePtr buildPerformance (const juce::var& meta, const std::map<std::string, std::shared_ptr<Sound>>& sounds);
+PerformancePtr buildPerformance (const juce::var& meta, const std::map<std::string, std::shared_ptr<Sound>>& sounds, bool contactEffectsOnly = false);
 
 } // namespace ssb

@@ -44,6 +44,39 @@ async function render(patterns = false) { const view = await mount(AssetBrowser,
 const directory = (root: any) => find(root, n => n.props['aria-label'] === 'Library directory')
 
 describe('browser component contracts', () => {
+  it('browses patch rows, filters and loads by stable ID without audio or file requests',async()=>{
+    const patches=[{id:'patch/A',path:'patch/A',name:'Alpha',folder:false,size:0,keyCount:16,patternCount:3},{id:'patch/B',path:'patch/B',name:'Beta',folder:false,size:0,keyCount:4,patternCount:2}]
+    const load=vi.fn(),view=await mount(AssetBrowser,{patches,currentId:'patch/A',onLoadPatch:load});cleanup.push(view.unmount)
+    const grid=find(view.root,n=>n.tag==='grid-contract')
+    expect(grid.props.rows).toHaveLength(2);expect(grid.props.rows[0].load).toBe('●')
+    grid.props.onUse(patches[1]);await settle();expect(load).toHaveBeenLastCalledWith('patch/B')
+    const filter=find(view.root,n=>n.props['aria-label']==='Filter patches');filter.props['onUpdate:modelValue']('beta');await settle()
+    expect(grid.props.rows.map((r:any)=>r.id)).toEqual(['patch/B'])
+    await vi.advanceTimersByTimeAsync(200);expect(fake.shared['browser/patches/navigation'].value.query).toBe('beta')
+    expect(fake.request).not.toHaveBeenCalled()
+    await view.update({patches,disabled:true,onLoadPatch:load});load.mockClear();grid.props.onUse(patches[0]);await settle();expect(load).not.toHaveBeenCalled()
+  })
+
+  it('updates the patch library without losing a graph gesture or accepting stale layout writes',async()=>{
+    const a={id:'patch/A/B',path:'patch/A/B',name:'A/B',folder:false,size:0,keyCount:16,patternCount:3}
+    const b={...a,id:'patch/C',path:'patch/C',name:'C'}
+    fake.shared['browser/patches/navigation']={revision:1,value:{path:'',query:'',view:'graph'}}
+    const key='graph/patches//layout'
+    fake.shared[key]={revision:1,value:{camera:{x:0,y:0,k:1},open:['Patches'],places:{}}}
+    const view=await mount(AssetBrowser,{patches:[a]});cleanup.push(view.unmount)
+    let graph=fake.graphs.at(-1)
+    expect(graph.source.nodes.filter((n:any)=>n.browserId).map((n:any)=>n.label)).toEqual(['A/B'])
+    await event(find(view.root,n=>n.props.class==='graph-box'),'pointerdownCapture')
+    graph.layout={camera:{x:10,y:20,k:2},open:[0],places:[[1,11,22]]}
+    fake.shared[key]={revision:2,value:{camera:{x:100,y:200,k:1},open:['Patches'],places:{}}};await settle()
+    await view.update({patches:[a,b]});graph=fake.graphs.at(-1)
+    expect(graph.layout.camera.x).toBe(10)
+    graph.callbacks.onArrange();await settle()
+    expect(graph.layout.camera.x).toBe(100)
+    expect(fake.shared[key].revision).toBe(2)
+    const writes=fake.write.mock.calls.length;view.unmount();cleanup.pop();expect(fake.write).toHaveBeenCalledTimes(writes)
+  })
+
   it('keeps typing separate from the loaded directory and accepts remote updates after a failed read', async () => {
     fake.shared['browser/sounds/navigation'] = { revision: 1, value: { path: '', query: '', view: 'grid' } }
     const { root } = await render()

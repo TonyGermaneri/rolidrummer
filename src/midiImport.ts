@@ -12,6 +12,7 @@ export function finishMidiImport(accept: boolean) {
  resolve?.(accept ? { channel: midiImport.channel, track: midiImport.track } : null)
 }
 export async function importPattern(asset: Asset): Promise<Clip | null> {
+ if (asset.libraryId) return request<Clip>('libraryPattern', asset.libraryId)
  if (resolveSelection) throw Error('Finish selecting the current MIDI pattern first.')
  const info = await request<MidiInfo>('inspectMidi', asset.path)
  if (!info.channels.length) throw Error('This MIDI file has no notes.')

@@ -9,7 +9,7 @@ export function setBoundary(zones: Zone[], index: number, value: number) {
 export function splitZone(zones: Zone[], index: number) {
  const zone = zones[index], low = index ? zones[index - 1]?.upper : 0
  if (!zone || zones.length >= maxZones || zone.upper - low < minZoneWidth * 2) return false
- zones.splice(index, 0, { upper: (low + zone.upper) / 2, clipId: zone.clipId })
+ zones.splice(index, 0, { ...JSON.parse(JSON.stringify(zone)), upper: (low + zone.upper) / 2 })
  return true
 }
 export function removeZone(zones: Zone[], index: number) {

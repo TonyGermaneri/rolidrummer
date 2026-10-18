@@ -341,6 +341,7 @@ function build() {
     showRowNumbers: true,
     showNewRow: false,
     selectionMode: 'row',
+    singleSelectionMode: true,
     borderDragBehavior: 'resize',
     columnHeaderClickBehavior: 'sort',
   })
@@ -356,11 +357,28 @@ function build() {
   })
   for (const event of ['scroll', 'sortcolumn', 'resizecolumn', 'reorder']) grid.value.addEventListener(event, announceView)
   grid.value.addEventListener('mouseup', () => { draggingView = false; announceView() })
+  // Item drags belong to the instrument, not the spreadsheet selection tool.
+  // Cancel the grid event (not NativeEvent) before it sets `selecting = true`.
+  let press = null
+  const moved = (event) => {
+    const native = event.NativeEvent || event.nativeEvent || event
+    if (press && Math.hypot(native.clientX - press.x, native.clientY - press.y) > 6) press.moved = true
+  }
+  grid.value.addEventListener('mousemove', moved)
   grid.value.addEventListener('mousedown', (e) => {
-    if (!e.cell?.isNormal) return
-    if (e.cell.header?.name === 'preview') return
-    const row=e.cell.data
-    emit('drag',row,e.NativeEvent || e.nativeEvent || e)
+    press = null
+    const cell = e.cell, native = e.NativeEvent || e.nativeEvent || e
+    if (native.button !== 0 || !cell?.isNormal || !cell.data) return
+    if (cell.dragContext && cell.dragContext !== 'cell') return
+    e.preventDefault()
+    press = { x: native.clientX, y: native.clientY, moved: false }
+    const one = grid.value
+    one.focus()
+    one.clearSelections()
+    one.setActiveCell(cell.columnIndex, cell.rowIndex)
+    one.selectRow(cell.rowIndex, false, false)
+    one.draw()
+    if (!['preview', 'load'].includes(cell.header?.name)) emit('drag', cell.data, native)
   })
 
   /*
@@ -400,6 +418,10 @@ function build() {
    * which one was hit.
    */
   grid.value.addEventListener('click', (event) => {
+    moved(event)
+    const dragged = press?.moved
+    press = null
+    if (dragged) { event.preventDefault(); return }
     const cell = event.cell
     if (!cell || !cell.data || !cell.header) return
     emit('cell', cell.header.name, cell.data)

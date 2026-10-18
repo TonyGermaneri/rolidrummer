@@ -70,7 +70,7 @@ inline float modScale (ModDest d) noexcept
         case ModDest::pitch:     return 12.0f;   // semitones
         case ModDest::cutoff:    return 5.0f;    // octaves
         case ModDest::resonance: return 10.0f;   // Q
-        case ModDest::grainSize: return 250.0f;  // ms
+        case ModDest::grainSize: return 24.0f;   // semitones of GRAIN (Granulator II's Grain<LFO)
         case ModDest::grainPos:  return 0.5f;
         default:                 return 1.0f;
     }
@@ -86,6 +86,10 @@ inline bool isBipolar (ModSource s) noexcept
 // ---------------------------------------------------------------------------------- sounds
 
 enum class TriggerMode : uint8_t { stop, restart, stack, hold };
+// Granulator II's menus (grainMath.ts Symmetry / SpraySign / AmpMode)
+enum class GrainSymmetry : uint8_t { std, fall, rise, noiz };
+enum class SpraySign : uint8_t { sym, right, left };
+enum class GrainAmpMode : uint8_t { flux, drop };   // 'void' in the page
 enum class FilterType : uint8_t { lowpass, highpass, bandpass, lowshelf, highshelf, peaking, notch, allpass };
 
 /** SoundSettings (types.ts), minus the purely visual fields. */
@@ -103,12 +107,33 @@ struct Settings
     FilterType filterType { FilterType::lowpass };
     float cutoff { 20000 }, resonance { 0.7f };
     float fEnvAmount { 0 }, fAttack { 0.001f }, fDecay { 0.3f }, fSustain { 0 }, fRelease { 0.2f };
-    // grains (a cloud when `grain` is on; STRETCH walks grains through the clip at SPEED). As types.ts's
-    // GRAIN_DEFAULTS: RATE is grains per second per stream, independent of SIZE; SHAPE the window's taper
+    // the grain cloud, after Granulator II (types.ts GRAIN_DEFAULTS, grainMath.ts); STRETCH walks grains through
+    // the clip at SPEED. Granulator II's parameter names in brackets.
     bool grain { false };
-    float grainSize { 80 };     // ms, at least one sample
-    float grainPos { 0.5f }, grainWidth { 0.1f }, grainRate { 30 }, grainShape { 1 }, grainJitter { 0 }, grainReverse { 0 };
-    float grainSpread { 0.3f }, grainStreams { 1 }, grainScatter { 0.5f }, grainDrift { 0 };
+    float grainFreq { 5 };          // [GrainSize] Hz: a grain lasts one period, two overlap
+    float grainFreqKey { 1 };       // [Grain<Key] 0..1
+    float grainFreqRnd { 0 };       // [Grain<Random] 0..1: up to ±25 semitones
+    float grainStereo { 0 };        // [GrainSpread] 0..1: left / right at GRAIN ÷× (1 + s²)
+    float grainPos { 0.5f };        // [FilePos] 0..1 of the clip
+    float grainPosKey { 0 };        // [FilePos<Key] -1..1: 1 % of the clip per semitone at ±1
+    float grainSpray { 0 };         // [Spray] ms
+    float grainSpraySlope { 1 };    // [SpraySlope] 1..10
+    SpraySign grainSpraySign { SpraySign::sym };
+    float grainWindow { 0 };        // [WindowShape] 0..1
+    GrainSymmetry grainSymmetry { GrainSymmetry::std };
+    float grainTuneKey { 1 };       // [Tune<Key] 0..1
+    float grainTuneRnd { 0 };       // [Tune<Rnd] 0..1
+    GrainAmpMode grainAmpMode { GrainAmpMode::flux };
+    float grainAmp { 0 };           // [FluxusAmount] 0..1
+    float grainVoid { 0 };          // [AmpVoidResidual] 0..1
+    bool grainFm { false };         // [FMOn]
+    float grainFmFreq { 220 };      // [FMFreq] Hz
+    float grainFmAmount { 0 };      // [FMAmount] 0..250 (× 0.02 ms)
+    float grainFmKey { 1 };         // [FM<Key] 0..2
+    bool grainScanOn { false };     // [ScanOn]
+    float grainScanTime { 100 };    // [ScanTime] %
+    float grainScanDist { 1 };      // [ScanDistance] 0..1
+    float grainScanCurve { 1 };     // [ScanCurve]
     float delayTime { 0.25f }, delayFeedback { 0.35f }, delayMix { 0 };
     float reverbSize { 2 }, reverbDecay { 3 }, reverbMix { 0 };
     float eqLow { 0 }, eqMid { 0 }, eqHigh { 0 };
@@ -216,6 +241,9 @@ using SoundPtr = std::shared_ptr<const Sound>;
 
 struct GlobalFx
 {
+    float cutoff { 20000 }, resonance { 0.7f };
+    // Reverb, delay, chorus, cutoff, resonance; -1 = knob, 0..4 = global surface.
+    std::array<int,5> sources {{ -1, -1, -1, -1, -1 }};
     float chorusRate { 0.6f }, chorusDepth { 0.5f }, chorusMix { 0 };
     float delayTime { 0.375f }, delayFeedback { 0.4f }, delayMix { 0 };   // seconds, when not synced
     bool delaySync { false };
@@ -228,6 +256,9 @@ struct Performance
 {
     float volume { 0.8f };
     bool muted { false }, mono { false }, play { false }, mpe { false };
+    // Drummer owns per-contact delay/room buses and never feeds the legacy
+    // shared per-sound convolvers. Keep their IR preparation out of that path.
+    bool contactEffectsOnly { false };
     float glide { 0 }, mpeBendRange { 48 }, bpm { 120 };
     GlobalFx fx;
     ModMatrix globalMod;

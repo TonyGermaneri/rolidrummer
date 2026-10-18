@@ -41,7 +41,8 @@ struct Run {
  void ready(){performance->byId[sound->id]=sound;engine.prepare(48000,257);engine.setPerformance(performance);float scratch=0;engine.process(&scratch,&scratch,0,nullptr,0);}
  Samples render(int frames,int block=64){Samples out((size_t)frames*2);std::array<float,257> left{},right{};for(int start=0;start<frames;start+=block){const int count=std::min(block,frames-start);engine.process(left.data(),right.data(),count,nullptr,0);for(int i=0;i<count;++i){out[(size_t)(start+i)*2]=left[(size_t)i];out[(size_t)(start+i)*2+1]=right[(size_t)i];}}return out;}
 };
-void set(ssb::Settings& s,int index,float value){const auto& p=ssb::parameters[index];if(p.integer)s.*(p.integer)=(int)std::lround(value);else s.*(p.member)=value;}
+void set(ssb::Settings& s,int index,float value){ssb::setParameter(s,ssb::parameters[index],value,.25);}
+
 double energy(const Samples& s){double sum=0;for(float x:s){check(std::isfinite(x),"Non-finite audio");sum+=x*x;}return sum;}
 double difference(const Samples&a,const Samples&b){check(a.size()==b.size(),"Mismatched render length");double maximum=0;for(size_t i=0;i<a.size();++i)maximum=std::max(maximum,double(std::abs(a[i]-b[i])));return maximum;}
 Samples mapped(const std::string&name,float value,bool route,int source=3){
@@ -61,6 +62,25 @@ int main(){try{
   {"attack",.018f},{"decay",.047f},{"sustain",.41f},{"release",.11f},
   {"cutoff",1800},{"resonance",2.4f},{"fEnvAmount",2},{"fAttack",.004f},{"fDecay",.08f},{"fSustain",.3f},{"fRelease",.12f},
   {"eqLow",-8},{"eqMid",7},{"eqHigh",-5},
+  {"grainFreq",55.500175f},
+  {"grainFreqKey",0.37f},
+  {"grainFreqRnd",0.37f},
+  {"grainStereo",0.37f},
+  {"grainPos",0.37f},
+  {"grainPosKey",-0.26f},
+  {"grainSpray",7400.0f},
+  {"grainSpraySlope",4.33f},
+  {"grainWindow",0.37f},
+  {"grainTuneKey",0.37f},
+  {"grainTuneRnd",0.37f},
+  {"grainAmp",0.37f},
+  {"grainVoid",0.37f},
+  {"grainFmFreq",7401.26f},
+  {"grainFmAmount",92.5f},
+  {"grainFmKey",0.74f},
+  {"grainScanTime",3715.75f},
+  {"grainScanDist",0.370063f},
+  {"grainScanCurve",1.055f},
   {"grainSize",33},{"grainPos",.23f},{"grainWidth",.42f},{"grainRate",110},{"grainShape",.3f},{"grainJitter",5},
   {"grainReverse",.8f},{"grainSpread",.8f},{"grainStreams",4},{"grainScatter",.9f},{"grainDrift",.6f}
  };
@@ -78,12 +98,39 @@ int main(){try{
  // Choke uses the mapped group, and must not choke an unrelated key.
  auto choke=[](bool sameGroup){Run run;run.sound->s.pan=-1;run.sound->expressionRouteCount=1;run.sound->expressionRoutes[0]={3,ssb::parameterIndex("choke"),0,3,1,0};auto other=std::make_shared<ssb::Sound>(*run.sound);other->id="choke-other";other->s.pan=1;run.performance->byId[other->id]=other;run.ready();run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,1,0});run.render(1000);run.engine.drumHit(other,2,2,1,{1,.5f,0,sameGroup?1.f:0.f,0});run.render(512);return run.render(1000);};
  auto choked=choke(true),unchoked=choke(false);double stopped=0,ringing=0;for(size_t i=0;i<choked.size();i+=2){stopped+=choked[i]*choked[i];ringing+=unchoked[i]*unchoked[i];}check(stopped<1e-8&&ringing>1,"Mapped choke did not stop only the matching group");
- // Changing grain stream count while sounding must affect the actual source,
+ // New cloud controls affect sounding MPE contacts independently,
  // and all live grain controls must retain buffer-invariant timing.
- for(const std::string target:{"grainStreams","grainDrift","grainSize","grainRate"}){
-  auto grains=[&](bool change,int block){Run run;run.sound->s.grain=true;run.sound->s.grainSize=40;const int index=ssb::parameterIndex(target);float lo=0,hi=1;if(target=="grainStreams"){lo=1;hi=6;}else if(target=="grainSize"){lo=20;hi=90;}else if(target=="grainRate"){lo=25;hi=120;}
+ for(const std::string target:{"grainFreq","grainStereo","grainWindow","grainSpray","grainTuneRnd","grainFreqRnd","grainFmAmount","grainScanTime"}){
+  auto grains=[&](bool change,int block){Run run;run.sound->s.grain=true;run.sound->s.grainFreq=30;run.sound->s.grainFm=true;run.sound->s.grainScanOn=target=="grainScanTime";run.sound->s.grainScanDist=.25f;const int index=ssb::parameterIndex(target);float lo=0,hi=1;if(target=="grainFreq"){lo=20;hi=90;}else if(target=="grainSpray"){hi=60;}else if(target=="grainFmAmount"){hi=100;}else if(target=="grainScanTime"){lo=400;hi=100;}
+
    run.sound->expressionRouteCount=1;run.sound->expressionRoutes[0]={3,index,lo,hi,1,8};run.ready();run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,0,0});run.render(1023,block);if(change)run.engine.drumExpression(1,{1,.5f,0,1,0});return run.render(7000,block);};
   auto changing=grains(true,64);check(difference(changing,grains(false,64))>.001,"Live grain control has no audible effect: "+target);check(difference(changing,grains(true,257))<.00003,"Live grain control depends on buffer size: "+target);
+ }
+ // A granular CC74 movement belongs to its contact, not the whole cloud bus.
+ auto cloudPair=[](bool change){Run run;run.sound->s.grain=true;run.sound->s.grainFreq=30;run.sound->s.pan=-1;
+  run.sound->expressionRouteCount=1;run.sound->expressionRoutes[0]={2,ssb::parameterIndex("grainFreq"),30,90,1,8};
+  auto other=std::make_shared<ssb::Sound>(*run.sound);other->id="other-cloud";other->s.pan=1;other->expressionRouteCount=0;run.performance->byId[other->id]=other;run.ready();
+  run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,0,0});run.engine.drumHit(other,2,2,1,{1,.5f,0,0,0});run.render(2000);
+  if(change)run.engine.drumExpression(1,{1,.5f,1,0,0});return run.render(8000);
+ };
+ const auto cloudMoved=cloudPair(true),cloudStill=cloudPair(false);double changedLeft=0;
+ for(size_t i=0;i<cloudMoved.size();i+=2){changedLeft+=std::abs(cloudMoved[i]-cloudStill[i]);check(std::abs(cloudMoved[i+1]-cloudStill[i+1])<.00001,"Slide changed another contact's grains");}
+ check(changedLeft>1,"Slide did not alter its own granular contact");
+ // Very long grains still relinquish their voice when the drum release ends.
+ {Run run;run.sound->s.grain=true;run.sound->s.grainFreq=1.f/3600;run.sound->s.release=.01f;run.ready();
+  run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,0,0});run.render(500);
+  run.engine.drumRelease(1,{1,.5f,0,0,0},false);run.render(4800);
+  check(run.engine.activeVoices()==0,"Long grains retained a silent released drum voice");
+ }
+ // Exercise cloud modulation, FM, scanning and window changes with the heap guard.
+ {Run run;run.sound->s.grain=true;run.sound->s.grainFreq=35;run.sound->s.grainFm=true;run.sound->s.grainFmAmount=30;
+  run.sound->s.grainScanOn=true;run.sound->s.grainSymmetry=ssb::GrainSymmetry::noiz;run.sound->s.grainTuneRnd=.4f;
+  run.sound->expressionRouteCount=1;run.sound->expressionRoutes[0]={2,ssb::parameterIndex("grainWindow"),0,1,1,8};run.ready();
+  std::array<float,128> l{},r{};const auto alloc=realtime::allocations,freed=realtime::deletions;realtime::watching=true;
+  run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,0,0});
+  for(int i=0;i<100;++i){run.engine.drumExpression(1,{1,.5f,float(i%10)/9,0,0});run.engine.process(l.data(),r.data(),128,nullptr,0);}
+  run.engine.drumRelease(1,{1,.5f,0,0,0},true);realtime::watching=false;
+  check(realtime::allocations==alloc&&realtime::deletions==freed,"Grain modulation allocated or destroyed heap memory");
  }
  // Continuous effect sweeps retain their wet output and sample timing across
  // more settings than SSB's original fixed delay/reverb slot pools can hold.
@@ -133,6 +180,21 @@ int main(){try{
   double stale=0;for(int block=0;block<160;++block){fx.begin();l.fill(0);r.fill(0);fx.process(l.data(),r.data(),32);for(int i=0;i<32;++i)stale+=std::abs(l[size_t(i)])+std::abs(r[size_t(i)]);}
   check(stale==0,"Reused effect storage leaked the previous contact's samples");
  }
+ // Bus mapping is independent of voices and equivalent to the master knob.
+ {
+  auto busRender=[](int target,bool mapped,int source=0){Run run;auto& fx=run.performance->fx;const float x=.65f;
+   if(mapped)fx.sources[(size_t)target]=source;
+   else {if(target==0)fx.reverbMix=x;if(target==1)fx.delayMix=x;if(target==2)fx.chorusMix=x;if(target==3)fx.cutoff=20*std::pow(1000.f,x);if(target==4)fx.resonance=.1f+19.9f*x;}
+   if(target==4)fx.cutoff=700;
+   run.ready();if(mapped)run.engine.drumGlobal(source,x);
+   run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,1,0});return run.render(24000);
+  };
+  for(int target=1;target<5;++target){auto knob=busRender(target,false);for(int source=0;source<5;++source)check(difference(knob,busRender(target,true,source))<1e-5,"Master surface differs from matching knob");}
+  Run dry;dry.ready();dry.engine.drumHit(dry.sound,1,1,1,{1,.5f,0,1,0});const auto original=dry.render(24000);
+  for(int target:{1,2,3})check(difference(original,busRender(target,true))>1e-4,"Master effect did not alter the mixed audio");
+  Run tails;tails.performance->fx.sources[0]=4;tails.ready();tails.engine.drumGlobal(4,.7f);tails.engine.drumHit(tails.sound,1,1,1,{1,.5f,0,1,0});tails.render(24000);tails.engine.drumRelease(1,{1,.5f,0,1,0},true);tails.render(12000);check(energy(tails.render(24000))>1e-5,"Master reverb binding has no audible tail");
+  tails.engine.drumPanic();check(energy(tails.render(24000))<1e-9,"Panic left master effect tails");
+ }
  // Offline bounces can run without a message-thread timer. Repeated notes
  // using the current immutable kit must not consume retirement capacity.
  Run offline;offline.ready();std::array<float,128> offlineLeft{},offlineRight{};
@@ -159,6 +221,6 @@ int main(){try{
  stressed.engine.collectGarbage();check(stressed.engine.canActivatePerformance(),"Retirement backpressure did not recover");
  realtime::watching=true;stressed.engine.drumHit(stressed.sound,2,20000,1,{1,.5f,0,1,0});stressed.engine.process(leftBuffer.data(),rightBuffer.data(),128,nullptr,0);realtime::watching=false;
  check(realtime::allocations==0 && realtime::deletions==0,"Audio path allocates after retirement recovery");
- std::cout<<"expression: 42 knob equivalences, five contact and five global sources, buffer-invariant expression/FX sweeps, contact isolation, lift tails, Glide routing and real-time retirement stress passed\n";
+ std::cout<<"expression: legacy and current knob equivalences, five contact and five global sources, buffer-invariant expression/FX sweeps, contact isolation, lift tails, Glide routing and real-time retirement stress passed\n";
  return 0;
  }catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

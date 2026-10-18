@@ -4,17 +4,26 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 build="${1:-$root/native/build-universal}"
 out="${2:-$root/release}"
 artifacts="$build/plugin/RoliDrummer_artefacts/Release"
+python3 "$root/native/tools/verify-neural-bundles.py" "$artifacts"
 version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$artifacts/AU/Roli Drummer.component/Contents/Info.plist")"
 mkdir -p "$out"
 for item in 'AU/Roli Drummer.component' 'VST3/Roli Drummer.vst3' 'Standalone/Roli Drummer.app'; do
  bundle="$artifacts/$item"
  codesign --verify --strict "$bundle"
- architectures="$(/usr/bin/lipo -archs "$bundle/Contents/MacOS/Roli Drummer")"
+ neural="$bundle/Contents/Resources/neural"
+ test -s "$neural/manifest.json"
+ test -s "$neural/minilm/model.onnx"
+ test -s "$neural/minilm/vocab.txt"
+ runtime="$neural/onnxruntime/lib/libonnxruntime.1.23.1.dylib"
+ codesign --verify --strict "$runtime"
+ for executable in "$bundle/Contents/MacOS/Roli Drummer" "$runtime"; do
+ architectures="$(/usr/bin/lipo -archs "$executable")"
  for architecture in arm64 x86_64; do
   case " $architectures " in
    *" $architecture "*) ;;
-   *) echo "Missing $architecture slice in $bundle" >&2; exit 1;;
+   *) echo "Missing $architecture slice in $executable" >&2; exit 1;;
   esac
+ done
  done
  name="${bundle##*/}"
  ditto -c -k --keepParent --sequesterRsrc "$bundle" "$out/$name-$version-macOS-universal.zip"

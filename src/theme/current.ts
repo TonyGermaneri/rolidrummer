@@ -1,7 +1,8 @@
 import { computed, ref } from 'vue'
 import { themeById, themeVars, type Theme } from './themes'
 export const themeId=ref('noir49')
-export const currentTheme=computed(()=>themeById(themeId.value))
+export const themePreview=ref<string|null>(null)
+export const currentTheme=computed(()=>themeById(themePreview.value??themeId.value))
 function blend(a:string,b:string,t:number){return '#'+[1,3,5].map(i=>Math.round(parseInt(a.slice(i,i+2),16)*(1-t)+parseInt(b.slice(i,i+2),16)*t).toString(16).padStart(2,'0')).join('')}
 export function visualVars(t:Theme){
  const vars=themeVars(t)

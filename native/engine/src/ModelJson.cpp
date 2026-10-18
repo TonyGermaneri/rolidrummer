@@ -1,4 +1,5 @@
 #include <ssb/ModelJson.h>
+#include <ssb/Parameters.h>
 
 namespace ssb
 {
@@ -217,36 +218,52 @@ Settings settingsFromJson (const juce::var& o)
     s.fDecay = num (o, "fDecay", s.fDecay);
     s.fSustain = num (o, "fSustain", s.fSustain);
     s.fRelease = num (o, "fRelease", s.fRelease);
-    if (o.hasProperty ("grain"))
+    if (o.hasProperty ("grainFreq"))
     {
         s.grain = flag (o, "grain", false);
-        s.grainSize = num (o, "grainSize", s.grainSize);
+        // down to an hour-long grain: GRAIN reaches below Granulator II's 0.25 Hz for long samples (grainMath.ts)
+        s.grainFreq = std::clamp (num (o, "grainFreq", s.grainFreq), 1.0f / 3600.0f, 150.0f);
+        s.grainFreqKey = num (o, "grainFreqKey", s.grainFreqKey);
+        s.grainFreqRnd = num (o, "grainFreqRnd", s.grainFreqRnd);
+        s.grainStereo = num (o, "grainStereo", s.grainStereo);
         s.grainPos = num (o, "grainPos", s.grainPos);
-        s.grainWidth = num (o, "grainWidth", s.grainWidth);
-        s.grainRate = num (o, "grainRate", s.grainRate);
-        s.grainShape = num (o, "grainShape", s.grainShape);
-        s.grainJitter = num (o, "grainJitter", s.grainJitter);
-        s.grainReverse = num (o, "grainReverse", s.grainReverse);
-        s.grainSpread = num (o, "grainSpread", s.grainSpread);
-        s.grainStreams = num (o, "grainStreams", s.grainStreams);
-        s.grainScatter = num (o, "grainScatter", s.grainScatter);
-        s.grainDrift = num (o, "grainDrift", s.grainDrift);
+        s.grainPosKey = num (o, "grainPosKey", s.grainPosKey);
+        s.grainSpray = num (o, "grainSpray", s.grainSpray);
+        s.grainSpraySlope = num (o, "grainSpraySlope", s.grainSpraySlope);
+        const auto sign = str (o, "grainSpraySign");
+        s.grainSpraySign = sign == "right" ? SpraySign::right : sign == "left" ? SpraySign::left : SpraySign::sym;
+        s.grainWindow = num (o, "grainWindow", s.grainWindow);
+        const auto sym = str (o, "grainSymmetry");
+        s.grainSymmetry = sym == "fall" ? GrainSymmetry::fall : sym == "rise" ? GrainSymmetry::rise
+                        : sym == "noiz" ? GrainSymmetry::noiz : GrainSymmetry::std;
+        s.grainTuneKey = num (o, "grainTuneKey", s.grainTuneKey);
+        s.grainTuneRnd = num (o, "grainTuneRnd", s.grainTuneRnd);
+        s.grainAmpMode = str (o, "grainAmpMode") == "void" ? GrainAmpMode::drop : GrainAmpMode::flux;
+        s.grainAmp = num (o, "grainAmp", s.grainAmp);
+        s.grainVoid = num (o, "grainVoid", s.grainVoid);
+        s.grainFm = flag (o, "grainFm", false);
+        s.grainFmFreq = num (o, "grainFmFreq", s.grainFmFreq);
+        s.grainFmAmount = num (o, "grainFmAmount", s.grainFmAmount);
+        s.grainFmKey = num (o, "grainFmKey", s.grainFmKey);
+        s.grainScanOn = flag (o, "grainScanOn", false);
+        s.grainScanTime = std::max (1.0f, num (o, "grainScanTime", s.grainScanTime));
+        s.grainScanDist = num (o, "grainScanDist", s.grainScanDist);
+        s.grainScanCurve = num (o, "grainScanCurve", s.grainScanCurve);
     }
-    else if (const float size = num (o, "grainSize", 0); size > 0)
+    else
     {
-        // saved before 0.2 (types.ts migrateGrains): size > 0 was on, grainDensity counted overlapping grains
-        s.grain = true;
-        s.grainSize = size;
-        s.grainRate = std::clamp (num (o, "grainDensity", 2) / (size / 1000.0f), 0.5f, 1000.0f);
-        s.grainShape = 1;
-        s.grainPos = num (o, "grainPos", 0.5f);
-        s.grainWidth = num (o, "grainWidth", 0);
-        s.grainJitter = num (o, "grainJitter", 0);
-        s.grainReverse = num (o, "grainReverse", 0);
-        s.grainSpread = num (o, "grainSpread", 0);
-        s.grainStreams = num (o, "grainStreams", 1);
-        s.grainScatter = num (o, "grainScatter", 0);
-        s.grainDrift = num (o, "grainDrift", 0);
+        // saved before the Granulator II model (types.ts migrateGrains): the grain length (SIZE, ms) and POS
+        // carry over, the rest is Granulator II's defaults; before 0.2 a SIZE of 0 was off
+        const float size = num (o, "grainSize", 0);
+        s.grain = o.hasProperty ("grain") ? flag (o, "grain", false) : size > 0;
+        s.grainPos = num (o, "grainPos", s.grainPos);
+        if (size > 0)
+            s.grainFreq = std::clamp (1000.0f / size, 1.0f / 3600.0f, 150.0f);
+    }
+    const Settings grainDefaults;
+    for(const auto& p:parameters)if(std::string_view(p.name).starts_with("grain")&&p.member){
+        auto& value=s.*(p.member);
+        value=std::isfinite(value)?std::clamp(value,p.min,p.max):grainDefaults.*(p.member);
     }
     s.delayTime = num (o, "delayTime", s.delayTime);
     s.delayFeedback = num (o, "delayFeedback", s.delayFeedback);
@@ -297,9 +314,10 @@ std::shared_ptr<Sound> soundFromJson (const juce::var& o, const SampleLookup& sa
     return sound;
 }
 
-PerformancePtr buildPerformance (const juce::var& meta, const std::map<std::string, std::shared_ptr<Sound>>& sounds)
+PerformancePtr buildPerformance (const juce::var& meta, const std::map<std::string, std::shared_ptr<Sound>>& sounds, bool contactEffectsOnly)
 {
     auto p = std::make_shared<Performance>();
+    p->contactEffectsOnly = contactEffectsOnly;
     p->volume = num (meta, "volume", 0.8f);
     p->muted = flag (meta, "muted", false);
     p->mono = flag (meta, "mono", false);
@@ -310,6 +328,12 @@ PerformancePtr buildPerformance (const juce::var& meta, const std::map<std::stri
     p->bpm = num (meta, "bpm", 120);
     if (const auto fx = meta.getProperty ("fx", {}); fx.isObject())
     {
+        p->fx.cutoff = std::clamp (num (fx, "cutoff", 20000), 20.f, 20000.f);
+        p->fx.resonance = std::clamp (num (fx, "resonance", .7f), .1f, 20.f);
+        if (auto bindings = fx.getProperty ("bindings", {}); bindings.isObject()) {
+            const char* names[] = { "reverbMix", "delayMix", "chorusMix", "cutoff", "resonance" };
+            for (size_t i = 0; i < 5; ++i) p->fx.sources[i] = std::clamp ((int) num (bindings, names[i], -1), -1, 4);
+        }
         p->fx.chorusRate = num (fx, "chorusRate", p->fx.chorusRate);
         p->fx.chorusDepth = num (fx, "chorusDepth", p->fx.chorusDepth);
         p->fx.chorusMix = num (fx, "chorusMix", 0);

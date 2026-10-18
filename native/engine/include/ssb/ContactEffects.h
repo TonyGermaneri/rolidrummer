@@ -65,8 +65,12 @@ public:
         }
     }
     void reset() noexcept { for(auto& bus:buses){bus.owner=0;bus.reset();bus.clearInput();} }
-    int acquire(uint64_t owner) noexcept {
+    int find(uint64_t owner) const noexcept {
         for(int i=0;i<capacity;++i)if(buses[size_t(i)].owner==owner)return i;
+        return -1;
+    }
+    int acquire(uint64_t owner) noexcept {
+        if(const int existing=find(owner);existing>=0)return existing;
         int chosen=-1;
         for(int i=0;i<capacity;++i){const auto& b=buses[size_t(i)];if(!b.owner){chosen=i;break;}if(b.released&&(chosen<0||b.age<buses[size_t(chosen)].age))chosen=i;}
         // Sixteen MPE contacts plus sixteen released tails fit simultaneously.

@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <limits>
+#include <cstring>
 #include <stdexcept>
 namespace drummer {
 namespace {
@@ -66,32 +67,55 @@ juce::var defaultDocument(){
   keys.add(object({{"note",get(v,"note")},{"name",get(v,"name")},{"parts",get(v,"parts")},{"zoneSource",2},{"zones",zones},{"routes",get(v,"routes")},{"mpeDefaultsVersion",1},{"sound",object({{"path",get(v,"source")},{"s",settings}})}}));
  }
  juce::Array<juce::var> cc;for(int n:{107,109,111,113,114})cc.add(n);
- return object({{"version",1},{"name",get(data,"name")},{"keys",keys},{"clips",get(data,"clips")},{"templateZones",zones},{"launchGrid",.25},{"switchGrid",.25},{"hardRelease",false},{"volume",.8},{"bpm",120.},{"globalCC",cc},{"globalRoutes",juce::Array<juce::var>()}});
+ return object({{"version",1},{"id","builtin:factory"},{"name",get(data,"name")},{"keys",keys},{"clips",get(data,"clips")},{"templateZones",zones},{"launchGrid",.25},{"switchGrid",.25},{"hardRelease",false},{"sustainCC",64},{"volume",.8},{"bpm",120.},{"globalCC",cc},{"globalRoutes",juce::Array<juce::var>()}});
 }
 std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  auto doc=input.clone();
  if((int)get(doc,"version")!=1)throw std::runtime_error("Unsupported patch version");
+ if(auto id=get(doc,"id");!id.isVoid()&&(!id.isString()||id.toString().isEmpty()||id.toString().length()>128))throw std::runtime_error("Invalid patch identity");
+ if(auto neural=get(doc,"neural");!neural.isVoid()&&(!neural.isObject()||(int)get(neural,"version")!=1))throw std::runtime_error("Unsupported neural patch version");
  if(auto*clips=get(doc,"clips").getArray())for(auto&clip:*clips)for(int p=0;p<3;++p)if(get(clip,"id").toString()=="factory-"+juce::String(p)&&(double)get(clip,"length")==4.&&(sameNotes(get(clip,"notes"),legacyGrooveNotes(p,true))||sameNotes(get(clip,"notes"),legacyGrooveNotes(p,false)))){
   auto factoryClips=get(defaultDocument(),"clips");const auto&replacement=(*factoryClips.getArray())[p];for(const char*field:{"notes","length","name"})clip.getDynamicObject()->setProperty(field,get(replacement,field));
  }
  if(auto*keys=get(doc,"keys").getArray())for(auto&key:*keys)if((int)get(key,"mpeDefaultsVersion")!=1){auto routes=get(key,"routes");if(!routes.isArray()||routes.getArray()->isEmpty())key.getDynamicObject()->setProperty("routes",mpeRoutes());key.getDynamicObject()->setProperty("mpeDefaultsVersion",1);}
+ // Canonical, bounded master settings are saved in portable patches and DAW state.
+ auto fx=get(doc,"fx");if(!fx.isObject())fx=object({});
+ struct FxField{const char* name;double lo,hi,value;};
+ for(const auto& f:std::initializer_list<FxField>{{"reverbMix",0,1,0},{"reverbSize",.1,8,3},{"reverbDecay",.5,10,3},{"delayMix",0,1,0},{"delayTime",.01,2,.375},{"delayFeedback",0,.9,.4},{"delayBeats",.125,8,.75},{"chorusMix",0,1,0},{"chorusRate",.05,8,.6},{"chorusDepth",0,1,.5},{"cutoff",20,20000,20000},{"resonance",.1,20,.7}})
+  fx.getDynamicObject()->setProperty(f.name,number(fx,f.name,f.value,f.lo,f.hi));
+ fx.getDynamicObject()->setProperty("delaySync",(bool)get(fx,"delaySync",false));
+ auto bindings=get(fx,"bindings");if(!bindings.isObject())bindings=object({});
+ for(const char* name:{"reverbMix","delayMix","chorusMix","cutoff","resonance"}){
+  double v=(double)get(bindings,name,-1);
+  bindings.getDynamicObject()->setProperty(name,std::isfinite(v)&&v>=0&&v<=4&&v==std::floor(v)?(int)v:-1);
+ }
+ fx.getDynamicObject()->setProperty("bindings",bindings);doc.getDynamicObject()->setProperty("fx",fx);
  auto r=std::make_unique<Runtime>();auto& c=r->config;
  c.launchGrid=number(doc,"launchGrid",.25,0,16);c.switchGrid=number(doc,"switchGrid",.25,0,16);c.hardRelease=(bool)get(doc,"hardRelease",false);
+ c.sustainCC=(int)number(doc,"sustainCC",64,0,119);if(c.sustainCC==74)c.sustainCC=64;
+ doc.getDynamicObject()->setProperty("sustainCC",c.sustainCC);
  c.hysteresis=(float)number(doc,"hysteresis",.015,0,.1);c.masterChannel=(int)number(doc,"masterChannel",0,0,15);
  std::map<juce::String,int> clipIndex;std::map<juce::String,int> contentIndex;
  std::set<juce::String> boundClips,allClipIds;
  if(auto keys=get(doc,"keys");auto* list=keys.getArray())for(const auto& key:*list)
-  if(auto zones=get(key,"zones");auto* items=zones.getArray())for(const auto& zone:*items)boundClips.insert(get(zone,"clipId").toString());
+  if(auto zones=get(key,"zones");auto* items=zones.getArray())for(const auto& zone:*items){
+   boundClips.insert(get(zone,"clipId").toString());
+   auto candidates=get(zone,"candidates");if(auto* group=candidates.getArray()){
+    if(group->size()>maxCandidates)throw std::runtime_error("A region supports at most 16 pattern candidates");
+    for(const auto& candidate:*group)boundClips.insert(get(candidate,"clipId").toString());
+   }
+  }
  if(auto value=get(doc,"clips");auto* list=value.getArray())for(const auto& item:*list){
   auto id=get(item,"id").toString();if(id.isEmpty() || !allClipIds.insert(id).second)throw std::runtime_error("Pattern IDs must be unique");
   if(!boundClips.count(id))continue; // Library choices are retained in the patch, but only bound patterns need a bus.
   auto identity=juce::JSON::toString(get(item,"notes"))+":"+get(item,"length").toString()+":"+get(item,"origin",0).toString();
   if(contentIndex.count(identity)){clipIndex[id]=contentIndex[identity];continue;}
-  Clip clip;clip.id=(uint32_t)c.clips.size()+1;clip.length=number(item,"length",4,.001,100000);clip.origin=number(item,"origin",0,-100000,100000);
+  Clip clip;clip.id=(uint64_t)juce::SHA256(identity.toUTF8()).toHexString().substring(0,16).getHexValue64();if(!clip.id)clip.id=1;clip.length=number(item,"length",4,.001,100000);clip.origin=number(item,"origin",0,-100000,100000);
   if(auto value=get(item,"notes");auto* notes=value.getArray())for(const auto& n:*notes){
    if(clip.notes.size()>=100000)throw std::runtime_error("Pattern exceeds 100000 notes");
    clip.notes.push_back({number(n,"beat",0,0,clip.length),number(n,"duration",.1,.00001,100000),(int)number(n,"note",36,0,127),(float)number(n,"velocity",1,0,1)});
   }
+  if(c.clips.size()>=maxRuntimeClips)throw std::runtime_error("The prepared performance exceeds the clip budget");
   clipIndex[id]=(int)c.clips.size();contentIndex[identity]=(int)c.clips.size();prepareClip(clip);c.clips.push_back(std::move(clip));
  }
  std::map<std::string,std::shared_ptr<ssb::Sound>> sounds;std::map<juce::String,ssb::SamplePtr> samples;
@@ -106,6 +130,22 @@ std::unique_ptr<Runtime> compileDocument(const juce::var& input){
   key.zoneCount=zs->size();float previous=0;
   for(int i=0;i<zs->size();++i){const auto& z=(*zs)[i];float upper=(float)number(z,"upper",1,0,1);if(upper<=previous || (i==zs->size()-1 && upper!=1))throw std::runtime_error("Zone boundaries must increase and finish at 1");previous=upper;
    auto id=get(z,"clipId").toString();key.zones[(size_t)i]={upper,clipIndex.count(id)?clipIndex[id]:-1};
+   auto choices=get(z,"candidates");if(auto* list=choices.getArray();list&&!list->isEmpty()){
+    PatternGroup group;
+    for(const auto& choice:*list){
+     const auto clipId=get(choice,"clipId").toString();if(!clipIndex.count(clipId))throw std::runtime_error("A pattern candidate is missing its resolved note data");
+     const auto position=get(choice,"position");const auto* values=position.getArray();if(!values||values->size()!=intentDimensions)throw std::runtime_error("A pattern candidate needs four intent coordinates");
+     auto& candidate=group.candidates[(size_t)group.count++];candidate.clip=clipIndex[clipId];
+     for(int d=0;d<intentDimensions;++d){const double v=(double)(*values)[d];if(!std::isfinite(v)||v<0||v>1)throw std::runtime_error("Pattern intent coordinates must be finite values from zero to one");candidate.position[(size_t)d]=(float)v;}
+    }
+    key.zones[(size_t)i].group=(int)c.groups.size();c.groups.push_back(group);key.intentEnabled=true;
+   }
+  }
+  const auto intent=get(item,"patternIntent");key.intentEnabled=key.intentEnabled&&(bool)get(intent,"enabled",true);
+  key.intentSlewMs=(float)number(intent,"smoothingMs",35,0,1000);key.intentPenalty=(float)number(intent,"transitionPenalty",.025,0,1);key.intentDwell=number(intent,"minimumDwell",.25,0,16);
+  if(auto weights=get(intent,"weights");auto* values=weights.getArray()){
+   if(values->size()!=intentDimensions)throw std::runtime_error("Pattern intent needs four weights");
+   for(int d=0;d<intentDimensions;++d){const double v=(double)(*values)[d];key.intentWeights[(size_t)d]=std::isfinite(v)?(float)std::clamp(v,0.,1.):0.f;}
   }
   auto snd=get(item,"sound");auto path=get(snd,"path").toString();if(path.isEmpty())continue;
   ssb::SamplePtr loaded;
@@ -129,8 +169,15 @@ std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  }
  juce::Array<juce::var> pads;for(auto&[id,sound]:sounds)pads.add(juce::String(id));
  auto meta=object({{"volume",number(doc,"volume",.8,0,1.5)},{"play",false},{"pads",pads},{"bpm",number(doc,"bpm",120,20,400)},{"fx",get(doc,"fx")}});
- r->performance=ssb::buildPerformance(meta,sounds);
+ r->performance=ssb::buildPerformance(meta,sounds,true);
  if(auto value=get(doc,"globalCC");auto* cc=value.getArray())for(int i=0;i<std::min(5,cc->size());++i)r->cc[(size_t)i]=std::clamp((int)(*cc)[i],0,127);
+ // Only pattern/routing changes retarget held contacts. Sound/FX edits keep
+ // current intent, dwell and pending switches intact. Hashing stays off audio.
+ juce::MemoryOutputStream shape;
+ for(const auto& key:c.keys){shape.writeBool(key.enabled);shape.writeInt(key.zoneSource);shape.writeInt(key.zoneCount);shape.writeBool(key.intentEnabled);for(bool part:key.parts)shape.writeBool(part);for(int i=0;i<key.zoneCount;++i){const auto& zone=key.zones[(size_t)i];shape.writeFloat(zone.upper);shape.writeInt(zone.clip);shape.writeInt(zone.group);}}
+ shape.writeInt((int)c.clips.size());for(const auto& clip:c.clips){shape.writeInt64((juce::int64)clip.id);shape.writeDouble(clip.length);shape.writeDouble(clip.origin);}
+ shape.writeInt((int)c.groups.size());for(const auto& group:c.groups){shape.writeInt(group.count);for(int i=0;i<group.count;++i){const auto& candidate=group.candidates[(size_t)i];shape.writeInt(candidate.clip);for(float coordinate:candidate.position)shape.writeFloat(coordinate);}}
+ const auto digest=juce::SHA256(shape.getMemoryBlock()).getRawData();std::memcpy(r->patternHash.data(),digest.getData(),r->patternHash.size());
  r->json=juce::JSON::toString(doc,true);return r;
 }
 juce::var waveform(const juce::var& input){
@@ -138,60 +185,6 @@ juce::var waveform(const juce::var& input){
  auto path=get(sound,"path").toString();
  auto s=sample(path.startsWith("factory:")?path:cacheSound(sound).getFullPathName());
  juce::Array<juce::var> peaks;for(size_t i=0;i<256;++i){float peak=0;for(size_t j=i*s->frames()/256;j<(i+1)*s->frames()/256;++j)peak=std::max(peak,std::abs(s->channels[0][j]));peaks.add(peak);}return object({{"peaks",peaks},{"duration",s->duration()}});
-}
-namespace {
-juce::MidiFile readMidi(const juce::File& file) {
- if(file.getSize()>32*1024*1024)throw std::runtime_error("MIDI file exceeds 32 MB");
- juce::FileInputStream in(file);juce::MidiFile midi;
- if(!in.openedOk() || !midi.readFrom(in))throw std::runtime_error("Invalid MIDI file");
- if(midi.getTimeFormat()<=0)throw std::runtime_error("SMPTE MIDI timing is not supported");
- return midi;
-}
-juce::var midiInfo(const juce::MidiFile& midi) {
- std::array<int,17> channels{};juce::Array<juce::var> tracks;
- for(int t=0;t<midi.getNumTracks();++t) {
-  std::array<int,17> counts{};int total=0;juce::String name;
-  for(int i=0;i<midi.getTrack(t)->getNumEvents();++i) {
-   const auto& m=midi.getTrack(t)->getEventPointer(i)->message;
-   if(m.isTrackNameEvent())name=m.getTextFromTextMetaEvent();
-   if(m.isNoteOn()){++counts[(size_t)m.getChannel()];++channels[(size_t)m.getChannel()];++total;}
-  }
-  juce::Array<juce::var> active;for(int ch=1;ch<=16;++ch)if(counts[(size_t)ch])active.add(ch);
-  tracks.add(object({{"index",t},{"name",name.isEmpty()?"Track "+juce::String(t+1):name},{"notes",total},{"channels",active}}));
- }
- juce::Array<juce::var> active;for(int ch=1;ch<=16;++ch)if(channels[(size_t)ch])active.add(ch);
- int automatic=channels[10]?10:active.size()==1?(int)active[0]:-1;
- return object({{"tracks",tracks},{"channels",active},{"autoChannel",automatic},{"ppq",midi.getTimeFormat()}});
-}
-}
-juce::var inspectMidi(const juce::File& file){return midiInfo(readMidi(file));}
-juce::var importMidi(const juce::File& file,int channel,int track){
- const auto midi=readMidi(file);const int ppq=midi.getTimeFormat();
- if(channel< -1||channel>16||track< -1||track>=midi.getNumTracks())throw std::runtime_error("Invalid MIDI track or channel selection");
- if(channel==-1) {
-  std::array<bool,17> active{};
-  for(int t=0;t<midi.getNumTracks();++t)if(track==-1||track==t)for(int i=0;i<midi.getTrack(t)->getNumEvents();++i){const auto& m=midi.getTrack(t)->getEventPointer(i)->message;if(m.isNoteOn())active[(size_t)m.getChannel()]=true;}
-  if(active[10])channel=10;
-  else if(std::count(active.begin(),active.end(),true)==1)channel=(int)std::distance(active.begin(),std::find(active.begin(),active.end(),true));
-  else throw std::runtime_error("Choose a MIDI channel to import");
- }
- juce::MidiMessageSequence selected;double end=0,signatureAt=std::numeric_limits<double>::infinity();int numerator=4,denominator=4;
- for(int t=0;t<midi.getNumTracks();++t)for(int i=0;i<midi.getTrack(t)->getNumEvents();++i){const auto& m=midi.getTrack(t)->getEventPointer(i)->message;
-  end=std::max(end,m.getTimeStamp()/ppq);
-  if(m.isTimeSignatureMetaEvent()&&m.getTimeStamp()<signatureAt){m.getTimeSignatureInfo(numerator,denominator);signatureAt=m.getTimeStamp();}
-  if((track==-1||t==track)&&(channel==0||m.getChannel()==channel)&&(m.isNoteOn()||m.isNoteOff()))selected.addEvent(m);
- }
- selected.updateMatchedPairs();juce::Array<juce::var> notes;
- for(int i=0;i<selected.getNumEvents();++i){auto* e=selected.getEventPointer(i);const auto& m=e->message;
-  if(m.isNoteOn()){
-   if(notes.size()>=100000)throw std::runtime_error("Pattern exceeds 100000 notes");
-   notes.add(object({{"beat",m.getTimeStamp()/ppq},{"duration",e->noteOffObject?std::max(.00001,(e->noteOffObject->message.getTimeStamp()-m.getTimeStamp())/ppq):.1},{"note",m.getNoteNumber()},{"velocity",m.getFloatVelocity()}}));
-  }
- }
- if(notes.isEmpty())throw std::runtime_error("The selected track and channel have no notes");
- const double bar=numerator*4./denominator;double length=std::ceil((end-1e-8)/bar)*bar;if(length<=0)length=bar;
- auto name=file.getFileName();if(track>=0)name+=" / track "+juce::String(track+1);if(channel>0)name+=" / ch "+juce::String(channel);
- return object({{"id",juce::Uuid().toString()},{"name",name},{"path",file.getFullPathName()},{"channel",channel},{"track",track},{"length",length},{"ppq",ppq},{"notes",notes}});
 }
 juce::var listDirectory(const juce::File& dir,bool patterns){
  if(!dir.isDirectory())throw std::runtime_error("Directory is unavailable: "+dir.getFullPathName().toStdString());

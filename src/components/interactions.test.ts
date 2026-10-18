@@ -19,12 +19,14 @@ import Seaboard from './Seaboard.vue'
 import MidiImport from './MidiImport.vue'
 import SoundPanel from './SoundPanel.vue'
 import Waveform from './Waveform.vue'
+import ExpressionCurve from './ExpressionCurve.vue'
+import ExpressionPanel from './ExpressionPanel.vue'
 import { importPattern, midiImport, finishMidiImport } from '../midiImport'
 
 let cleanup: (() => void)[] = []
 beforeEach(() => {
   backend.state.patch = factory(); backend.state.selected = 48; backend.state.error = ''
-  backend.state.telemetry.contacts = []; backend.state.telemetry.macros = [0, 0, 0, 0, 0]
+  backend.state.telemetry.contacts = []; backend.state.telemetry.fingers = []; backend.state.telemetry.macros = [0, 0, 0, 0, 0]
   backend.request.mockReset().mockImplementation(async (method:string)=>method==='waveform'?{peaks:[],duration:.5}:true); backend.midi.mockReset()
   vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
   vi.stubGlobal('document', { activeElement: null })
@@ -64,6 +66,25 @@ describe('zone component interaction contracts', () => {
 })
 
 describe('Seaboard component interaction contracts', () => {
+  it('connects the device preset arrows to patch navigation without sending note events', async () => {
+    const select=vi.fn(),root=await render(Seaboard,{base:36,onPatch:select})
+    await event(find(root,n=>n.props['aria-label']==='Previous patch'),'click')
+    expect(select).toHaveBeenLastCalledWith(-1)
+    await event(find(root,n=>n.props['aria-label']==='Next patch'),'keydown',{key:'Enter'})
+    expect(select).toHaveBeenLastCalledWith(1)
+    expect(backend.midi).not.toHaveBeenCalled()
+  })
+
+  it('offers direct pedal reassignment and pedal learn in the controller panel', async () => {
+    const root=await render(Seaboard,{base:36})
+    await event(find(root,n=>n.props['aria-label']==='Global MIDI bindings'),'click',{})
+    const selector=find(root,n=>n.props['aria-label']==='Sustain pedal CC')
+    selector.props['onUpdate:modelValue'](66);await settle()
+    expect(backend.state.patch.sustainCC).toBe(66)
+    const learn=find(root,n=>n.tag==='button'&&n.text==='Learn pedal')
+    await event(learn,'click',{});expect(backend.state.learn).toBe(5)
+  })
+
   it('renders 49 piano hit targets and avoids hardware member channels when auditioning', async () => {
     backend.state.telemetry.contacts[1] = 49
     const root = await render(Seaboard, { base: 36 })
@@ -105,6 +126,25 @@ describe('Seaboard component interaction contracts', () => {
     expect(nodes(root, n => n.props.class === 'key-selected')).toHaveLength(1)
     backend.state.telemetry.fingers = []; await settle()
     expect(nodes(root, n => n.props['data-finger'] !== undefined)).toHaveLength(0)
+  })
+
+  it('keeps the released marker at its captured position with sustain styling through channel reuse', async () => {
+    const old={owner:'101',channel:1,note:48,zone:1,slide:.7,glide:.6,pressure:.8,sustained:false}
+    backend.state.telemetry.fingers=[old]
+    const root=await render(Seaboard,{base:36})
+    const marker=find(root,n=>n.props['data-owner']==='101'),position=marker.props.transform
+    backend.state.telemetry.fingers=[{...old,sustained:true},{owner:'102',channel:1,note:50,zone:0,slide:.1,glide:.5,pressure:.2,sustained:false}]
+    await settle()
+    expect(find(root,n=>n.props['data-owner']==='101')).toBe(marker)
+    expect(marker.props.transform).toBe(position)
+    expect(marker.props.class).toContain('sustained')
+    expect(marker.props['aria-label']).toBe('Sustained note 48')
+    expect(nodes(root,n=>n.props['data-finger']===1)).toHaveLength(2)
+    const physical=find(root,n=>n.props['data-owner']==='102')
+    expect(physical.props['data-sustained']).toBe(false)
+    backend.state.telemetry.fingers=[backend.state.telemetry.fingers[1]];await settle()
+    expect(nodes(root,n=>n.props['data-owner']==='101')).toHaveLength(0)
+    expect(find(root,n=>n.props['data-owner']==='102')).toBe(physical)
   })
 
   it('releases only its own contact on unmount and sends XY keyboard controls to native parameters', async () => {
@@ -206,5 +246,49 @@ describe('sampler audition controls',()=>{
   await view.update({sound:backend.state.patch.keys[1].sound,note:50});await settle()
   expect(backend.request).toHaveBeenCalledWith('stopPreview')
   expect(find(view.root,n=>n.props['aria-label']==='Preview sound')).toBeDefined()
+ })
+})
+
+
+it('edits the new grain modes and exposes bind targets in the sampler',async()=>{
+ const sound=backend.state.patch.keys[0].sound
+ const root=await render(SoundPanel,{sound,note:48})
+ for(const target of ['grainFreq','grainStereo','grainWindow','grainSpray','grainTuneRnd','grainFmAmount','grainScanTime'])expect(find(root,n=>n.props['data-param']===target)).toBeDefined()
+ for(const label of ['STD','SYM','FLUX','FM','SCAN'])await event(find(root,n=>n.tag==='button'&&n.textContent.trim()===label),'click')
+ expect(sound.s.grainSymmetry).toBe('fall');expect(sound.s.grainSpraySign).toBe('right')
+ expect(sound.s.grainAmpMode).toBe('void');expect(sound.s.grainFm).toBe(true);expect(sound.s.grainScanOn).toBe(true)
+ await event(find(root,n=>n.props['aria-label']==='Preview sound'),'click');await settle()
+ expect(backend.request).toHaveBeenLastCalledWith('preview',{kind:'sound',path:sound.path,sound:clone(sound)})
+})
+
+
+describe('integrated expression controls',()=>{
+ it('edits a curve by dragging, constrains it, supports keyboard and resets to linear',async()=>{
+  const update=vi.fn();const root=await render(ExpressionCurve,{modelValue:1,'onUpdate:modelValue':update})
+  const canvas=find(root,n=>n.tag==='canvas');canvas.bounds={left:0,top:0,width:80,height:46}
+  await event(canvas,'pointerdown',{button:0,pointerId:1,clientX:40,clientY:32.5})
+  expect(update).toHaveBeenLastCalledWith(2)
+  await event(canvas,'pointermove',{clientX:40,clientY:42-38*Math.sqrt(.5)})
+  expect(update.mock.calls.at(-1)![0]).toBeCloseTo(.5)
+  await event(canvas,'pointermove',{clientX:40,clientY:-100});expect(update).toHaveBeenLastCalledWith(.1)
+  await event(canvas,'pointerup',{});const calls=update.mock.calls.length
+  await event(canvas,'pointermove',{clientX:40,clientY:42});expect(update).toHaveBeenCalledTimes(calls)
+  await event(canvas,'keydown',{key:'End'});expect(update).toHaveBeenLastCalledWith(10)
+  await event(canvas,'dblclick',{});expect(update).toHaveBeenLastCalledWith(1)
+ })
+ it('cycles surfaces, preserves routes while folded, and exposes range and smoothing dials',async()=>{
+  const binding=backend.state.patch.keys[0];const root=await render(ExpressionPanel,{binding})
+  expect(nodes(root,n=>n.tag==='knob-contract')).toHaveLength(binding.routes.length*3)
+  const source=find(root,n=>n.props['aria-label']==='Expression source: Strike')
+  await event(source,'click',{});expect(binding.routes[0].source).toBe(1)
+  const target=find(root,n=>n.props['aria-label']==='Sound parameter')
+  target.props['onUpdate:modelValue']('pan');await event(target,'change',{})
+  expect(binding.routes[0].min).toBe(-1);expect(binding.routes[0].max).toBe(1)
+  const fold=find(root,n=>n.tag==='button'&&n.textContent.includes('EXPRESSION'))
+  const before=JSON.stringify(binding.routes);await event(fold,'click',{})
+  expect(fold.props['aria-expanded']).toBe(false);expect(JSON.stringify(binding.routes)).toBe(before)
+  await event(fold,'click',{});expect(fold.props['aria-expanded']).toBe(true)
+  await event(find(root,n=>n.props['aria-label']==='Add expression mapping'),'click',{})
+  expect(binding.routes).toHaveLength(6)
  })
 })

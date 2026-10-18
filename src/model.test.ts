@@ -37,3 +37,31 @@ describe('playable factory kit and legacy migration',()=>{
   for(const theme of THEMES){const vars=visualVars(theme);const zones=Array.from({length:8},(_,i)=>vars[`--zone-${i}`]);zones.forEach(c=>expect(c).toMatch(/^#[0-9a-f]{6}$/i));expect(new Set(zones).size).toBeGreaterThan(1);expect(vars['--ink']).toBe(theme.text[0])}
  })
 })
+
+
+describe('SSB grain model migration',()=>{
+ it('preserves a saved cloud length, position and expression routes before applying new defaults',()=>{
+  const patch=factory();const key=patch.keys[0]
+  key.sound.s={grain:true,grainSize:80,grainPos:.23,grainRate:30,grainStreams:4,reverse:true} as any
+  key.routes=[{source:2,target:'grainSize',min:20,max:200,curve:1,smoothing:8}]
+  normalize(patch)
+  expect(key.sound.s.grainFreq).toBe(12.5);expect(key.sound.s.grainPos).toBe(.23)
+  expect(key.sound.s.grain).toBe(true);expect(key.sound.s.reverse).toBe(true)
+  expect(key.sound.s.grainSymmetry).toBe('std');expect(key.sound.s.grainScanOn).toBe(false)
+  expect(key.sound.s).not.toHaveProperty('grainSize');expect(key.sound.s).not.toHaveProperty('grainStreams')
+  expect(key.routes[0].target).toBe('grainSize')
+  const saved=JSON.stringify(patch);normalize(patch);expect(JSON.stringify(patch)).toBe(saved)
+ })
+ it('keeps new FM, scanning and window selections through normalization and recall',()=>{
+  const patch=factory();Object.assign(patch.keys[0].sound.s,{grain:true,grainFreq:.05,grainFm:true,grainFmAmount:45,grainScanOn:true,grainScanTime:240,grainSymmetry:'noiz',grainAmpMode:'void'})
+  const recalled=normalize(JSON.parse(JSON.stringify(patch)))
+  expect(recalled.keys[0].sound.s).toEqual(patch.keys[0].sound.s)
+ })
+})
+
+ it('defaults old patches to CC64 and preserves valid reassignment',()=>{
+  const p=factory();delete (p as Partial<typeof p>).sustainCC
+  expect(normalize(p).sustainCC).toBe(64)
+  p.sustainCC=66;expect(normalize(JSON.parse(JSON.stringify(p))).sustainCC).toBe(66)
+  p.sustainCC=74;expect(normalize(p).sustainCC).toBe(64)
+ })

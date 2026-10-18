@@ -12,14 +12,15 @@
 int main(){juce::ScopedJuceInitialiser_GUI gui;
  try {
   std::cout<<"rate,block,profile,voices,audio_seconds,render_seconds,realtime_percent,p99_block_ms,max_block_ms,peak_rss_mib\n";
-  for(double rate:{48000.,96000.})for(int block:{64,256})for(int profile=0;profile<3;++profile){
+  for(double rate:{48000.,96000.})for(int block:{64,256})for(int profile=0;profile<4;++profile){
    auto sample=std::make_shared<ssb::Sample>();sample->rate=48000;sample->channels.resize(1);sample->channels[0].resize(24000);
    for(int i=0;i<24000;++i)sample->channels[0][size_t(i)]=float(.1*std::sin(i*.033)+.05*std::sin(i*.317));
-   auto performance=std::make_shared<ssb::Performance>();performance->volume=.1f;
+   auto performance=std::make_shared<ssb::Performance>();performance->volume=.1f;performance->contactEffectsOnly=true;
    std::array<std::shared_ptr<ssb::Sound>,16> sounds;
    for(int contact=0;contact<16;++contact){auto sound=std::make_shared<ssb::Sound>();sound->id="contact-"+std::to_string(contact);sound->sample=sample;sound->s.mode=ssb::TriggerMode::hold;sound->s.repeat=0;sound->s.pan=contact%2?-.4f:.4f;
     if(profile){sound->s.delayMix=.4f;sound->s.reverbMix=.3f;sound->expressionRouteCount=2;sound->expressionRoutes[0]={3,ssb::parameterIndex("reverbSize"),.1f,6,1,10};sound->expressionRoutes[1]={2,ssb::parameterIndex("delayTime"),.02f,.8f,1,10};}
-    if(profile==2){sound->s.grain=true;sound->s.grainSize=45;sound->s.grainRate=60;sound->s.grainStreams=4;}
+    if(profile>=2){sound->s.grain=true;sound->s.grainFreq=60;sound->s.grainStereo=.7f;sound->s.grainSpray=40;}
+    if(profile==3){sound->s.grainFm=true;sound->s.grainFmAmount=80;sound->s.grainScanOn=true;sound->expressionRouteCount=3;sound->expressionRoutes[2]={2,ssb::parameterIndex("grainWindow"),0,1,1,10};}
     sounds[size_t(contact)]=sound;performance->byId[sound->id]=sound;
    }
    ssb::Engine engine;engine.prepare(rate,block);engine.setPerformance(performance);std::vector<float> left(size_t(block),0),right(size_t(block),0);engine.process(left.data(),right.data(),0,nullptr,0);
@@ -34,7 +35,7 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;
    }
    if(engine.activeVoices()!=64)throw std::runtime_error("Benchmark did not sustain full polyphony");
    std::sort(times.begin(),times.end());rusage usage{};getrusage(RUSAGE_SELF,&usage);
-   std::cout<<int(rate)<<','<<block<<','<<(profile==0?"sample":profile==1?"sample+effects":"4-stream-grains+effects")<<",64,3,"<<std::fixed<<std::setprecision(4)<<total<<','<<total/3*100<<','<<times[size_t(times.size()*.99)]*1000<<','<<times.back()*1000<<','<<double(usage.ru_maxrss)/1048576<<std::endl;
+   std::cout<<int(rate)<<','<<block<<','<<(profile==0?"sample":profile==1?"sample+effects":profile==2?"stereo-grains+effects":"grain-window-mpe+fm+scan+effects")<<",64,3,"<<std::fixed<<std::setprecision(4)<<total<<','<<total/3*100<<','<<times[size_t(times.size()*.99)]*1000<<','<<times.back()*1000<<','<<double(usage.ru_maxrss)/1048576<<std::endl;
   }
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

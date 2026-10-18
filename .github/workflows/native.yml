@@ -85,10 +85,18 @@ jobs:
         with:
           path: native/build/_deps/juce-src
           key: juce-source-macos-${{ hashFiles('native/CMakeLists.txt') }}
+      - name: Install archive headers
+        run: brew install libarchive
+      - uses: actions/cache@v4
+        with:
+          path: native/neural-assets
+          key: minilm-1110a243fdf4706b3f48f1d95db1a4f5529b4d41-ort-1.23.1-universal2
+      - name: Verify pinned neural assets
+        run: python3 native/tools/fetch-neural-assets.py
       - name: Configure and build
         run: |
           cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DRD_REQUIRE_NEURAL_ASSETS=ON
           cmake --build native/build --parallel 3
       - name: Native tests
         run: ctest --test-dir native/build --output-on-failure

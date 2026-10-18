@@ -218,60 +218,143 @@ private:
 };
 
 // ------------------------------------------------------------------------------------ grains
-// src/audio/grainMath.ts, line for line: the page's grain worklet and this engine make the same cloud.
+// src/audio/grainMath.ts, line for line: Granulator II's grain voice, as the page's worklet plays it.
 
 constexpr double stretchGrain = 0.09;   // seconds: STRETCH's grains
 constexpr int stretchOverlap = 4;
+constexpr float freqRndSemis = 25;      // G<RND at 1
+constexpr double freqRndRate = 8;       // its random target changes 8 × GRAIN times a second (rand~)
+constexpr double maxPhaseStep = 0.5;
+constexpr int windowPoints = 512;
+using WindowTable = std::array<float, windowPoints + 1>;
 
-/** Tukey window at sample i of n: taper 0 = square .. 1 = Hann, sampled at sample centres (so a
-    one-sample grain plays). */
-inline float grainWindow (int i, int n, float taper) noexcept
+/** xorshift32 (grainMath.ts xorshift): both engines draw the same NOIZ table. */
+inline uint32_t xorshift (uint32_t& s) noexcept
 {
-    if (taper <= 0 || n < 2) return 1.0f;
-    const double x = (i + 0.5) / n;
-    const double edge = taper / 2.0;
-    if (x < edge) return (float) (0.5 - 0.5 * std::cos (pi * x / edge));
-    if (x > 1 - edge) return (float) (0.5 - 0.5 * std::cos (pi * (1 - x) / edge));
-    return 1.0f;
+    s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+    return s;
 }
 
-/** The same Tukey/Hann envelope using a table prepared off the audio thread.
-    Interpolation error is below float-scale audio precision, while avoiding
-    a cosine for every sample of every overlapping grain. */
-struct GrainWindowTable
+/** Granulator II's "table noiz": 514 values 0..127. */
+inline const std::array<int, windowPoints + 2>& noizTable() noexcept
 {
-    static constexpr size_t resolution = 8192;
-    std::array<float, resolution + 1> values {};
-    GrainWindowTable() {
-        for(size_t i=0;i<=resolution;++i)values[i]=float(.5-.5*std::cos(pi*double(i)/resolution));
-    }
-    float at(int sample,int length,float taper) const noexcept {
-        if(taper<=0 || length<2)return 1.f;
-        return atPhase((sample+.5)/length,2.0/taper);
-    }
-    float atPhase(double phase,double inverseEdge) const noexcept {
-        if(inverseEdge<=0)return 1.f;
-        const double normalized=std::min(phase,1-phase)*inverseEdge;
-        if(normalized>=1)return 1.f;
-        const double position=std::max(0.,normalized)*resolution;
-        const size_t index=std::min(size_t(position),resolution-1);
-        return values[index]+(values[index+1]-values[index])*float(position-double(index));
-    }
-};
-
-/** Seconds to the next grain at `rate` a second: steady at scatter 0, exponential (Poisson) at 1,
-    the same average. u uniform in [0, 1). */
-inline double grainInterval (float rate, float scatter, float u) noexcept
-{
-    const double mean = 1.0 / std::max (1e-3f, rate);
-    if (scatter <= 0) return mean;
-    return mean * (1.0 - scatter + scatter * -std::log (1.0 - std::min ((double) u, 0.999999)));
+    static const std::array<int, windowPoints + 2> table = []
+    {
+        std::array<int, windowPoints + 2> t {};
+        uint32_t s = 0x5eed;
+        for (auto& v : t) v = (int) (xorshift (s) % 128);
+        return t;
+    }();
+    return table;
 }
 
-/** Each grain's level when `overlap` sound at once on average: full when sparse, 1/sqrt when dense. */
-inline float grainGain (float overlap) noexcept
+// Shared quarter-sine table, initialized during Engine::prepare rather than
+// the callback. Live window modulation otherwise computes 513 sines per voice
+// per control tick. Linear interpolation stays within 1e-7 of the formula.
+inline const std::array<float, 4097>& windowSineTable() noexcept
 {
-    return std::min (1.0f, std::sqrt (2.0f / std::max (1e-6f, overlap)));
+    static const auto table = [] {
+        std::array<float, 4097> t{};
+        for (size_t i = 0; i < t.size(); ++i)
+            t[i] = (float) std::sin (pi * 0.5 * (double) i / 4096);
+        return t;
+    }();
+    return table;
+}
+
+/** The grain window (grainMath.ts windowTable): Granulator II's Window patch. */
+inline void windowTable (float shape, GrainSymmetry sym, WindowTable& t) noexcept
+{
+    const double F = 1.0 + std::pow (0.04 * std::clamp (shape * 100.0, 0.0, 100.0), 3.0);
+    const auto& noiz = noizTable();
+    const auto& sine = windowSineTable();
+    for (int i = 0; i <= windowPoints; ++i)
+    {
+        double x;
+        switch (sym)
+        {
+            case GrainSymmetry::fall: x = 0.5 * i + 256; break;
+            case GrainSymmetry::rise: x = 512 - 0.5 * i; break;
+            case GrainSymmetry::noiz: x = noiz[(size_t) i] + 256; break;
+            case GrainSymmetry::std:
+            default:                  x = i; break;
+        }
+        const double y = std::clamp (x, 0.0, 513.0);
+        const double u = y <= 256 ? y - 128 : 385 - y;
+        const double v = std::clamp (u * F + 128, 0.0, 256.0);
+        const double index = v * 16;
+        const auto j = std::min ((size_t) index, size_t (4095));
+        t[(size_t) i] = sine[j] + (sine[j + 1] - sine[j]) * (float) (index - (double) j);
+    }
+}
+
+/** The window at phase 0..1, linear between points. */
+inline float windowAt (const WindowTable& t, double phase) noexcept
+{
+    const double x = (phase - std::floor (phase)) * windowPoints;
+    const auto i = std::min ((size_t) x, (size_t) windowPoints - 1);
+    return t[i] + (t[i + 1] - t[i]) * (float) (x - (double) i);
+}
+
+/** SPRAY: a grain's offset in ms from two uniform numbers in [0, 1). */
+inline double sprayOffset (float spray, float slope, SpraySign sign, float u1, float u2) noexcept
+{
+    if (spray <= 0) return 0;
+    const double mag = std::pow (std::abs (2.0 * u1 - 1.0), (double) std::max (1.0f, slope));
+    const double side = sign == SpraySign::right ? 1.0 : sign == SpraySign::left ? -1.0 : u2 < 0.5f ? -1.0 : 1.0;
+    return spray * mag * side;
+}
+
+/** T<RND: a grain's rate factor, 1 ± 0.5 · amount². */
+inline double tuneRndRatio (float amount, float u) noexcept { return 1.0 + 0.5 * amount * amount * (2.0 * u - 1.0); }
+
+/** A grain's level: FLUX (random, made up by 6 dB × amount) or VOID (√amount of them dropped to VOID⁴). */
+inline float grainLevel (GrainAmpMode mode, float amount, float voidLevel, float u) noexcept
+{
+    if (amount <= 0) return 1.0f;
+    const double n = 2.0 * u - 1.0;
+    if (mode == GrainAmpMode::drop)
+        return n < 2.0 * std::sqrt ((double) amount) - 1.0 ? (float) std::pow ((double) voidLevel, 4.0) : 1.0f;
+    const double g = 1.0 - amount * std::abs (n);
+    return (float) (g * g * std::pow (10.0, 6.0 * amount / 20.0));
+}
+
+/** SCAN's offset from POS (seconds), `t` seconds after the note. */
+inline double scanOffset (double t, float timePct, float dist, float curve, double clipLen) noexcept
+{
+    const double d = dist * clipLen;
+    if (d <= 0) return 0;
+    const double x = std::clamp (t * (100.0 / timePct) / d, 0.0, 1.0);
+    return d * std::pow (x, (double) curve);
+}
+
+/** 4-point, 3rd-order Hermite interpolation: `f` (0..1) of the way from y0 to y1. */
+inline float hermite (float ym1, float y0, float y1, float y2, float f) noexcept
+{
+    const float c1 = 0.5f * (y1 - ym1);
+    const float c2 = ym1 - 2.5f * y0 + 2.0f * y1 - 0.5f * y2;
+    const float c3 = 0.5f * (y2 - ym1) + 1.5f * (y0 - y1);
+    return ((c3 * f + c2) * f + c1) * f + y0;
+}
+
+/** `x` at frame position `p`, silent outside [lo, hi) (grainMath.ts readAt). */
+inline float readAt (const float* x, double p, long lo, long hi) noexcept
+{
+    const double fl = std::floor (p);
+    const auto i0 = (long) fl;
+    if (i0 < lo || i0 + 1 >= hi) return 0.0f;
+    const auto f = (float) (p - fl);
+    const auto k = (size_t) i0;
+    if (i0 - 1 >= lo && i0 + 2 < hi) return hermite (x[k - 1], x[k], x[k + 1], x[k + 2], f);
+    return x[k] + (x[k + 1] - x[k]) * f;
+}
+
+/** STRETCH's window: Hann at sample i of n, at sample centres. */
+inline float hann (int i, int n) noexcept
+{
+    if (n < 2) return 1.0f;
+    const double x = std::clamp ((i + 0.5) / n, 0.0, 1.0);
+    return (float) (0.5 - 0.5 * std::cos (2 * pi * x));
 }
 
 // ------------------------------------------------------------------------------------ panning

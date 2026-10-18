@@ -60,6 +60,17 @@ function(ssb_bundle_web target)
         COMMENT "Copying the web build into ${target}"
         VERBATIM)
 
+    if(APPLE AND EXISTS "${RD_NEURAL_ASSET_DIR}/manifest.json")
+        add_custom_command(TARGET ${target}_web PRE_BUILD
+            COMMAND "${CMAKE_COMMAND}"
+                -DSRC=${RD_NEURAL_ASSET_DIR}
+                -DDEST=$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Resources/neural
+                -DIDENTITY=${SSB_CODESIGN_IDENTITY}
+                -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/CopyNeural.cmake"
+            COMMENT "Bundling and signing pretrained model runtime for ${target}"
+            VERBATIM)
+    endif()
+
     if(APPLE)
         add_custom_command(TARGET ${target}_web POST_BUILD
             COMMAND codesign --force --sign "${SSB_CODESIGN_IDENTITY}"

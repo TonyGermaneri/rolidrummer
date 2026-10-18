@@ -6,6 +6,7 @@ export class TestNode {
   parent: TestNode | null = null
   children: TestNode[] = []
   props: Record<string, any> = {}
+  style: Record<string,string> = {display:''}
   text = ''
   value: any = ''
   selected = false

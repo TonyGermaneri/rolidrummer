@@ -1,3 +1,4 @@
+import { GRAIN_FREQ_FLOOR, GRAIN_FREQ_MAX, type AmpMode, type SpraySign, type Symmetry } from './audio/grainMath'
 /** What pressing a pad does while that sound is already playing. */
 export type TriggerMode = 'stack' | 'stop' | 'restart' | 'hold'
 
@@ -70,7 +71,7 @@ export const MOD_DESTS: Record<ModDest, { label: string; scale: number; unit: st
   volume: { label: 'VOLUME', scale: 1, unit: '', audio: true },
   pan: { label: 'PAN', scale: 1, unit: '', audio: true },
   grainPos: { label: 'GRAIN POS', scale: 0.5, unit: '', audio: false },
-  grainSize: { label: 'GRAIN SIZE', scale: 250, unit: 'ms', audio: false },
+  grainSize: { label: 'GRAIN', scale: 24, unit: 'st', audio: false }, // the grain rate, like Granulator II's Grain<LFO
   delayMix: { label: 'DELAY MIX', scale: 1, unit: '', audio: true },
   reverbMix: { label: 'REVERB MIX', scale: 1, unit: '', audio: true },
 }
@@ -161,19 +162,32 @@ export interface SoundSettings {
   fDecay: number
   fSustain: number
   fRelease: number
-  // grain cloud (audio/grains.ts)
+  // grain cloud (audio/grainMath.ts): Granulator II's, its parameter names in brackets
   grain: boolean // on: the pad plays as a cloud of grains
-  grainSize: number // ms, down to one sample (GRAIN_MIN_MS)
-  grainPos: number // 0..1 within clip
-  grainWidth: number // 0..1 of clip, random spread (spray)
-  grainRate: number // grains per second per stream, independent of size (gaps when rate × size < 1)
-  grainShape: number // window: 0 = square .. 1 = Hann (a Tukey window's taper)
-  grainJitter: number // random ± semitones per grain
-  grainReverse: number // 0..1 chance a grain plays backwards
-  grainSpread: number // 0..1 random stereo pan per grain
-  grainStreams: number // 1..8 independent grain streams per note
-  grainScatter: number // 0 = a steady rate .. 1 = random (Poisson) times, same average rate
-  grainDrift: number // 0..1 each stream wanders through the clip at its own random speed (±1 = real time)
+  grainFreq: number // [GrainSize] Hz: grains start this often per slot and last one period (two overlap)
+  grainFreqKey: number // [Grain<Key] 0..1: GRAIN follows the note
+  grainFreqRnd: number // [Grain<Random] 0..1: GRAIN wanders up to ±25 semitones
+  grainStereo: number // [GrainSpread] 0..1: left and right grain rates apart by up to two octaves
+  grainPos: number // [FilePos] 0..1 within clip
+  grainPosKey: number // [FilePos<Key] -1..1: POS moves 1 % of the clip per semitone at ±1
+  grainSpray: number // [Spray] ms of random offset per grain
+  grainSpraySlope: number // [SpraySlope] 1..10: offsets cluster nearer POS
+  grainSpraySign: SpraySign // [SpraySign]
+  grainWindow: number // [WindowShape] 0..1: sine window .. square half a period wide
+  grainSymmetry: Symmetry // [WindowSymmetry]
+  grainTuneKey: number // [Tune<Key] 0..1: the note transposes the sample
+  grainTuneRnd: number // [Tune<Rnd] 0..1: random rate per grain
+  grainAmpMode: AmpMode // [FluxusMode]
+  grainAmp: number // [FluxusAmount] 0..1
+  grainVoid: number // [AmpVoidResidual] 0..1: what VOID leaves of a dropped grain
+  grainFm: boolean // [FMOn]
+  grainFmFreq: number // [FMFreq] Hz
+  grainFmAmount: number // [FMAmount] 0..250 (× 0.02 ms of position swing)
+  grainFmKey: number // [FM<Key] 0..2
+  grainScanOn: boolean // [ScanOn]
+  grainScanTime: number // [ScanTime] %: 100 = real time
+  grainScanDist: number // [ScanDistance] 0..1 of the clip
+  grainScanCurve: number // [ScanCurve] 0.5..2
   // delay
   delayTime: number // seconds
   delayFeedback: number // 0..0.9
@@ -278,25 +292,33 @@ export interface Sound {
 /** Every audio blob a pad needs (its own plus its zones'). */
 export const soundAudioIds = (s: Sound) => [s.audioId, ...(s.zones ?? []).map((z) => z.audioId)]
 
-/** One sample at 48 kHz, the shortest grain (the engines make every grain a whole number of samples, at least one). */
-export const GRAIN_MIN_MS = 1000 / 48000
-export const GRAIN_RATE_MIN = 0.5
-export const GRAIN_RATE_MAX = 1000
-
-/** A cloud that sounds like one: grains sprayed around POS at loosely random times, spread in stereo. */
+/** Granulator II's own starting point: 5 Hz grains (200 ms) at POS, following the keyboard, nothing random. */
 export const GRAIN_DEFAULTS = {
   grain: false,
-  grainSize: 80,
+  grainFreq: 5,
+  grainFreqKey: 1,
+  grainFreqRnd: 0,
+  grainStereo: 0,
   grainPos: 0.5,
-  grainWidth: 0.1,
-  grainRate: 30,
-  grainShape: 1,
-  grainJitter: 0,
-  grainReverse: 0,
-  grainSpread: 0.3,
-  grainStreams: 1,
-  grainScatter: 0.5,
-  grainDrift: 0,
+  grainPosKey: 0,
+  grainSpray: 0,
+  grainSpraySlope: 1,
+  grainSpraySign: 'sym' as SpraySign,
+  grainWindow: 0,
+  grainSymmetry: 'std' as Symmetry,
+  grainTuneKey: 1,
+  grainTuneRnd: 0,
+  grainAmpMode: 'flux' as AmpMode,
+  grainAmp: 0,
+  grainVoid: 0,
+  grainFm: false,
+  grainFmFreq: 220,
+  grainFmAmount: 0,
+  grainFmKey: 1,
+  grainScanOn: false,
+  grainScanTime: 100,
+  grainScanDist: 1,
+  grainScanCurve: 1,
 }
 
 export function defaultSettings(name = 'SOUND'): SoundSettings {
@@ -345,19 +367,28 @@ export function defaultSettings(name = 'SOUND'): SoundSettings {
   }
 }
 
+/** Grain settings of earlier versions, which the Granulator II model replaced. */
+const OLD_GRAIN_KEYS = [
+  'grainSize', 'grainWidth', 'grainRate', 'grainDensity', 'grainKey', 'grainScan', 'grainShape', 'grainJitter',
+  'grainReverse', 'grainSpread', 'grainStreams', 'grainScatter', 'grainDrift',
+]
+
 /**
- * Before 0.2 grainSize 0 meant off and grainDensity counted overlapping grains. A pad that had grains keeps
- * them (the same overlap, as a rate); one that never used them gets the new defaults for when it's switched on.
+ * Clouds saved before the Granulator II model keep their grain length (SIZE in ms becomes GRAIN = 1000 / size Hz)
+ * and their POS; everything else starts from Granulator II's defaults, nothing random (their old SPRAY and SCATTER
+ * are what turned short grains to noise). Before 0.2 a SIZE of 0 meant off.
  */
 function migrateGrains(raw: Record<string, unknown>) {
-  if (raw.grain === undefined) {
-    const size = Number(raw.grainSize) || 0
-    if (size > 0) {
-      raw.grain = true
-      raw.grainRate = Math.min(GRAIN_RATE_MAX, Math.max(GRAIN_RATE_MIN, (Number(raw.grainDensity) || 2) / (size / 1000)))
-    } else Object.assign(raw, GRAIN_DEFAULTS)
-  }
-  delete raw.grainDensity
+  if (raw.grainFreq !== undefined) return
+  const size = Number(raw.grainSize) || 0
+  const on = raw.grain === undefined ? size > 0 : !!raw.grain
+  const pos = raw.grainPos === undefined ? GRAIN_DEFAULTS.grainPos : Number(raw.grainPos)
+  for (const k of OLD_GRAIN_KEYS) delete raw[k]
+  Object.assign(raw, GRAIN_DEFAULTS, {
+    grain: on,
+    grainPos: pos,
+    grainFreq: size > 0 ? Math.min(GRAIN_FREQ_MAX, Math.max(GRAIN_FREQ_FLOOR, 1000 / size)) : GRAIN_DEFAULTS.grainFreq,
+  })
 }
 
 /** Fill in settings added since a board was saved, and map renamed ones. */

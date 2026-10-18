@@ -1,0 +1,337 @@
+{
+  "version": 1,
+  "voices": [
+    {
+      "id": "kick",
+      "name": "Kick"
+    },
+    {
+      "id": "snare",
+      "name": "Snare"
+    },
+    {
+      "id": "snareRim",
+      "name": "Snare rimshot"
+    },
+    {
+      "id": "sideStick",
+      "name": "Side stick"
+    },
+    {
+      "id": "tomHigh",
+      "name": "High tom"
+    },
+    {
+      "id": "tomMid",
+      "name": "Mid tom"
+    },
+    {
+      "id": "tomFloor",
+      "name": "Floor tom"
+    },
+    {
+      "id": "hatClosed",
+      "name": "Closed hi-hat"
+    },
+    {
+      "id": "hatOpen",
+      "name": "Open hi-hat"
+    },
+    {
+      "id": "hatPedal",
+      "name": "Pedal hi-hat"
+    },
+    {
+      "id": "crash1",
+      "name": "Crash 1"
+    },
+    {
+      "id": "crash2",
+      "name": "Crash 2"
+    },
+    {
+      "id": "ride",
+      "name": "Ride"
+    },
+    {
+      "id": "rideBell",
+      "name": "Ride bell"
+    },
+    {
+      "id": "clap",
+      "name": "Hand clap",
+      "percussion": true
+    },
+    {
+      "id": "tambourine",
+      "name": "Tambourine",
+      "percussion": true
+    },
+    {
+      "id": "cowbell",
+      "name": "Cowbell",
+      "percussion": true
+    },
+    {
+      "id": "vibraslap",
+      "name": "Vibraslap",
+      "percussion": true
+    },
+    {
+      "id": "bongoHigh",
+      "name": "High bongo",
+      "percussion": true
+    },
+    {
+      "id": "bongoLow",
+      "name": "Low bongo",
+      "percussion": true
+    },
+    {
+      "id": "congaMute",
+      "name": "Muted conga",
+      "percussion": true
+    },
+    {
+      "id": "congaHigh",
+      "name": "High conga",
+      "percussion": true
+    },
+    {
+      "id": "congaLow",
+      "name": "Low conga",
+      "percussion": true
+    },
+    {
+      "id": "timbaleHigh",
+      "name": "High timbale",
+      "percussion": true
+    },
+    {
+      "id": "timbaleLow",
+      "name": "Low timbale",
+      "percussion": true
+    },
+    {
+      "id": "agogoHigh",
+      "name": "High agogo",
+      "percussion": true
+    },
+    {
+      "id": "agogoLow",
+      "name": "Low agogo",
+      "percussion": true
+    },
+    {
+      "id": "cabasa",
+      "name": "Cabasa",
+      "percussion": true
+    },
+    {
+      "id": "maracas",
+      "name": "Maracas",
+      "percussion": true
+    },
+    {
+      "id": "whistleShort",
+      "name": "Short whistle",
+      "percussion": true
+    },
+    {
+      "id": "whistleLong",
+      "name": "Long whistle",
+      "percussion": true
+    },
+    {
+      "id": "guiroShort",
+      "name": "Short guiro",
+      "percussion": true
+    },
+    {
+      "id": "guiroLong",
+      "name": "Long guiro",
+      "percussion": true
+    },
+    {
+      "id": "claves",
+      "name": "Claves",
+      "percussion": true
+    },
+    {
+      "id": "woodBlockHigh",
+      "name": "High wood block",
+      "percussion": true
+    },
+    {
+      "id": "woodBlockLow",
+      "name": "Low wood block",
+      "percussion": true
+    },
+    {
+      "id": "cuicaMute",
+      "name": "Muted cuica",
+      "percussion": true
+    },
+    {
+      "id": "cuicaOpen",
+      "name": "Open cuica",
+      "percussion": true
+    },
+    {
+      "id": "triangleMute",
+      "name": "Muted triangle",
+      "percussion": true
+    },
+    {
+      "id": "triangleOpen",
+      "name": "Open triangle",
+      "percussion": true
+    }
+  ],
+  "canonical": {
+    "kick": 36,
+    "snare": 38,
+    "snareRim": 38,
+    "sideStick": 37,
+    "tomHigh": 50,
+    "tomMid": 47,
+    "tomFloor": 43,
+    "hatClosed": 42,
+    "hatOpen": 46,
+    "hatPedal": 44,
+    "crash1": 49,
+    "crash2": 57,
+    "ride": 51,
+    "rideBell": 53,
+    "clap": 39,
+    "tambourine": 54,
+    "cowbell": 56,
+    "vibraslap": 58,
+    "bongoHigh": 60,
+    "bongoLow": 61,
+    "congaMute": 62,
+    "congaHigh": 63,
+    "congaLow": 64,
+    "timbaleHigh": 65,
+    "timbaleLow": 66,
+    "agogoHigh": 67,
+    "agogoLow": 68,
+    "cabasa": 69,
+    "maracas": 70,
+    "whistleShort": 71,
+    "whistleLong": 72,
+    "guiroShort": 73,
+    "guiroLong": 74,
+    "claves": 75,
+    "woodBlockHigh": 76,
+    "woodBlockLow": 77,
+    "cuicaMute": 78,
+    "cuicaOpen": 79,
+    "triangleMute": 80,
+    "triangleOpen": 81
+  },
+  "maps": {
+    "gm": {
+      "22": "hatClosed",
+      "26": "hatOpen",
+      "35": "kick",
+      "36": "kick",
+      "37": "sideStick",
+      "38": "snare",
+      "39": "clap",
+      "40": "snareRim",
+      "41": "tomFloor",
+      "42": "hatClosed",
+      "43": "tomFloor",
+      "44": "hatPedal",
+      "45": "tomMid",
+      "46": "hatOpen",
+      "47": "tomMid",
+      "48": "tomHigh",
+      "49": "crash1",
+      "50": "tomHigh",
+      "51": "ride",
+      "52": "crash2",
+      "53": "rideBell",
+      "54": "tambourine",
+      "55": "crash1",
+      "56": "cowbell",
+      "57": "crash2",
+      "58": "vibraslap",
+      "59": "ride",
+      "60": "bongoHigh",
+      "61": "bongoLow",
+      "62": "congaMute",
+      "63": "congaHigh",
+      "64": "congaLow",
+      "65": "timbaleHigh",
+      "66": "timbaleLow",
+      "67": "agogoHigh",
+      "68": "agogoLow",
+      "69": "cabasa",
+      "70": "maracas",
+      "71": "whistleShort",
+      "72": "whistleLong",
+      "73": "guiroShort",
+      "74": "guiroLong",
+      "75": "claves",
+      "76": "woodBlockHigh",
+      "77": "woodBlockLow",
+      "78": "cuicaMute",
+      "79": "cuicaOpen",
+      "80": "triangleMute",
+      "81": "triangleOpen"
+    },
+    "vdrums": {
+      "22": "hatClosed",
+      "26": "hatOpen",
+      "35": "kick",
+      "36": "kick",
+      "37": "sideStick",
+      "38": "snare",
+      "39": "clap",
+      "40": "snareRim",
+      "41": "tomFloor",
+      "42": "hatClosed",
+      "43": "tomFloor",
+      "44": "hatPedal",
+      "45": "tomMid",
+      "46": "hatOpen",
+      "47": "tomMid",
+      "48": "tomHigh",
+      "49": "crash1",
+      "50": "tomHigh",
+      "51": "ride",
+      "52": "crash2",
+      "53": "rideBell",
+      "54": "tambourine",
+      "55": "crash1",
+      "56": "cowbell",
+      "57": "crash2",
+      "58": "tomFloor",
+      "59": "ride",
+      "60": "bongoHigh",
+      "61": "bongoLow",
+      "62": "congaMute",
+      "63": "congaHigh",
+      "64": "congaLow",
+      "65": "timbaleHigh",
+      "66": "timbaleLow",
+      "67": "agogoHigh",
+      "68": "agogoLow",
+      "69": "cabasa",
+      "70": "maracas",
+      "71": "whistleShort",
+      "72": "whistleLong",
+      "73": "guiroShort",
+      "74": "guiroLong",
+      "75": "claves",
+      "76": "woodBlockHigh",
+      "77": "woodBlockLow",
+      "78": "cuicaMute",
+      "79": "cuicaOpen",
+      "80": "triangleMute",
+      "81": "triangleOpen"
+    }
+  }
+}

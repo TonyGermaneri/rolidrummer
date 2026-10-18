@@ -3,6 +3,7 @@
 #include <drummer/State.h>
 #include <drummer/SharedStore.h>
 #include <drummer/Preview.h>
+#include <drummer/PatternLibrary.h>
 #include <ssb/Engine.h>
 #include <ssb/MidiQueue.h>
 #include <mutex>
@@ -20,7 +21,8 @@ public:
  int getNumPrograms()override{return 1;}int getCurrentProgram()override{return 0;}void setCurrentProgram(int)override{}
  const juce::String getProgramName(int)override{return "Current kit";}void changeProgramName(int,const juce::String&)override{}
  void getStateInformation(juce::MemoryBlock&)override;void setStateInformation(const void*,int)override;
- bool apply(std::unique_ptr<drummer::Runtime>, std::optional<uint64_t> expected = {});
+ bool apply(std::unique_ptr<drummer::Runtime>, std::optional<uint64_t> expected = {},double activationGrid=0,bool preserveActivation=false);
+ bool activationPending() const noexcept{return boundaryRevision.load(std::memory_order_acquire)>activeRevision.load(std::memory_order_acquire);}
  juce::String document();
  void publishPreview(std::unique_ptr<drummer::Preview>,uint64_t request);
  void stopPreview();
@@ -33,24 +35,45 @@ public:
  std::atomic<double> hostBpm{120},hostPpq{0};std::atomic<bool> hostPlaying{false},standalonePlaying{false},freePlaying{false};
  std::array<std::atomic<int>,16> contacts{};
  std::array<std::atomic<float>,16> contactSlide{},contactGlide{},contactPressure{};
+ struct FingerView { uint64_t owner=0;int channel=0,note=0,zone=0;float slide=0,glide=.5f,pressure=0;bool sustained=false;int candidate=-1; };
+ struct FingerSnapshot { std::array<FingerView,drummer::maxContacts+drummer::Scheduler::maxSustained> fingers{};int count=0; };
+ bool readFingers(FingerSnapshot&) noexcept;
  std::atomic<int> lastSlideChannel{-1},lastSlideValue{0};
  std::atomic<uint64_t> stateRevision{0};
+ // Program requests cross to the worker without loading samples on the audio thread.
+ void requestProgram(int program) noexcept;
+ std::atomic<int> lastProgram{-1};
+ std::atomic<bool> programFailed{false};
+ std::atomic<bool> programUnassigned{false};
  std::atomic<int> clipEvaluations{0};std::atomic<bool> overflow{false};
  std::unique_ptr<drummer::SharedStore> shared;
+ std::shared_ptr<drummer::LibraryService> library;
  juce::ThreadPool jobs{1};
+ juce::ThreadPool neuralJobs{1};
  std::shared_ptr<int> life=std::make_shared<int>(0);
  int editorWidth=1500,editorHeight=880;
 private:
+ // Both sides try once; audio never waits for the editor. Copy only fixed-size
+ // data under the flag, then build JS objects after releasing it.
+ std::atomic_flag fingerBusy=ATOMIC_FLAG_INIT;
+ FingerSnapshot fingerSnapshot;
+ void publishFingers() noexcept;
  void timerCallback()override;
+ std::atomic<uint64_t> programRequest{0};
+ std::atomic<uint64_t> servicedProgram{0},lastProgramRevision{0};
  static void emit(void*,const drummer::Event&);
  void renderTo(int);
  drummer::Scheduler scheduler;
  drummer::Runtime* active=nullptr;
+ drummer::Runtime* pendingRuntime=nullptr;
+ std::atomic<uint64_t> activeRevision{0},boundaryRevision{0};
+ double queuedActivationGrid=0,activationBeat=0,activationExpected=0;
+ bool activationScheduled=false,activationClockKnown=false;
  std::atomic<drummer::Runtime*> incoming{nullptr};
  std::array<drummer::Runtime*,256> retired{};std::atomic<unsigned> retiredWrite{0},retiredRead{0};
  std::array<drummer::Midi,4096> input{};
  std::vector<float> rightScratch;
- float* outputL=nullptr;float* outputR=nullptr;int rendered=0;double rate=48000,standalonePpq=0;
+ float* outputL=nullptr;float* outputR=nullptr;int rendered=0,eventBase=0;double rate=48000,standalonePpq=0;
  drummer::Clock clock;
  bool wasHostPlaying=false;
  std::array<juce::RangedAudioParameter*,5> macroParameters {};

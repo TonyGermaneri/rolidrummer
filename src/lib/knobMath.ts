@@ -1,8 +1,10 @@
 /**
- * lin; log (min > 0); pow = cubic taper from min (fine at the bottom, reaches 0, spans huge ranges);
- * grain = GRAIN SIZE: one sample up to the whole sample, with most of the travel where grains sound like grains
+ * lin; log (min > 0); pow = cubic taper from min (fine at the bottom, reaches 0, spans huge ranges); pow2 / pow4 /
+ * pow5 the same with that exponent (Max for Live's parameter_exponent: value = min + (max - min) · travel^exp);
+ * grain = one sample up to the whole sample, with most of the travel where grains sound like grains
  */
-export type Curve = 'lin' | 'log' | 'pow' | 'grain'
+export type Curve = 'lin' | 'log' | 'pow' | 'pow2' | 'pow4' | 'pow5' | 'grain'
+const powExp = (c: Curve) => (c === 'pow' ? 3 : c === 'pow2' ? 2 : c === 'pow4' ? 4 : c === 'pow5' ? 5 : 0)
 
 /**
  * GRAIN SIZE (ms), from `min` (one sample) to `max` (the sample's length), in three log stretches: the first
@@ -39,7 +41,8 @@ export function valueToPct(value: number, min: number, max: number, curve: Curve
   if (max === min) return 0
   const v = clamp(value, min, max)
   if (curve === 'log') return Math.log(v / min) / Math.log(max / min)
-  if (curve === 'pow') return Math.cbrt((v - min) / (max - min))
+  const e = powExp(curve)
+  if (e) return Math.pow((v - min) / (max - min), 1 / e)
   if (curve === 'grain') return grainPct(v, min, max)
   return (v - min) / (max - min)
 }
@@ -49,7 +52,7 @@ export function pctToValue(pct: number, min: number, max: number, curve: Curve =
   const p = clamp(pct, 0, 1)
   let v =
     curve === 'log' ? min * Math.pow(max / min, p)
-    : curve === 'pow' ? min + p ** 3 * (max - min)
+    : powExp(curve) ? min + p ** powExp(curve) * (max - min)
     : curve === 'grain' ? grainValue(p, min, max)
     : min + p * (max - min)
   if (step > 0) v = Math.round((v - min) / step) * step + min

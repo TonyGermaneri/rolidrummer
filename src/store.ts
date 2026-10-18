@@ -1,22 +1,28 @@
 import { reactive, watch } from 'vue'
 import { factory, normalize, clone, type Patch } from './model'
 import { request, native, onNative } from './native/bridge'
-export interface Finger {channel:number;note:number;zone:number;slide:number;glide:number;pressure:number}
+export interface Finger {owner?:string;sustained?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
 export interface Playhead {id:number;note:number;pos:number;dur:number;velocity:number;grains:boolean}
 export interface GrainMark {voice:number;when:number;pos:number;len:number;dur:number;pan:number;gain:number;reverse:boolean}
-export const state = reactive({ patch: factory(), selected: 48, tab: 'Key', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false }, history: [] as string[], future: [] as string[] })
-let applying = false, lastSaved = '', lastCheckpoint = '', inFlight = '', generation = 0, nativeRevision = 0, loading = false
+export const state = reactive({ patch: factory(), selected: 48, tab: 'Key', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })
+let applying = false, lastSaved = '', lastCheckpoint = '', inFlight = '', generation = 0, nativeRevision = 0, loading = false, legacyIdentityName = ''
 let timer: ReturnType<typeof setTimeout> | undefined, draining: Promise<void> | undefined
-type Pending = { document: Patch; generation: number }
+type Pending = { document: Patch; generation: number; activationGrid: number; preserveActivation: boolean }
+let inFlightBoundary = false
 let pending: Pending | undefined
 export function report(e: unknown) { state.error = e instanceof Error ? e.message : String(e) }
 export async function attempt<T>(job: () => Promise<T>): Promise<T | undefined> { try { return await job() } catch (e) { report(e) } }
-function adopt(document: Patch) {
+function adoptLegacyIdentity(){
+ if(state.patch.id||!legacyIdentityName)return
+ const matches=Object.values(shared).filter(field=>field.key.startsWith('patch/')&&field.value?.id&&field.value.name===legacyIdentityName)
+ if(matches.length===1)state.patch.id=matches[0].value.id
+}
+function adopt(document: Patch,keepIdentityName=false) {
  applying = true
- try { state.patch = normalize(clone(document)); lastSaved = JSON.stringify(state.patch); lastCheckpoint = lastSaved } finally { applying = false }
+ try { legacyIdentityName=document.id?'':keepIdentityName&&legacyIdentityName?legacyIdentityName:document.name;state.patch = normalize(clone(document));adoptLegacyIdentity();lastSaved = JSON.stringify(state.patch); lastCheckpoint = lastSaved; if(!state.patch.keys.some(k=>k.note===state.selected))state.selected=state.patch.keys[0]?.note??48 } finally { applying = false }
 }
 export async function init() {
- if (native()) { const info = await request('ready'); adopt(info.document); state.standalone = info.standalone; nativeRevision = info.revision }
+ if (native()) { const info = await request('ready'); adopt(info.document); state.standalone = info.standalone; nativeRevision = info.revision; state.telemetry.activationPending = Boolean(info.activationPending) }
  else { state.status = 'Editor preview · audio and filesystem browsing run in the native instrument'; lastSaved = JSON.stringify(state.patch); lastCheckpoint = lastSaved }
  state.ready = true
 }
@@ -26,25 +32,31 @@ watch(() => state.patch, () => {
  clearTimeout(timer)
  timer = setTimeout(() => void attempt(flushEdits), 200)
 }, { deep: true, flush: 'sync' })
-export async function flushEdits(recordHistory = true): Promise<void> {
+export async function flushEdits(recordHistory = true, activationGrid?: number): Promise<void> {
  clearTimeout(timer); timer = undefined
  const snapshot = clone(state.patch), json = JSON.stringify(snapshot)
- if (json !== (pending ? JSON.stringify(pending.document) : inFlight || lastSaved)) {
+ const explicit = activationGrid !== undefined
+ const policy = explicit ? { activationGrid, preserveActivation: false } : pending ? { activationGrid: pending.activationGrid, preserveActivation: pending.preserveActivation } : { activationGrid: 0, preserveActivation: true }
+ // An explicit load also cancels a prepared refresh with the same document.
+ // Returning to an immediate in-flight edit can still discard a queued edit.
+ const force = explicit && (activationGrid > 0 || !inFlight || inFlightBoundary)
+ if (json !== (pending ? JSON.stringify(pending.document) : inFlight || lastSaved) || force) {
   if (recordHistory && json !== lastCheckpoint) { state.history.push(lastCheckpoint); state.future = [] }
   lastCheckpoint = json
-  pending = json === inFlight ? undefined : { document: snapshot, generation }
+  pending = json === inFlight && !force ? undefined : { document: snapshot, generation, ...policy }
  }
  if (!draining && pending) {
   state.saving = true
-  draining = drain().finally(() => { draining = undefined; inFlight = ''; state.saving = false })
+  draining = drain().finally(() => { draining = undefined; inFlight = ''; inFlightBoundary = false; state.saving = false })
  }
  await draining
 }
 async function drain() {
  while (pending) {
-  const sent = pending; pending = undefined; inFlight = JSON.stringify(sent.document)
-  const ack = native() ? await request('setDocument', { document: sent.document, revision: nativeRevision }) : { document: sent.document, revision: nativeRevision, conflict: false }
+  const sent = pending; pending = undefined; inFlight = JSON.stringify(sent.document); inFlightBoundary = sent.activationGrid > 0 || sent.preserveActivation && state.telemetry.activationPending
+  const ack = native() ? await request('setDocument', { document: sent.document, revision: nativeRevision, activationGrid: sent.activationGrid, preserveActivation: sent.preserveActivation }) : { document: sent.document, revision: nativeRevision, conflict: false, activationPending: false }
   nativeRevision = ack.revision
+  if (typeof ack.activationPending === 'boolean') state.telemetry.activationPending = ack.activationPending
   if (ack.conflict) {
    clearTimeout(timer); timer = undefined; pending = undefined; ++generation
    adopt(ack.document); state.history = []; state.future = []
@@ -52,7 +64,7 @@ async function drain() {
    return
   }
   lastSaved = JSON.stringify(normalize(clone(ack.document)))
-  if (generation === sent.generation) adopt(ack.document)
+  if (generation === sent.generation) adopt(ack.document,true)
   else {
    // Metadata from sample import can safely accompany newer knob edits.
    applying = true
@@ -72,10 +84,12 @@ function mergeAssets(target: Patch, canonical: Patch) {
   }
  }
 }
-export async function replace(p: Patch) {
+export async function replace(p: Patch, activation: 'bar' | 'immediate' = 'immediate') {
  if (!p || p.version !== 1 || !Array.isArray(p.keys) || !Array.isArray(p.clips)) throw Error('This is not a supported Roli Drummer patch')
- state.patch = normalize(clone(p)); state.selected = p.keys[0]?.note ?? 48
- await flushEdits()
+ if(p.neural&&p.neural.version!==1)throw Error('This neural patch version is not supported')
+ legacyIdentityName=p.id?'':p.name;state.patch = normalize(clone(p)); state.selected = p.keys[0]?.note ?? 48
+ const numerator=p.neural?.numerator??4,denominator=p.neural?.denominator??4
+ await flushEdits(true,activation==='bar'?numerator*4/denominator:0)
 }
 export function undo(redo = false) {
  const from = redo ? state.future : state.history, to = redo ? state.history : state.future
@@ -83,14 +97,21 @@ export function undo(redo = false) {
  clearTimeout(timer); timer = undefined
  const json = from.pop()!; to.push(JSON.stringify(state.patch))
  applying = true
- try { state.patch = normalize(JSON.parse(json)); lastCheckpoint = json; ++generation } finally { applying = false }
- void attempt(() => flushEdits(false))
+ try { state.patch = normalize(JSON.parse(json));legacyIdentityName=state.patch.id?'':state.patch.name;lastCheckpoint = json; ++generation } finally { applying = false }
+ void attempt(() => flushEdits(false,0))
 }
 onNative('rdTelemetry', data => {
  const grains=state.telemetry.grainMarks
+ if(data.programFailed&&!state.telemetry.programFailed)state.error='Could not load the MIDI-selected patch. Check the saved patch or select it again.'
+ if(data.programUnassigned&&!state.telemetry.programUnassigned)state.status=`MIDI program ${data.program} is unassigned; the current patch is still playing.`
  Object.assign(state.telemetry, data)
  state.telemetry.grainMarks=[...grains,...(data.grainMarks??[])].filter(g=>state.telemetry.audioTime<=g.when+g.dur+.35).slice(-800)
- for (const m of data.midi ?? []) if (state.learn >= 0 && (m[0] & 240) === 176 && (m[0] & 15) === 0 && m[1] !== 74) { state.patch.globalCC[state.learn] = m[1]; state.learn = -1 }
+ for (const m of data.midi ?? []) if (state.learn >= 0 && (m[0] & 240) === 176 && m[1] !== 74 && m[1] < 120) {
+  if(state.learn===5)state.patch.sustainCC=m[1]
+  else if((m[0]&15)===0 && m[1]!==state.patch.sustainCC)state.patch.globalCC[state.learn]=m[1]
+  else continue
+  state.learn=-1
+ }
  if (state.ready && !state.saving && !timer && data.revision > nativeRevision && !loading) {
   loading = true
   const before = generation
@@ -111,6 +132,7 @@ export function refreshShared():Promise<void>{
  if(refreshing)return refreshing
  refreshing=request<SharedField[]>('sharedSnapshot',revision).then(fields=>{
   for(const field of fields){if(field.revision>(shared[field.key]?.revision??0))shared[field.key]=field;revision=Math.max(revision,field.revision)}
+  adoptLegacyIdentity()
  }).finally(()=>{refreshing=undefined})
  return refreshing
 }
@@ -122,9 +144,9 @@ export async function writeShared<T>(key:string,value:T,expected:number){
  }
  const result=await request('sharedCommit',[{key,value,revision:expected}])
  if(result.ok){
-  const field={key,value,revision:result.revision}
-  if(field.revision>(shared[key]?.revision??0))shared[key]=field
-  return{ok:true,field}
+  const fields:SharedField[]=result.fields??[{key,value,revision:result.revision}]
+  for(const field of fields)if(field.revision>=(shared[field.key]?.revision??0))shared[field.key]=field
+  return{ok:true,field:fields.find(field=>field.key===key)??shared[key]}
  }
  // A previous poll may have started before the conflicting commit.
  await refreshShared();await refreshShared()
@@ -132,4 +154,18 @@ export async function writeShared<T>(key:string,value:T,expected:number){
  return{ok:false,field:shared[key]}
 }
 export async function putShared(key:string,value:unknown){return(await writeShared(key,value,shared[key]?.revision??0)).ok}
+export async function saveSharedPatch(copy=false){
+ if(!copy&&!state.patch.id){const before=state.patch;await refreshShared();if(state.patch!==before)throw Error('The patch changed while preparing its saved identity. Save the current patch again.')}
+ const before=state.patch,document=clone(before),originalName=before.name
+ const saved=Object.values(shared).filter(field=>field.key.startsWith('patch/')&&field.value)
+ const matches=saved.filter(field=>field.value.name===document.name)
+ const existing=copy?undefined:document.id&&document.id!=='builtin:factory'?saved.find(field=>field.value.id===document.id):matches.length===1?matches[0]:undefined
+ document.id=existing?.value.id??(!copy&&document.id&&document.id!=='builtin:factory'?document.id:`patch-${crypto.randomUUID()}`)
+ if(copy){const name=document.name;let suffix=1;do{document.name=`${name} copy${suffix>1?` ${suffix}`:''}`;++suffix}while(saved.some(field=>field.value.name===document.name))}
+ const key=existing?.key??`patch/${document.id}`
+ const result=await writeShared(key,document,shared[key]?.revision??0)
+ if(result.ok&&state.patch===before){state.patch.id=result.field.value.id;if(copy&&state.patch.name===originalName)state.patch.name=document.name}
+ const slots=shared['midi/program-bank']?.value.slots as (string|null)[]|undefined
+ return{ok:result.ok,program:result.ok?slots?.indexOf(result.field.value.id)??-1:-1,name:document.name}
+}
 setInterval(()=>void refreshShared().catch(report),350)

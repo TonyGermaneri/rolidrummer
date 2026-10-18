@@ -1,0 +1,16 @@
+if(NOT EXISTS "${SRC}/manifest.json" OR NOT EXISTS "${SRC}/minilm/model.onnx")
+    message(FATAL_ERROR "Pinned neural assets are missing; run native/tools/fetch-neural-assets.py")
+endif()
+file(MAKE_DIRECTORY "${DEST}")
+file(COPY_FILE "${SRC}/manifest.json" "${DEST}/manifest.json" ONLY_IF_DIFFERENT)
+file(COPY "${SRC}/minilm" DESTINATION "${DEST}")
+file(MAKE_DIRECTORY "${DEST}/onnxruntime/lib")
+# Headers and the downloaded tarball are development assets. Ship the actual
+# universal runtime once, plus its notices, inside each signed product bundle.
+file(COPY_FILE "${SRC}/onnxruntime/lib/libonnxruntime.1.23.1.dylib" "${DEST}/onnxruntime/lib/libonnxruntime.1.23.1.dylib" ONLY_IF_DIFFERENT)
+foreach(notice LICENSE ThirdPartyNotices.txt VERSION_NUMBER)
+    if(EXISTS "${SRC}/onnxruntime/${notice}")
+        file(COPY_FILE "${SRC}/onnxruntime/${notice}" "${DEST}/onnxruntime/${notice}" ONLY_IF_DIFFERENT)
+    endif()
+endforeach()
+execute_process(COMMAND codesign --force --sign "${IDENTITY}" --timestamp=none "${DEST}/onnxruntime/lib/libonnxruntime.1.23.1.dylib" COMMAND_ERROR_IS_FATAL ANY)

@@ -23,14 +23,147 @@ std::vector<std::tuple<int,int,float>> render(int block) {
  }
  return hits;
 }
+// Pedal-held owners survive MPE channel reuse, while their last expression is frozen.
+std::vector<std::tuple<int,int,int,uint64_t,float>> pedalRender(int block,int cc=64) {
+ auto c=fixture();c.launchGrid=0;c.switchGrid=0;c.sustainCC=cc;
+ Scheduler scheduler;Capture capture;std::vector<std::tuple<int,int,int,uint64_t,float>> events;
+ const Midi input[]={{0,0x91,60,100},{0,0x92,61,90},{500,0xb0,(uint8_t)cc,64},
+  {1000,0x81,60,99},{2000,0xb1,74,127},{2100,0x91,61,80},{2500,0x81,61,70},
+  {30000,0xb0,(uint8_t)cc,63},{40000,0x82,61,55}};
+ size_t mi=0;
+ for(int at=0;at<48000;at+=block){const int n=std::min(block,48000-at);std::vector<Midi> midi;
+  while(mi<std::size(input)&&input[mi].offset<at+n){auto m=input[mi++];m.offset-=at;midi.push_back(m);}
+  capture.events.clear();scheduler.process(c,{at/24000.,120,48000,true},n,midi.data(),(int)midi.size(),Capture::take,&capture);
+  for(const auto&e:capture.events)if(e.type==Event::hit||e.type==Event::releaseContact||e.type==Event::expression)
+   events.emplace_back(at+e.offset,e.type,e.key,e.owner,e.type==Event::releaseContact?e.values.lift:e.values.slide);
+ }
+ check(!scheduler.hasHeldNotes(),"Pedal up left a sustained pattern running");return events;
+}
+void sustainTests(){
+ const auto events=pedalRender(64);for(int block:{1,257,2048})check(pedalRender(block)==events,"Pedal timing depends on buffer partition");
+ check(pedalRender(257,66)==events,"Reassigned pedal behaves differently from CC64");
+ int releases=0;bool sustainedKick=false,reusedChannel=false;
+ for(const auto&[at,type,key,owner,value]:events){
+  if(type==Event::releaseContact){++releases;check(at==30000||at==40000,"Key released before pedal up");
+   if(owner==1)check(at==30000&&value==99/127.f,"Sustain lost original lift velocity");
+   if(owner==2)check(at==40000,"Pedal release stopped a physical finger");}
+  if(type==Event::hit&&at==24000&&owner==1){sustainedKick=true;check(value==0,"Channel reuse changed sustained expression");}
+  if(type==Event::hit&&at>2500&&owner==3)reusedChannel=true;
+  check(type!=Event::expression||owner!=1,"Expression was routed to a pedal-held owner");
+ }
+ check(releases==3&&sustainedKick&&reusedChannel,"Sustain lost notes on channel reuse");
+ auto c=fixture();Scheduler s;Capture out;
+ // Member pedals hold only their own channel; global release respects a local pedal.
+ Midi start[]={{0,0x91,60,100},{0,0x92,61,100},{1,0xb1,64,127},{2,0x81,60,64},{3,0x82,61,64}};
+ s.process(c,{0,120,48000,true},64,start,5,Capture::take,&out);
+ check(s.hasHeldNotes(),"Member pedal did not hold its note");
+ check(std::count_if(out.events.begin(),out.events.end(),[](const Event&e){return e.type==Event::releaseContact;})==1,"Member pedal held another channel");
+ out.events.clear();Midi up{0,0xb0,64,0};s.process(c,{64/24000.,120,48000,true},64,&up,1,Capture::take,&out);
+ check(s.hasHeldNotes(),"Master pedal up overrides a held member pedal");
+ c.sustainCC=66;out.events.clear();s.process(c,{128/24000.,120,48000,true},64,nullptr,0,Capture::take,&out);
+ check(!s.hasHeldNotes()&&out.events.front().type==Event::releaseContact,"Reassignment stranded a latched note");
+ s.reset();c.sustainCC=64;s.process(c,{0,120,48000,true},64,start,5,Capture::take,&out);
+ Midi panic{0,0xb0,123,0};s.process(c,{64/24000.,120,48000,true},64,&panic,1,Capture::take,&out);
+ check(!s.hasHeldNotes(),"Panic retained pedal-held notes");
+ // Repeated notes have bounded storage and all remaining owners release on pedal up.
+ s.reset();out.events.clear();std::vector<Midi> many{{0,0xb0,64,127}};
+ for(int i=0;i<140;++i){many.push_back({i*2,0x91,60,100});many.push_back({i*2+1,0x81,60,64});}
+ many.push_back({300,0xb0,64,0});s.process(c,{0,120,48000,true},512,many.data(),(int)many.size(),Capture::take,&out);
+ check(!s.hasHeldNotes(),"Sustain capacity eviction stranded notes");
+ check(std::count_if(out.events.begin(),out.events.end(),[](const Event&e){return e.type==Event::releaseContact;})==140,"Sustain capacity lost owner releases");
+}
+void reconfigureTests(){
+ auto original=fixture();original.launchGrid=0;original.switchGrid=1;
+ original.clips[0].notes={{0,1.25,36,1}};prepareClip(original.clips[0]);
+ original.keys[60].zoneCount=1;original.keys[60].intentEnabled=true;original.keys[60].intentWeights={{0,1,0,0}};
+ original.keys[60].intentSlewMs=0;original.keys[60].intentDwell=0;original.keys[60].intentPenalty=0;original.keys[60].zones[0]={1,0,0};
+ PatternGroup group;group.count=2;group.candidates[0]={0,{{0,0,0,0}}};group.candidates[1]={1,{{1,1,1,1}}};original.groups.push_back(group);
+ Scheduler scheduler;Capture capture;Midi start[]={{0,0x91,60,100},{2400,0xd1,127,0}};
+ scheduler.process(original,{0,120,48000,true},12000,start,2,Capture::take,&capture);
+ const auto owner=scheduler.contacts()[1].owner;const auto token=std::find_if(capture.events.begin(),capture.events.end(),[](const Event&e){return e.type==Event::hit;})->token;
+ check(scheduler.contacts()[1].clip==0&&scheduler.contacts()[1].wantedClip==1&&scheduler.contacts()[1].switches==1,"Refresh fixture lacks a pending candidate transition");
+ auto next=original;std::swap(next.clips[0],next.clips[1]);next.groups[0].candidates[0].clip=1;next.groups[0].candidates[1].clip=0;next.keys[60].zones[0].clip=1;
+ capture.events.clear();scheduler.reconfigure(original,next,.5,Capture::take,&capture);
+ const auto& contact=scheduler.contacts()[1];
+ check(contact.owner==owner&&contact.clip==1&&contact.wantedClip==0&&contact.switches==1,"Runtime remapping lost stable clip identity or its pending same-region switch");
+ check(capture.events.empty(),"Reordering unchanged candidates released the playing owner");
+ scheduler.process(next,{.5,120,48000,true},24000,nullptr,0,Capture::take,&capture);
+ check(scheduler.contacts()[1].clip==0,"Pending transition was not performed after runtime remapping");
+ const auto ending=std::find_if(capture.events.begin(),capture.events.end(),[&](const Event&e){return e.type==Event::endHit&&e.token==token;});
+ check(ending!=capture.events.end()&&ending->offset==18000,"Remapping lost an old runtime's outstanding note ending");
+ const auto change=std::find_if(capture.events.begin(),capture.events.end(),[](const Event&e){return e.type==Event::switchZone;});
+ check(change!=capture.events.end()&&change->offset==12000&&change->owner==owner,"Runtime remapping changed transition phase or owner");
+ auto disabled=next;disabled.keys[60].enabled=false;capture.events.clear();scheduler.reconfigure(next,disabled,1.5,Capture::take,&capture);
+ scheduler.process(disabled,{1.5,120,48000,true},64,nullptr,0,Capture::take,&capture);
+ check(!scheduler.contacts()[1].held&&scheduler.contacts()[1].down&&std::any_of(capture.events.begin(),capture.events.end(),[&](const Event&e){return e.type==Event::releaseContact&&e.owner==owner;}),"Removing a mapped key stranded its owner");
+ capture.events.clear();scheduler.reconfigure(disabled,next,1.5+64/24000.,Capture::take,&capture);
+ check(scheduler.contacts()[1].held&&scheduler.contacts()[1].owner==owner,"Remapping an already physical key lost its contact");
+}
+void intentTests(){
+ Configuration config;config.launchGrid=0;config.switchGrid=0;
+ PatternGroup variations;variations.count=14;
+ for(int i=0;i<14;++i){Clip clip;clip.id=(uint32_t)i+1;clip.length=4;clip.notes={{0,.1,42,.1f+i*.05f}};prepareClip(clip);config.clips.push_back(clip);variations.candidates[(size_t)i].clip=i;variations.candidates[(size_t)i].position[2]=i/13.f;}
+ config.groups.push_back(variations);
+ auto& key=config.keys[60];key.enabled=true;key.parts[42]=true;key.zoneCount=1;key.zones[0]={1,0,0};key.intentEnabled=true;key.intentWeights={{0,0,1,0}};key.intentPenalty=0;key.intentDwell=0;key.intentSlewMs=0;
+ // Fourteen fills remain reachable in one slide region, beyond eight zones.
+ for(int i=0;i<14;++i){Scheduler scheduler;Capture out;const int raw=(int)std::llround(i*16383./13);
+  Midi input[]={{0,0xe1,(uint8_t)(raw&127),(uint8_t)(raw>>7)},{0,0x91,60,100}};
+  scheduler.process(config,{0,120,48000,true},128,input,2,Capture::take,&out);
+  check(scheduler.contacts()[1].clip==i,"Glide cannot reach a candidate within its region");
+  check(scheduler.evaluations==1,"A candidate group evaluated inactive alternatives");
+  const auto hit=std::find_if(out.events.begin(),out.events.end(),[](const Event&e){return e.type==Event::hit;});
+  check(hit!=out.events.end()&&std::abs(hit->velocity-(.1f+i*.05f))<1e-6,"Selected candidate did not reach the drum gate");
+ }
+ config.groups[0].count=2;config.groups[0].candidates[0].position={{0,0,.5f,0}};config.groups[0].candidates[1].position={{1,1,.5f,1}};
+ key.intentWeights={{1,0,0,0}};config.keys[61]=key;config.switchGrid=.25;
+ Scheduler scheduler;Capture out;Midi press[]={{0,0x91,60,64},{0,0x92,61,64},{100,0xd1,127,0}};
+ scheduler.process(config,{0,120,48000,true},12000,press,3,Capture::take,&out);
+ check(scheduler.contacts()[1].clip==1&&scheduler.contacts()[2].clip==0,"Pressure did not select independently per MPE contact");
+ const auto change=std::find_if(out.events.begin(),out.events.end(),[](const Event&e){return e.type==Event::switchZone;});
+ check(change!=out.events.end()&&change->offset==6000&&change->key==60,"Candidate transition lost musical quantization");
+ // A separate slide region is a hard constraint, even under maximum pressure.
+ config.keys[60].zoneCount=2;config.keys[60].zones[0].upper=.7f;config.keys[60].zones[1]={1,13,-1};scheduler.reset();out.events.clear();
+ Midi fill[]={{0,0xb1,74,127},{0,0x91,60,127},{1,0xd1,127,0}};
+ scheduler.process(config,{0,120,48000,true},128,fill,3,Capture::take,&out);
+ check(scheduler.contacts()[1].zone==1&&scheduler.contacts()[1].clip==13,"Pressure escaped the selected fill region");
+ config.keys[60].zoneCount=1;config.keys[60].zones[0]={1,0,0};config.keys[60].intentWeights={{0,0,0,1}};scheduler.reset();out.events.clear();
+ Midi strike[]={{0,0x91,60,1},{0,0x92,60,127}};
+ scheduler.process(config,{0,120,48000,true},128,strike,2,Capture::take,&out);
+ check(scheduler.contacts()[1].clip==0&&scheduler.contacts()[2].clip==1,"Strike did not establish initial variation intent");
+}
 int main() {try {
+ sustainTests();
+ intentTests();
+ reconfigureTests();
  check(render(64)==render(257),"Timing depends on host buffer size");
  auto hits=render(64);check(hits.size()==4,"Expected isolated kick and hat events");
  check(std::get<0>(hits.back())==24312,"Human timing was quantized away");
  auto c=fixture();Scheduler s;Capture out;
  s.process(c,{0,120,48000,true},12000,nullptr,0,Capture::take,&out);
  for(auto&e:out.events)check(e.type!=Event::hit,"Unheld key sounded");
- check(s.evaluations==2,"Clip not evaluated exactly once");
+ check(s.evaluations==0,"Idle contacts evaluated unrelated clip timelines");
+ // Active contacts share one bus. Pending note endings survive removing the
+ // source clip from a prepared runtime and releasing the last physical key.
+ {
+  auto active=fixture();active.launchGrid=0;active.clips[0].notes={{0,2,36,1}};prepareClip(active.clips[0]);
+  Scheduler scheduler;Capture capture;
+  Midi start{0,0x91,60,100};scheduler.process(active,{0,120,48000,true},64,&start,1,Capture::take,&capture);
+  check(scheduler.evaluations==1,"An active key evaluated unrelated candidate timelines");
+  const auto onset=std::find_if(capture.events.begin(),capture.events.end(),[](const Event&e){return e.type==Event::hit;});
+  check(onset!=capture.events.end(),"Long-note fixture did not trigger");const auto heldToken=onset->token;
+  active.clips.clear();capture.events.clear();Midi up{0,0x81,60,80};
+  scheduler.process(active,{64/24000.,120,48000,true},48000,&up,1,Capture::take,&capture);
+  check(scheduler.evaluations==0,"Removed clips were still evaluated");
+  const auto ending=std::find_if(capture.events.begin(),capture.events.end(),[&](const Event&e){return e.type==Event::endHit&&e.token==heldToken;});
+  check(ending!=capture.events.end()&&ending->offset==48000-64,"Changing the prepared clip bus lost an outstanding note-off");
+ }
+ // Long durations must not overflow a sample-offset integer and end immediately.
+ {
+  auto longClip=fixture();longClip.launchGrid=0;longClip.clips[0].notes={{0,100000,36,1}};prepareClip(longClip.clips[0]);
+  Scheduler scheduler;Capture capture;Midi start{0,0x91,60,100};
+  scheduler.process(longClip,{0,120,48000,true},128,&start,1,Capture::take,&capture);
+  check(std::none_of(capture.events.begin(),capture.events.end(),[](const Event&e){return e.type==Event::endHit;}),"A distant note-off overflowed into the current block");
+ }
  s.reset();out.events.clear();
  Midi early[]={{100,0x91,60,127},{200,0x81,60,64}};
  s.process(c,{0,120,48000,true},30000,early,2,Capture::take,&out);

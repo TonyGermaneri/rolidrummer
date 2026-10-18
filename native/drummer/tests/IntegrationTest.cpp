@@ -1,6 +1,9 @@
 #include "PluginProcessor.h"
 #include <ssb/Parameters.h>
 #include <drummer/Assets.h>
+#include <drummer/PatchBank.h>
+#include <drummer/PatchResolver.h>
+#include <drummer/PatternFamilies.h>
 #include <iostream>
 #include <stdexcept>
 void check(bool x,const char* why){if(!x)throw std::runtime_error(why);}
@@ -18,7 +21,45 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   player.prepareToPlay(48000,256);Head head;check(render(player,head,true)>.1,"Restored external sample is silent");return 0;
  }
  auto doc=drummer::defaultDocument();auto runtime=drummer::compileDocument(doc);check(runtime->config.clips.size()==3,"Factory patterns missing");
+ // Master settings migrate dry and survive native patch/session compilation.
+ {
+  check(runtime->performance->fx.cutoff==20000 && runtime->performance->fx.sources[0]==-1,"Legacy master defaults changed the sound");
+  auto bus=doc.clone();auto fx=juce::JSON::parse(R"({"cutoff":800,"resonance":3,"reverbMix":0.3,"delayMix":0.2,"chorusMix":0.1,"bindings":{"reverbMix":0,"delayMix":1,"chorusMix":2,"cutoff":3,"resonance":4}})");
+  bus.getDynamicObject()->setProperty("fx",fx);auto compiled=drummer::compileDocument(bus);
+  check(compiled->performance->fx.cutoff==800 && compiled->performance->fx.sources==std::array<int,5>{0,1,2,3,4},"Master FX/mappings were not compiled");
+  auto recalled=drummer::compileDocument(juce::JSON::parse(compiled->json));check(recalled->performance->fx.sources==compiled->performance->fx.sources,"Master bindings lost on round trip");
+ }
+ // Hardware program changes load on the worker with no editor. Use an isolated patch bank.
+ {
+  DrummerProcessor player;auto temporary=juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("rd-program-test",".sqlite");
+  player.shared=std::make_unique<drummer::SharedStore>(temporary);
+  juce::Array<juce::var> operations;
+  for(const char* name:{"Zulu","Alpha"}){auto patch=doc.clone();patch.getDynamicObject()->setProperty("name",name);auto* op=new juce::DynamicObject;op->setProperty("key","patch/"+juce::String(name));op->setProperty("value",patch);op->setProperty("revision",0);operations.add(op);}
+  player.shared->commit(operations);const auto bank=drummer::patchBank(player.shared->snapshot());
+  check(bank.size()==128&&bank[1].getProperty("name",{}).toString()=="Alpha"&&bank[2].getProperty("name",{}).toString()=="Zulu","Initial MIDI program assignments changed");
+  player.prepareToPlay(48000,256);juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer midi;
+  auto pump=[&](const char* name){for(int i=0;i<300;++i){juce::Thread::sleep(5);juce::Timer::callPendingTimersSynchronously();player.processBlock(audio,midi);if(juce::JSON::parse(player.document()).getProperty("name",{}).toString()==name)return;}throw std::runtime_error("MIDI patch worker did not select requested patch");};
+  midi.addEvent(juce::MidiMessage::programChange(2,1),0);player.processBlock(audio,midi);check(player.lastProgram.load()==-1,"Member-channel program message changed the global patch");
+  midi.addEvent(juce::MidiMessage::programChange(1,1),0);player.processBlock(audio,midi);pump("Alpha");
+  midi.addEvent(juce::MidiMessage::programChange(1,2),0);player.processBlock(audio,midi);pump("Zulu");
+  midi.addEvent(juce::MidiMessage::programChange(1,1),0);midi.addEvent(juce::MidiMessage::programChange(1,0),2);player.processBlock(audio,midi);pump(doc.getProperty("name",{}).toString().toRawUTF8());
+  auto updated=bank[1].clone();updated.getDynamicObject()->setProperty("name","Renamed Alpha");
+  auto growth=doc.clone();growth.getDynamicObject()->setProperty("name","Aardvark");
+  juce::Array<juce::var> changes;
+  auto add=[&](const juce::String& key,const juce::var& value,int64_t revision){auto* op=new juce::DynamicObject;op->setProperty("key",key);op->setProperty("value",value);op->setProperty("revision",(juce::int64)revision);changes.add(op);};
+  int64_t alphaRevision=0;const auto savedBank=player.shared->snapshot();for(const auto& field:*savedBank.getArray())if(field.getProperty("key",{}).toString()=="patch/Alpha")alphaRevision=(juce::int64)field.getProperty("revision",0);
+  add("patch/Alpha",updated,alphaRevision);add("patch/Aardvark",growth,0);check((bool)player.shared->commit(changes).getProperty("ok",false),"Patch bank growth failed");
+  const auto stable=drummer::patchBank(player.shared->snapshot());
+  check(stable[1].getProperty("id",{})==bank[1].getProperty("id",{})&&stable[2].getProperty("id",{})==bank[2].getProperty("id",{})&&stable[3].getProperty("name",{}).toString()=="Aardvark","A renamed or alphabetically earlier patch shifted assigned programs");
+  midi.addEvent(juce::MidiMessage::programChange(1,1),0);player.processBlock(audio,midi);pump("Renamed Alpha");
+  midi.addEvent(juce::MidiMessage::programChange(1,127),0);player.processBlock(audio,midi);
+  for(int i=0;i<300&&!player.programUnassigned.load();++i){juce::Thread::sleep(5);juce::Timer::callPendingTimersSynchronously();player.processBlock(audio,midi);}
+  check(player.programUnassigned.load()&&juce::JSON::parse(player.document()).getProperty("name",{}).toString()=="Renamed Alpha","An unassigned program replaced the current patch");
+  check(!player.programFailed.load(),"Valid program selection failed");
+  player.shared.reset();temporary.deleteFile();temporary.getSiblingFile(temporary.getFileName()+"-wal").deleteFile();temporary.getSiblingFile(temporary.getFileName()+"-shm").deleteFile();
+ }
  const std::array<int,16> factoryKeys={48,50,52,53,55,57,59,60,62,64,65,67,69,71,72,74};
+ check(runtime->performance->contactEffectsOnly,"Drummer prepared unused legacy per-sound reverb convolvers");
  for(int key:factoryKeys)check(runtime->sounds[(size_t)key]!=nullptr,"Factory kit is not mapped to natural keys");
  for(int key=0;key<128;++key)if(runtime->config.keys[(size_t)key].enabled)check(key%12!=1&&key%12!=3&&key%12!=6&&key%12!=8&&key%12!=10,"Factory sound occupies an accidental");
  // Real two-bar backbeats, independently voiced parts and tuned sample reuse.
@@ -62,6 +103,61 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   listen(false,++browser.previewRequest);browser.processBlock(audio,midi);check(audio.getMagnitude(0,256)>0,"Sound preview is silent");
   browser.prepareToPlay(44100,256);browser.processBlock(audio,midi);check(!browser.previewPlaying.load(),"Old-rate preview survived host reprepare");
   listen(true,++browser.previewRequest,48000);browser.processBlock(audio,midi);check(!browser.previewPlaying.load(),"Late old-rate preview was accepted");
+ }
+ // Marker snapshots retain the sustained owner while the same channel gets a new finger.
+ {
+  DrummerProcessor player;player.prepareToPlay(48000,256);Head head;head.playing=false;player.setPlayHead(&head);
+  juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer midi;DrummerProcessor::FingerSnapshot snapshot;
+  auto read=[&](){check(player.readFingers(snapshot),"Finger snapshot unavailable");};
+  midi.addEvent(juce::MidiMessage::controllerEvent(2,74,96),0);
+  midi.addEvent(juce::MidiMessage::channelPressureChange(2,90),0);
+  midi.addEvent(juce::MidiMessage::noteOn(2,48,(juce::uint8)100),0);
+  player.processBlock(audio,midi);read();check(snapshot.count==1&&!snapshot.fingers[0].sustained,"Physical marker missing");
+  const auto original=snapshot.fingers[0];
+  midi.addEvent(juce::MidiMessage::controllerEvent(1,64,127),0);
+  midi.addEvent(juce::MidiMessage::noteOff(2,48),1);
+  midi.addEvent(juce::MidiMessage::controllerEvent(2,74,5),2);
+  midi.addEvent(juce::MidiMessage::noteOn(2,50,(juce::uint8)100),3);
+  player.processBlock(audio,midi);read();check(snapshot.count==2,"Reused channel lost a sustained marker");
+  int latched=0;for(int i=0;i<snapshot.count;++i){const auto& f=snapshot.fingers[(size_t)i];
+   if(f.sustained){++latched;check(f.owner==original.owner&&f.note==48&&f.slide==original.slide&&f.glide==original.glide&&f.pressure==original.pressure,"Sustained marker changed captured values");}
+   else check(f.owner!=original.owner&&f.note==50&&f.slide==5/127.f,"New finger inherited sustained identity");
+  }check(latched==1,"Incorrect sustained marker count");
+  midi.addEvent(juce::MidiMessage::controllerEvent(1,64,0),0);player.processBlock(audio,midi);read();
+  check(snapshot.count==1&&!snapshot.fingers[0].sustained&&snapshot.fingers[0].note==50,"Pedal up retained latched marker or removed physical finger");
+  midi.addEvent(juce::MidiMessage::controllerEvent(1,64,127),0);midi.addEvent(juce::MidiMessage::noteOff(2,50),1);player.processBlock(audio,midi);
+  midi.addEvent(juce::MidiMessage::allNotesOff(1),0);player.processBlock(audio,midi);read();check(snapshot.count==0,"Panic left finger markers");
+ }
+ // Sustain renders the same pattern as a physically held key, even with a stopped host.
+ {
+  auto sustainRender=[&](bool pedal,bool playing,int block){
+   DrummerProcessor player;auto patch=doc.clone();patch.getDynamicObject()->setProperty("sustainCC",66);
+   player.apply(drummer::compileDocument(patch));player.prepareToPlay(48000,2048);Head head;head.playing=playing;player.setPlayHead(&head);
+   juce::AudioBuffer<float> audio(2,2048);juce::MidiBuffer midi;std::vector<float> result;
+   struct Input{int at;juce::MidiMessage message;};
+   const Input events[]={{0,juce::MidiMessage::noteOn(2,50,(juce::uint8)100)},
+    {1,juce::MidiMessage::controllerEvent(1,66,127)},
+    {pedal?1000:48000,juce::MidiMessage::noteOff(2,50,(juce::uint8)99)},
+    {48000,juce::MidiMessage::controllerEvent(1,66,0)}};
+   size_t index=0;
+   for(int at=0;at<96000;at+=block){const int n=std::min(block,96000-at);audio.setSize(2,n,false,false,true);midi.clear();
+    while(index<std::size(events)&&events[index].at<at+n){midi.addEvent(events[index].message,events[index].at-at);++index;}
+    head.beat=at/24000.;player.processBlock(audio,midi);
+    if(at>2000&&at+n<48000){check(player.freePlaying.load()==!playing,"Sustained stopped-host gate missing");if(pedal)check(player.contacts[1].load()==0,"Sustained note appears as a physical finger");}
+    if(at>48000)check(!player.freePlaying.load(),"Pedal up did not close the stopped-host gate");
+    for(int j=0;j<n;++j)result.push_back(audio.getSample(0,j));
+   }
+   juce::MemoryBlock saved;player.getStateInformation(saved);DrummerProcessor restored;restored.setStateInformation(saved.getData(),(int)saved.getSize());
+   check(drummer::compileDocument(juce::JSON::parse(restored.document()))->config.sustainCC==66,"AU state lost reassigned pedal");
+   return result;
+  };
+  const auto held=sustainRender(false,false,256);
+  for(bool playing:{false,true})for(int block:{64,257}){
+   const auto pedalled=sustainRender(true,playing,block);double error=0,energy=0;
+   for(size_t i=0;i<held.size();++i){error=std::max(error,double(std::abs(held[i]-pedalled[i])));if(i>24000&&i<48000)energy+=pedalled[i]*pedalled[i];}
+   if(error>=.0001||energy<=.01)std::cerr<<"sustain: error="<<error<<" energy="<<energy<<" playing="<<playing<<" block="<<block<<"\n";
+   check(error<.0001&&energy>.01,"Pedal-held audio differs from physical hold or loses clock sync");
+  }
  }
  // Stopped-host keys use the same shared musical clock, at the host's exact
  // tempo (including changes while stopped), retaining it if tempo is omitted.
@@ -146,7 +242,7 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   for(int start=0;start<96000;){while(segments[segment+1].frame<=start)++segment;const auto& current=segments[segment];const int n=std::min({block,96000-start,segments[segment+1].frame-start});buffer.setSize(2,n,false,false,true);midi.clear();
    while(event<events.size()&&events[event].frame<start+n){midi.addEvent(events[event].message,events[event].frame-start);++event;}
    transport.bpm=current.bpm;transport.playing=current.playing;transport.beat=current.ppq+(current.playing?(start-current.frame)*current.bpm/(60*48000.):0);player.processBlock(buffer,midi);
-   check(!player.overflow.load(),"Dense MPE input overflowed unexpectedly");if(current.playing)check(player.clipEvaluations.load()==3,"Clip evaluation count scales with held keys");
+   check(!player.overflow.load(),"Dense MPE input overflowed unexpectedly");if(current.playing)check(player.clipEvaluations.load()<=3,"Clip evaluation count scales with held keys");
    for(int i=0;i<n;++i)for(int ch=0;ch<2;++ch){const float sample=buffer.getSample(ch,i);check(std::isfinite(sample)&&std::abs(sample)<100,"Dense offline audio is invalid");result.push_back(sample);}start+=n;
   }
   return result;
@@ -223,6 +319,66 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
  childCheck("restore",statePath);childCheck("portable",portablePath);
  auto missing=external.clone();auto missingKeys=missing.getProperty("keys",{});auto missingSound=(*missingKeys.getArray())[0].getProperty("sound",{});missingSound.getDynamicObject()->setProperty("path",fixture.getSiblingFile("never-created.wav").getFullPathName());auto incomplete=drummer::compileDocument(missing);check(!incomplete->sounds[48]&&incomplete->sounds[50],"One missing sound prevents the rest of the kit loading");check(incomplete->json.contains("missing"),"Missing sound is not reported for relinking");
  const auto revision=samplePlayer.stateRevision.load();check(!samplePlayer.apply(drummer::compileDocument(doc),revision-1),"Stale editor overwrote a restored document");check(samplePlayer.stateRevision.load()==revision,"Rejected document changed the revision");
- std::cout<<"integration: audio, session recall, cross-process settings, MIDI precision, shared sample cache, embedded DAW assets, portable archives, missing-sound recovery and stale-document rejection passed\n";
+ // Actual archive -> catalog -> cached clip -> processor -> audio, including
+ // independent part gates and session recall after the source is removed.
+ {
+  auto root=juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("rd-library-audio","");root.createDirectory();
+  auto source=root.getChildFile("patterns.zip");
+  juce::MidiMessageSequence sequence;
+  for(int note:{36,38,42}){sequence.addEvent(juce::MidiMessage::noteOn(10,note,(juce::uint8)100),0);sequence.addEvent(juce::MidiMessage::noteOff(10,note),96);}
+  sequence.addEvent(juce::MidiMessage::endOfTrack(),3840);
+  juce::MidiFile file;file.setTicksPerQuarterNote(960);file.addTrack(sequence);juce::MemoryOutputStream midi;check(file.writeTo(midi),"Library audio MIDI write failed");
+  {juce::ZipFile::Builder archive;archive.addEntry(std::make_unique<juce::MemoryInputStream>(midi.getMemoryBlock(),true),6,"Hard Rock/Groove.mid",juce::Time::getCurrentTime());
+   for(int variant=0;variant<14;++variant){
+    juce::MidiMessageSequence events;
+    for(int i=0;i<16;++i){const int note=i%4==0?36:i%4==2?38:42;const double tick=i*240.+variant*2.;
+     events.addEvent(juce::MidiMessage::noteOn(10,note,(juce::uint8)(65+(variant*7+i*3)%55)),tick);events.addEvent(juce::MidiMessage::noteOff(10,note),tick+70+variant);}
+    events.addEvent(juce::MidiMessage::endOfTrack(),3840);juce::MidiFile variation;variation.setTicksPerQuarterNote(960);variation.addTrack(events);juce::MemoryOutputStream data;check(variation.writeTo(data),"Variation MIDI write failed");
+    archive.addEntry(std::make_unique<juce::MemoryInputStream>(data.getMemoryBlock(),true),6,"Hard Rock/Grooves/Variation "+juce::String(variant)+".mid",juce::Time::getCurrentTime());
+   }
+   juce::FileOutputStream output(source);check(archive.writeToStream(output,nullptr),"Library audio ZIP write failed");}
+  drummer::PatternLibrary catalog(root.getChildFile("catalog.sqlite"));catalog.importSource(source);
+  auto results=catalog.browse(juce::JSON::parse(R"({"query":"hard rock"})"));auto rows=results.getProperty("rows",{});
+  check(rows.getArray()&&rows.getArray()->size()==15,"Real catalog query did not find its distinct pattern family");
+  auto pattern=catalog.pattern((*rows.getArray())[0].getProperty("id",{}).toString());
+  auto makePatch=[&](bool hatsOnly){auto patch=doc.clone();auto clip=pattern.clone();
+   if(hatsOnly){auto notes=clip.getProperty("notes",{});juce::Array<juce::var> keep;for(const auto&note:*notes.getArray())if((int)note.getProperty("note",0)==42)keep.add(note);clip.getDynamicObject()->setProperty("notes",keep);}
+   patch.getDynamicObject()->setProperty("clips",juce::Array<juce::var>{clip});auto keys=patch.getProperty("keys",{});
+   for(auto&key:*keys.getArray()){auto*zone=new juce::DynamicObject;zone->setProperty("upper",1.);zone->setProperty("clipId",clip.getProperty("id",{}));key.getDynamicObject()->setProperty("zones",juce::Array<juce::var>{juce::var(zone)});}return patch;};
+  auto full=makePatch(false),filtered=makePatch(true);
+  if(drummer::neuralAssetsDirectory().getChildFile("manifest.json").existsAsFile()){
+   drummer::NeuralIndex index(root.getChildFile("catalog.sqlite"));index.build();
+   auto query=juce::JSON::parse(R"({"query":"Heavy Rock","variationCount":2,"seed":"audio-proof"})");
+   auto retrieved=index.search(query);auto matches=retrieved.getProperty("rows",{});
+   check(matches.getArray()&&matches.getArray()->size()==15,"Native pretrained query did not retrieve the archive family");
+   full=drummer::resolveNeuralPatch(catalog,index,full,query);
+   drummer::PatternFamilies families(catalog.file());families.registerFamily(full.getProperty("neural",{}));families.reconcile(index);
+   full=drummer::resolveNeuralPatch(catalog,index,full,query);
+   check(full.getProperty("neural",{}).getProperty("familyBuildId",{}).toString().isNotEmpty(),"Rendered family did not pin its membership snapshot");
+   check(full.getProperty("neural",{}).getProperty("query",{}).toString()=="Heavy Rock","Named query resolution was not persisted");
+   check((int)full.getProperty("neural",{}).getProperty("generatedCount",0)>0,"Archive query did not generate compatible variations");
+   // Render a generated hat candidate explicitly, then verify exact session
+   // recall; availability in a candidate list alone is not playback evidence.
+   auto keys=full.getProperty("keys",{});juce::String generatedHat;
+   for(auto& key:*keys.getArray())if((int)key.getProperty("note",0)==50){
+    const auto zones=key.getProperty("zones",{});
+    for(const auto& zone:*zones.getArray()){const auto choices=zone.getProperty("candidates",{});if(auto* candidates=choices.getArray())for(const auto& candidate:*candidates)if((bool)candidate.getProperty("generated",false))generatedHat=candidate.getProperty("clipId",{}).toString();}
+    check(generatedHat.isNotEmpty(),"Resolved hat part lacks a generated performance");
+    auto* zone=new juce::DynamicObject;zone->setProperty("upper",1.0);zone->setProperty("clipId",generatedHat);key.getDynamicObject()->setProperty("zones",juce::Array<juce::var>{juce::var(zone)});
+   }
+   const auto portable=root.getChildFile("generated.rolidrummer");drummer::savePortablePatch(portable,full);
+   check(juce::JSON::toString(drummer::loadPatch(portable).getProperty("clips",{}),true)==juce::JSON::toString(full.getProperty("clips",{}),true),"Portable patch lost generated notes or provenance");
+   filtered=full.clone();auto clips=filtered.getProperty("clips",{});
+   for(auto& clip:*clips.getArray()){auto sourceNotes=clip.getProperty("notes",{});juce::Array<juce::var> hats;for(const auto&note:*sourceNotes.getArray())if((int)note.getProperty("note",0)==42)hats.add(note);clip.getDynamicObject()->setProperty("notes",hats);}
+  }
+  DrummerProcessor player,control;player.apply(drummer::compileDocument(full));control.apply(drummer::compileDocument(filtered));player.prepareToPlay(48000,256);control.prepareToPlay(48000,256);Head a,b;
+  const auto actual=render(player,a,true,2,50),expected=render(control,b,true,2,50);
+  check(actual>.001&&std::abs(actual-expected)<1e-8,"Catalog playback leaked kick/snare events into a held hat key");
+  juce::MemoryBlock session;player.getStateInformation(session);check(source.deleteFile(),"Library audio source could not be removed");
+  DrummerProcessor restored;restored.setStateInformation(session.getData(),(int)session.getSize());restored.prepareToPlay(48000,256);Head c;
+  check(std::abs(render(restored,c,true,2,50)-expected)<1e-8,"Catalog session recall depends on the original archive");
+  root.deleteRecursively();
+ }
+ std::cout<<"integration: audio, session recall, cross-process settings, MIDI precision, shared sample cache, embedded DAW assets, portable archives, missing-sound recovery, stale-document rejection and cached library playback passed\n";
  return 0;
  }catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

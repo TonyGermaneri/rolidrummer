@@ -1,6 +1,7 @@
 node_modules/
 dist/
 native/build*/
+native/neural-assets/
 release/
 *.wav
 .DS_Store
