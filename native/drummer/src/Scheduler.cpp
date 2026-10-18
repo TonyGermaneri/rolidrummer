@@ -96,15 +96,15 @@ void Scheduler::reconfigure(const Configuration& previous,const Configuration& n
             if(wasHeld){Event e;e.type=Event::switchZone;e.owner=f.owner;e.key=f.key;e.channel=f.channel;e.values=f.values;sink(ctx,e);}
         }
     }
-    if(next.keyboardMode==KeyboardMode::toggle)enforceToggle(0,sink,ctx);
+    enforceKeyOwnership(next.keyboardMode,0,sink,ctx);
 }
-void Scheduler::enforceToggle(int offset,Sink sink,void* ctx) noexcept {
+void Scheduler::enforceKeyOwnership(KeyboardMode mode,int offset,Sink sink,void* ctx) noexcept {
     std::array<Contact*,128> owners{};
     for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if(!f.held)continue;
         auto*& owner=owners[(size_t)f.key];
-        if(!owner){owner=&f;f.toggled=true;continue;}
+        if(!owner){owner=&f;f.toggled=mode==KeyboardMode::toggle;continue;}
         auto* old=owner->owner<f.owner?owner:&f;if(old==owner)owner=&f;
-        old->suppressed=old->down;release(*old,offset,Event::killContact,sink,ctx);owner->toggled=true;
+        old->suppressed=old->down;release(*old,offset,Event::killContact,sink,ctx);owner->toggled=mode==KeyboardMode::toggle;
     }
 }
 void Scheduler::release(Contact& f,int offset,Event::Type type,Sink sink,void* ctx) noexcept {
@@ -152,13 +152,13 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
         auto values=f.values;values.strike=m.b/127.f;values.lift=0;
         const int zone=zoneAt(k,source(values,k.zoneSource));
         bool stop=false;
-        if(keyboardMode==KeyboardMode::toggle && k.enabled){
+        if(k.enabled){
             // Ownership is by key, independent of the member channel allocated to this press.
             const Contact* owner=nullptr;
             for(int i=0;i<maxContacts+maxSustained;++i){const auto& old=contact(i);
                 if(old.held&&old.key==m.a&&(!owner||old.owner>owner->owner))owner=&old;
             }
-            stop=owner&&owner->zone==zone;
+            stop=keyboardMode==KeyboardMode::toggle&&owner&&owner->zone==zone;
             for(int i=0;i<maxContacts+maxSustained;++i){auto& old=contact(i);
                 if(old.held&&old.key==m.a){old.suppressed=old.down;release(old,m.offset,Event::killContact,sink,ctx);}
             }
@@ -202,7 +202,7 @@ void Scheduler::process(const Configuration& cfg,Clock clock,int frames,const Mi
         for(auto& f:sustained)if(!pedalDown(f.channel))release(f,0,Event::releaseContact,sink,ctx);
         keyboardMode=cfg.keyboardMode;
         for(int i=0;i<maxContacts+maxSustained;++i)contact(i).toggled=false;
-        if(keyboardMode==KeyboardMode::toggle)enforceToggle(0,sink,ctx);
+        enforceKeyOwnership(keyboardMode,0,sink,ctx);
     }
     const double step=clock.bpm/(60*clock.sampleRate),end=clock.ppq+frames*step;
     const bool discontinuity=clock.discontinuity || (wasPlaying && clock.playing && std::abs(clock.ppq-expected)>step*2);

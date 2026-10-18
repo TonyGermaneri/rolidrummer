@@ -104,6 +104,29 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   browser.prepareToPlay(44100,256);browser.processBlock(audio,midi);check(!browser.previewPlaying.load(),"Old-rate preview survived host reprepare");
   listen(true,++browser.previewRequest,48000);browser.processBlock(audio,midi);check(!browser.previewPlaying.load(),"Late old-rate preview was accepted");
  }
+ // Every mode gives a key one zone/owner, in both audible output and editor telemetry.
+ {
+  for(const char* mode:{"normal","hold","toggle"}){
+   auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);patch.getDynamicObject()->setProperty("launchGrid",0);patch.getDynamicObject()->setProperty("switchGrid",0);
+   auto key=(*patch.getProperty("keys",{}).getArray())[0].clone();auto settings=key.getProperty("sound",{}).getProperty("s",{});
+   settings.getDynamicObject()->setProperty("mode","hold");settings.getDynamicObject()->setProperty("delayMix",0);settings.getDynamicObject()->setProperty("reverbMix",0);
+   key.getDynamicObject()->setProperty("routes",juce::JSON::parse(R"([{"source":1,"target":"pan","min":-1,"max":1,"curve":1,"smoothing":0}])"));
+   key.getDynamicObject()->setProperty("zones",juce::JSON::parse(R"([{"upper":0.22,"clipId":"single"},{"upper":0.76,"clipId":"single"},{"upper":1,"clipId":"single"}])"));
+   patch.getDynamicObject()->setProperty("keys",juce::Array<juce::var>{key});
+   juce::Array<juce::var> notes;for(int n=0;n<8;++n){auto* hit=new juce::DynamicObject;hit->setProperty("beat",n*.125);hit->setProperty("duration",.1);hit->setProperty("note",36);hit->setProperty("velocity",1);notes.add(juce::var(hit));}
+   auto* clip=new juce::DynamicObject;clip->setProperty("id","single");clip->setProperty("length",1);clip->setProperty("notes",notes);patch.getDynamicObject()->setProperty("clips",juce::Array<juce::var>{juce::var(clip)});
+   DrummerProcessor player;player.apply(drummer::compileDocument(patch));player.prepareToPlay(48000,256);Head head;head.playing=false;player.setPlayHead(&head);
+   juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer midi;DrummerProcessor::FingerSnapshot fingers;
+   midi.addEvent(juce::MidiMessage::pitchWheel(2,0),0);midi.addEvent(juce::MidiMessage::noteOn(2,48,(juce::uint8)100),0);
+   double left=0;for(int b=0;b<32;++b){player.processBlock(audio,midi);for(int i=0;i<256;++i)left+=audio.getSample(0,i)*audio.getSample(0,i);}check(left>.01,"One-zone audio fixture was silent");
+   midi.addEvent(juce::MidiMessage::pitchWheel(3,16383),0);midi.addEvent(juce::MidiMessage::controllerEvent(3,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(3,48,(juce::uint8)100),0);player.processBlock(audio,midi);
+   check(player.readFingers(fingers)&&fingers.count==1&&fingers.fingers[0].channel==2&&fingers.fingers[0].zone==2,"Processor retained multiple zones/markers for a key");
+   midi.addEvent(juce::MidiMessage::controllerEvent(2,74,64),0);midi.addEvent(juce::MidiMessage::channelPressureChange(2,127),1);midi.addEvent(juce::MidiMessage::noteOff(2,48),2);
+   left=0;double right=0;for(int b=0;b<96;++b){player.processBlock(audio,midi);if(b>48)for(int i=0;i<256;++i){left+=audio.getSample(0,i)*audio.getSample(0,i);right+=audio.getSample(1,i)*audio.getSample(1,i);}}
+   check(left<1e-8&&right>.01,"Replaced zone remained audible or stale finger input stopped the new zone");
+   check(player.readFingers(fingers)&&fingers.count==1&&fingers.fingers[0].zone==2,"Stale input changed the authoritative playing zone");
+  }
+ }
  // Marker snapshots retain the sustained owner while the same channel gets a new finger.
  {
   DrummerProcessor player;player.prepareToPlay(48000,256);Head head;head.playing=false;player.setPlayHead(&head);

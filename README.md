@@ -32,7 +32,9 @@ cmake --build native/build-universal -j 4
 native/tools/package-macos.sh
 ```
 
-The packaging script verifies signatures and both CPU slices before creating archives under `release`. GitHub Actions builds native artifacts on `main` and publishes signed, notarized macOS releases on matching `v*` version tags. The editor preview deploys separately to GitHub Pages. Credentials and manual signing/notarization are described in [SIGNING.md](native/packaging/SIGNING.md).
+The packaging script verifies signatures and both CPU slices before creating archives under `release`, then checks clean ZIP extraction, bundle metadata, executable permissions and macOS/Finder package recognition. GitHub Actions builds native artifacts on `main` and publishes signed, notarized macOS releases on matching `v*` version tags. The editor preview deploys separately to GitHub Pages. Credentials and manual signing/notarization are described in [SIGNING.md](native/packaging/SIGNING.md).
+
+An AU `.component` is a macOS bundle directory, presented by Finder as one package. Install the complete **Roli Drummer.component** item in **~/Library/Audio/Plug-Ins/Components/**; do not copy its inner **Contents** directory separately. The release ZIP contains that component directly, without a version-named wrapper folder. Finder's context menu should offer **Show Package Contents**.
 
 ## Play and edit
 
@@ -98,7 +100,7 @@ The RISE preset arrows send **MIDI Program Change**, with the hardware retaining
 
 The SSB theme menu changes the sound panel, browser, waveforms, zones, editor colors and the native window background/resize grip. A 12-pixel resize border and 30-pixel corner grip remain outside the web controls; narrow editors reflow controls and scroll the upper section. Host-owned title bars retain the host’s appearance. Theme selection is shared between instances. The selected Seaboard key has a fill highlight; live finger markers follow CC74 slide and pitch, with pressure controlling marker size. Sample playback markers and granular traces use native voice telemetry. The status bar reports the latest CC74 value and channel.
 
-The main keyboard has **Normal**, **Hold** and **Toggle** modes. Normal releases a part when you lift the key unless the sustain pedal is down. Hold keeps released parts playing, like CC64 sustain. Toggle latches each key independently: press the same zone again to stop that key, or press a different zone to replace its previous zone. Purple key backgrounds and markers identify toggled keys. A key has one active owner in Toggle, including when the Seaboard allocates a different MPE channel to the next press; old fingers cannot change or release its replacement.
+The main keyboard has **Normal**, **Hold** and **Toggle** modes. Normal releases a part when you lift the key unless the sustain pedal is down. Hold keeps released parts playing, like CC64 sustain. Toggle latches each key independently: press the same zone again to stop that key, or press a different zone to replace its previous zone. Purple key backgrounds and markers identify toggled keys. A key has one active owner and one zone in every mode, including when the Seaboard allocates a different MPE channel to the next press; old fingers cannot change or release its replacement.
 
 In Hold and Toggle, pedal-up clears released latches and leaves physically held keys playing. It works even if the pedal was not previously down. The selected mode stays armed for subsequent releases. Changing modes clears software-held released keys; a physically depressed sustain pedal still holds its own notes. Modes are saved in patches and DAW sessions; live latched notes are not restored. Older patches open in Normal.
 
@@ -132,7 +134,7 @@ cmake --build native/build-universal --target drummer-intent-performance -j 4
 RD_DATA_DIR=/private/tmp/rd-intent-benchmark arch -arm64 native/build-universal/plugin/drummer-intent-performance --benchmark
 ```
 
-Each instance reaches fifteen MPE members, 128 sustained owners and 64 voices. The CSV includes architecture/translation status, startup/steady/drain deadline misses, whole-run timing, sampled resident memory and prepared refresh counts. Add an instance count to `--benchmark`, or use `--soak SECONDS INSTANCES BLOCK RATE`:
+Each instance reaches 128 distinct keys: fifteen physical MPE members, 113 sustained owners and 64 voices. The CSV includes architecture/translation status, startup/steady/drain deadline misses, whole-run timing, sampled resident memory and prepared refresh counts. Add an instance count to `--benchmark`, or use `--soak SECONDS INSTANCES BLOCK RATE`:
 
 ```sh
 RD_DATA_DIR=/private/tmp/rd-intent-benchmark arch -arm64 native/build-universal/plugin/drummer-intent-performance --benchmark 2

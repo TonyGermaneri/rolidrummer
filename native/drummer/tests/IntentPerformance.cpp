@@ -60,7 +60,7 @@ juce::var document(bool refreshed,bool effects){
         for(int n=0;n<16;++n)notes.add(object({{"beat",n*.125+i*.00002},{"duration",.35},{"note",n%4==3?42:36},{"velocity",.35+i*.006+(refreshed?.08:0)}}));
         clips.add(object({{"id","intent-"+juce::String(i)},{"length",2},{"notes",notes}}));
     }
-    for(int pitch=48;pitch<64;++pitch){auto key=first.clone();set(key,"note",pitch);set(key,"parts",juce::Array<juce::var>{36});
+    for(int pitch=0;pitch<128;++pitch){auto key=first.clone();set(key,"note",pitch);set(key,"parts",juce::Array<juce::var>{36});
         auto sound=get(key,"sound"),settings=get(sound,"s");set(settings,"volume",.05);set(settings,"mode","hold");set(settings,"release",.08);
         set(settings,"delayMix",effects?.15:0);set(settings,"reverbMix",effects?.15:0);
         if(!effects){auto routes=get(key,"routes");for(int i=routes.size()-1;i>=0;--i)if(get((*routes.getArray())[i],"target")=="reverbMix")routes.getArray()->remove(i);}
@@ -105,7 +105,7 @@ Run run(double rate,int block,bool effects,bool collect,int instances=1,double d
     result.setupRss=result.maximumRss=residentMiB();if(collect)result.samples.resize(size_t(rate*duration*2*instances));
     struct Input{int at;juce::MidiMessage message;};std::vector<Input> events;
     events.push_back({0,juce::MidiMessage::controllerEvent(1,64,127)});
-    for(int i=0;i<128;++i){const int channel=2+i%15,pitch=48+i%15;
+    for(int i=0;i<128;++i){const int channel=2+i%15,pitch=i;
         events.push_back({i*3,juce::MidiMessage::controllerEvent(channel,74,i%128)});
         events.push_back({i*3,juce::MidiMessage::channelPressureChange(channel,(i*7)%128)});
         events.push_back({i*3,juce::MidiMessage::noteOn(channel,pitch,(juce::uint8)(70+i%50))});
@@ -154,8 +154,9 @@ Run run(double rate,int block,bool effects,bool collect,int instances=1,double d
             if(!variedTransport&&at>=request)check(player.activationPending()==(at+count<=boundary),"Full-contact refresh missed its musical boundary");
             if(awaiting[size_t(p)]&&!player.activationPending()){awaiting[size_t(p)]=false;++result.adoptions;}
             check(player.readFingers(fingers),"Could not read editor-free contact telemetry");contacts+=fingers.count;
-            if(at==1024)check(fingers.count==143,"Processor fixture failed to occupy fifteen MPE members plus 128 sustained owners");
-            if(at>=1024&&at+count<=pedalUp)check(fingers.count==143,"A tempo/transport change lost a held or sustained owner");
+            if(at==1024)check(fingers.count==128,"Processor fixture failed to occupy 128 unique keys: fifteen MPE members plus 113 sustained owners");
+            if(at>=1024&&at+count<=pedalUp)check(fingers.count==128,"A tempo/transport change lost a held or sustained owner");
+            std::array<bool,128> active{};for(int i=0;i<fingers.count;++i){const auto& f=fingers.fingers[size_t(i)];check(!active[size_t(f.note)],"Processor retained multiple owners for one key");active[size_t(f.note)]=true;}
             voices+=player.engine.activeVoices();buses+=player.clipEvaluations.load();
             for(int i=0;i<count;++i)for(int ch=0;ch<2;++ch){const float value=audio[size_t(p)].getSample(ch,i);check(std::isfinite(value),"Combined processor intent audio is nonfinite");result.energy+=value*value;if(variedTransport&&!heads[size_t(p)].playing)stoppedEnergy[size_t((at+i)/int(rate))]+=value*value;if(collect)result.samples[(size_t(at+i)*instances+p)*2+ch]=value;}
         }
@@ -164,7 +165,7 @@ Run run(double rate,int block,bool effects,bool collect,int instances=1,double d
         at+=count;
     }
     for(const auto& player:players){check(player->readFingers(fingers),"Could not read final contact telemetry");check(fingers.count==0&&!player->activationPending(),"Processor left a held contact or queued refresh after release");}
-    check(result.contacts==143*instances&&result.voices==64*instances&&result.energy>.01,"Processor workload did not reach intended contact/polyphony load");
+    check(result.contacts==128*instances&&result.voices==64*instances&&result.energy>.01,"Processor workload did not reach intended contact/polyphony load");
     if(variedTransport)for(size_t second=0;second<stoppedEnergy.size();++second)if(second%24>=9&&second%24<13)check(stoppedEnergy[second]>.00001,"Stopped host silenced an internally running performance");
     check(result.adoptions==result.refreshes*instances,"Some prepared refreshes never became active");result.endRss=residentMiB();
     std::sort(times.begin(),times.end());std::sort(loads.begin(),loads.end());result.p99=times[size_t(times.size()*.99)];result.p99Load=loads[size_t(loads.size()*.99)];result.maximumLoad=loads.back();return result;
@@ -217,7 +218,7 @@ void printRun(double rate,int block,bool effects,int instances,double duration){
     size_t length=sizeof(translated);sysctlbyname("sysctl.proc_translated",&translated,&length,nullptr,0);
 #endif
     const auto r=run(rate,block,effects,false,instances,duration);rusage usage{};getrusage(RUSAGE_SELF,&usage);
-    std::cout<<architecture<<','<<translated<<','<<int(rate)<<','<<block<<','<<(effects?"intent+effects":"intent")<<','<<15*instances<<','<<128*instances<<','<<r.voices<<','<<r.buses<<','<<r.measuredAudio<<','<<r.total<<','<<r.total/r.measuredAudio*100<<','<<r.p99*1000<<','<<r.maximum*1000<<','<<r.p99Load*100<<','<<r.maximumLoad*100<<','<<r.misses<<','<<r.callbacks<<','<<r.maximumFrame<<','<<double(usage.ru_maxrss)/1048576<<','<<instances<<','<<duration<<','<<r.allCallbacks<<','<<r.allMisses<<','<<r.allMaximumLoad*100<<','<<r.startupMisses<<','<<r.startupMaximumLoad*100<<','<<r.drainMisses<<','<<r.drainMaximumLoad*100<<','<<r.setupSeconds<<','<<r.setupRss<<','<<r.maximumRss<<','<<r.endRss<<','<<r.refreshes<<std::endl;
+    std::cout<<architecture<<','<<translated<<','<<int(rate)<<','<<block<<','<<(effects?"intent+effects":"intent")<<','<<15*instances<<','<<113*instances<<','<<r.voices<<','<<r.buses<<','<<r.measuredAudio<<','<<r.total<<','<<r.total/r.measuredAudio*100<<','<<r.p99*1000<<','<<r.maximum*1000<<','<<r.p99Load*100<<','<<r.maximumLoad*100<<','<<r.misses<<','<<r.callbacks<<','<<r.maximumFrame<<','<<double(usage.ru_maxrss)/1048576<<','<<instances<<','<<duration<<','<<r.allCallbacks<<','<<r.allMisses<<','<<r.allMaximumLoad*100<<','<<r.startupMisses<<','<<r.startupMaximumLoad*100<<','<<r.drainMisses<<','<<r.drainMaximumLoad*100<<','<<r.setupSeconds<<','<<r.setupRss<<','<<r.maximumRss<<','<<r.endRss<<','<<r.refreshes<<std::endl;
 }
 }
 int main(int argc,char** argv){juce::ScopedJuceInitialiser_GUI gui;try{
@@ -233,7 +234,7 @@ int main(int argc,char** argv){juce::ScopedJuceInitialiser_GUI gui;try{
             for(size_t i=0;i<reference.samples.size();++i){const double difference=std::abs(reference.samples[i]-other.samples[i]);if(difference>0)first=std::min(first,i);if(difference>=.0001){firstLarge=std::min(firstLarge,i);++large;}if(difference>error){error=difference;worst=i;}}
             if(error>=.0001)std::cerr<<"transport block="<<block<<" first different frame="<<first/(2*instances)<<" first above tolerance="<<firstLarge/(2*instances)<<" worst frame="<<worst/(2*instances)<<" difference="<<error<<'\n';
             matches=matches&&error<.0001;
-            comparisons.add(object({{"block",block},{"maximumAudioDifference",error},{"firstDifferentFrame",(juce::int64)(first/(2*instances))},{"firstAboveToleranceFrame",large?juce::var((juce::int64)(firstLarge/(2*instances))):juce::var()},{"samplesAboveTolerance",(juce::int64)large},{"worstFrame",(juce::int64)(worst/(2*instances))},{"physical",15*instances},{"sustained",128*instances},{"maximumVoices",other.voices},{"preparedRefreshesPerInstance",other.refreshes},{"adoptedRefreshes",other.adoptions}}));
+            comparisons.add(object({{"block",block},{"maximumAudioDifference",error},{"firstDifferentFrame",(juce::int64)(first/(2*instances))},{"firstAboveToleranceFrame",large?juce::var((juce::int64)(firstLarge/(2*instances))):juce::var()},{"samplesAboveTolerance",(juce::int64)large},{"worstFrame",(juce::int64)(worst/(2*instances))},{"physical",15*instances},{"sustained",113*instances},{"maximumVoices",other.voices},{"preparedRefreshesPerInstance",other.refreshes},{"adoptedRefreshes",other.adoptions}}));
             std::cerr<<"transport block "<<block<<" rendered\n";
         }
         std::cout<<juce::JSON::toString(object({{"state",matches?"complete":"failed"},{"seconds",seconds},{"instances",instances},{"rate",48000},{"effectsEnabled",effects},{"referenceBlock",64},{"comparisons",comparisons},{"scope","Repeated 24-second host script: 120/87/172/95 BPM, temporarily missing tempo, stopped/frozen host PPQ with continued internal playback, resume, backwards seeks and one-second loops. Full MPE/sustain/voice load, prepared refresh every two seconds, C++ callback heap guards, finite audio, retained owners, nonzero stopped-host seconds and final contact/refresh drain. Every sample is compared within .0001 against the 64-frame reference. This is an editor-free correctness workload, not a host deadline guarantee."}}),true)<<'\n';

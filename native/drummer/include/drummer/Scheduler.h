@@ -56,7 +56,7 @@ struct Event {
 struct Contact {
     bool down = false; // Physical contact, including keys without an assigned sound.
     bool held = false;
-    bool toggled = false, suppressed = false; // Explicitly stopped physical touches cannot restart on an edit.
+    bool toggled = false, suppressed = false; // Replaced/stopped physical touches cannot restart on an edit.
     int key = -1, zone = 0, wanted = 0, channel = 0;
     uint64_t owner = 0;
     double opens = 0, switches = 0;
@@ -94,7 +94,7 @@ private:
     KeyboardMode keyboardMode = KeyboardMode::normal;
     Contact& contact(int i) noexcept { return i < maxContacts ? fingers[(size_t)i] : sustained[(size_t)(i-maxContacts)]; }
     bool pedalDown(int channel) const noexcept { return pedals[(size_t)pedalMaster] || pedals[(size_t)channel]; }
-    void enforceToggle(int offset, Sink, void*) noexcept;
+    void enforceKeyOwnership(KeyboardMode, int offset, Sink, void*) noexcept;
     void release(Contact&, int offset, Event::Type, Sink, void*) noexcept;
     void lift(Contact&, int offset, Sink, void*) noexcept;
     uint64_t generation = 0;

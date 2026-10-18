@@ -33,3 +33,6 @@ done
 cp "$root/native/packaging/release-notes.md" "$out/README.md"
 cp "$root/LICENSE" "$root/THIRD_PARTY.md" "$root/native/packaging/SIGNING.md" "$out/"
 (cd "$out" && shasum -a 256 ./*.zip > SHA256SUMS)
+
+# Validate a fresh extraction, not only the build directory.
+python3 "$root/native/tools/verify-macos-archives.py" "$out"

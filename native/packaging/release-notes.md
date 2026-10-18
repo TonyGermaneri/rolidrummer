@@ -1,21 +1,18 @@
-# Roli Drummer 0.2.0
+# Roli Drummer 0.2.1
 
-Hold and Toggle modes bring hands-free, per-key pattern control to the main keyboard.
+Every keyboard mode now enforces one active pattern zone per key.
 
-- **Normal** plays a part while its key is held, with ordinary sustain-pedal support.
-- **Hold** keeps released keys playing, like CC64 sustain.
-- **Toggle** latches each key independently. Press the same zone again to stop that key; press another zone to replace its old pattern. One active owner per key is maintained across MPE member-channel changes, and stale finger input cannot change the replacement.
-- Toggled keys have purple backgrounds and matching finger markers. Released Hold keys retain ordinary sustain styling.
-- Pedal-up clears released latches while physically held keys continue. The selected mode stays armed for subsequent releases. Pedal reassignment and Panic remain supported.
-- Mode selections are saved in patches and DAW sessions. Live latched notes are not restored; older patches default to Normal. Existing sound settings, drum-note filters and pattern timing remain intact.
-- Release archive names now match the filenames in **SHA256SUMS** after downloading from GitHub.
+- **Normal** and **Hold** replace that key's previous owner on each new press, including when the Seaboard assigns a different MPE channel. Repeated presses retrigger the part; they do not toggle it off.
+- **Toggle** retains its existing rules: the same zone stops the key, while a different zone replaces it.
+- Replaced fingers cannot change the active zone, release its new owner or restart through a patch edit. Other keys, pedal behavior, musical quantization and drum-note filters retain their existing rules.
+- Release packaging now verifies a fresh extraction of every archive: one correctly named bundle, matching metadata/version, executable permissions, valid code signatures and Finder package recognition. The AU is a `.component` bundle directory, installed as a complete item.
 
-This release retains the neural MIDI library search, resolved per-key pattern regions, seeded variations and SSB 0.6.2 sound engine from 0.1.0.
+This patch retains Hold/Toggle selection recall, purple toggle indicators, neural library matching and the SSB 0.6.2 sound engine.
 
 ## Install the AU on another Mac
 
-1. Download and unzip the **AU archive** (its filename contains **.component**) from the release assets.
-2. Place **Roli Drummer.component** in **~/Library/Audio/Plug-Ins/Components/**. Create that folder if necessary.
+1. Download and unzip the **AU archive** (its filename contains **.component**) from the release assets. The extracted item is **Roli Drummer.component**, a complete macOS bundle; Finder should offer **Show Package Contents**.
+2. Move the complete **Roli Drummer.component** bundle (not its inner **Contents** folder) into **~/Library/Audio/Plug-Ins/Components/**. Create that folder if necessary.
 3. Restart Ableton Live or rescan Audio Units in its plug-in settings. Load **Roli Drummer** from the Audio Units list and enable MPE for your Seaboard.
 
 The VST3 archive installs into **~/Library/Audio/Plug-Ins/VST3/**. The standalone app can run from a local Applications folder. All three builds support Apple Silicon and Intel. Neural indexing/search requires macOS 13.4 or later because of the bundled inference runtime.

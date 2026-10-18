@@ -62,6 +62,12 @@ def verify(args):
         results.append({"format": kind, "architecture": architectures[0], "runtimeArchitecture": architectures[1],
                         "deepSignature": True, "webFiles": len(web), "webMatchesBuild": True,
                         "modelFilesMatchPinnedManifest": True, "licensesMatchAssets": True})
+    bundles = [args.artifacts / kind / name for kind, name in
+               [("AU", "Roli Drummer.component"), ("VST3", "Roli Drummer.vst3"), ("Standalone", "Roli Drummer.app")]]
+    subprocess.run(["xcrun", "swift", str(ROOT / "native/tools/verify-macos-packages.swift"),
+                    *map(str, bundles)], check=True, capture_output=True, text=True)
+    for result in results:
+        result["finderPackage"] = True
     return {"state": "complete", "formats": results}
 
 

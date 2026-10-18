@@ -25,10 +25,10 @@ std::vector<std::tuple<int,int,float>> render(int block) {
 }
 // Pedal-held owners survive MPE channel reuse, while their last expression is frozen.
 std::vector<std::tuple<int,int,int,uint64_t,float>> pedalRender(int block,int cc=64) {
- auto c=fixture();c.launchGrid=0;c.switchGrid=0;c.sustainCC=cc;
+ auto c=fixture();c.launchGrid=0;c.switchGrid=0;c.sustainCC=cc;c.keys[62]=c.keys[61];
  Scheduler scheduler;Capture capture;std::vector<std::tuple<int,int,int,uint64_t,float>> events;
  const Midi input[]={{0,0x91,60,100},{0,0x92,61,90},{500,0xb0,(uint8_t)cc,64},
-  {1000,0x81,60,99},{2000,0xb1,74,127},{2100,0x91,61,80},{2500,0x81,61,70},
+  {1000,0x81,60,99},{2000,0xb1,74,127},{2100,0x91,62,80},{2500,0x81,62,70},
   {30000,0xb0,(uint8_t)cc,63},{40000,0x82,61,55}};
  size_t mi=0;
  for(int at=0;at<48000;at+=block){const int n=std::min(block,48000-at);std::vector<Midi> midi;
@@ -65,16 +65,40 @@ void sustainTests(){
  s.reset();c.sustainCC=64;s.process(c,{0,120,48000,true},64,start,5,Capture::take,&out);
  Midi panic{0,0xb0,123,0};s.process(c,{64/24000.,120,48000,true},64,&panic,1,Capture::take,&out);
  check(!s.hasHeldNotes(),"Panic retained pedal-held notes");
- // Repeated notes have bounded storage and all remaining owners release on pedal up.
+ // Repeated same-key strikes replace the prior latch; pedal up releases the final owner.
  s.reset();out.events.clear();std::vector<Midi> many{{0,0xb0,64,127}};
  for(int i=0;i<140;++i){many.push_back({i*2,0x91,60,100});many.push_back({i*2+1,0x81,60,64});}
  many.push_back({300,0xb0,64,0});s.process(c,{0,120,48000,true},512,many.data(),(int)many.size(),Capture::take,&out);
  check(!s.hasHeldNotes(),"Sustain capacity eviction stranded notes");
- check(std::count_if(out.events.begin(),out.events.end(),[](const Event&e){return e.type==Event::releaseContact;})==140,"Sustain capacity lost owner releases");
+ check(std::count_if(out.events.begin(),out.events.end(),[](const Event&e){return e.type==Event::releaseContact||e.type==Event::killContact;})==140,"Sustain capacity lost owner releases");
 }
 int playing(const Scheduler& scheduler,int key=-1){
  int count=0;for(const auto& f:scheduler.contacts())if(f.held&&(key<0||f.key==key))++count;
  for(const auto& f:scheduler.sustainedContacts())if(f.held&&(key<0||f.key==key))++count;return count;
+}
+void singleZoneTests(){
+ for(auto mode:{KeyboardMode::normal,KeyboardMode::hold,KeyboardMode::toggle})for(bool lifted:{false,true})for(bool pedal:{false,true})for(bool different:{false,true}){
+  auto c=fixture();c.keyboardMode=mode;c.launchGrid=c.switchGrid=0;Scheduler scheduler;Capture capture;int at=0;
+  auto run=[&](std::initializer_list<Midi> midi){capture.events.clear();scheduler.process(c,{at/24000.,120,48000,true},64,midi.begin(),(int)midi.size(),Capture::take,&capture);at+=64;};
+  run({{0,0xb0,64,(uint8_t)(pedal?127:0)},{0,0x91,60,90},{1,0x93,61,100}});
+  const auto old=scheduler.contacts()[1].owner;
+  if(lifted)run({{0,0x81,60,80}});
+  const bool existed=!lifted||pedal||mode!=KeyboardMode::normal;
+  run({{0,0xb2,74,(uint8_t)(different?127:0)},{1,0x92,60,110}});
+  const bool active=!(mode==KeyboardMode::toggle&&existed&&!different);
+  check(playing(scheduler,60)==int(active)&&playing(scheduler,61)==1,"A key retained multiple zones or changed another key");
+  const auto current=scheduler.contacts()[2].owner;
+  check(!scheduler.contacts()[1].held&&(!active||scheduler.contacts()[2].zone==(different?2:0)),"Newest key press did not own its selected zone");
+  if(existed)check(std::any_of(capture.events.begin(),capture.events.end(),[&](const Event&e){return e.type==Event::killContact&&e.owner==old;}),"Replacement did not stop the old zone owner");
+  auto edited=c;edited.keys[60].zones[0].clip=1;
+  scheduler.reconfigure(c,edited,at/24000.,Capture::take,&capture);c=edited;
+  check(playing(scheduler,60)==int(active),"A pattern edit revived a replaced physical finger");
+  run({{0,0xb1,74,64},{1,0xd1,127,0},{2,0x81,60,64}});
+  check(playing(scheduler,60)==int(active)&&(!active||scheduler.contacts()[2].owner==current),"Stale member input stopped a replacement");
+  check(std::none_of(capture.events.begin(),capture.events.end(),[&](const Event&e){return (e.type==Event::expression||e.type==Event::switchZone)&&e.owner==old;}),"Stale expression reached a replaced owner");
+  run({{0,0x82,60,64},{1,0xb0,64,0}});
+  check(playing(scheduler,60)==0&&scheduler.contacts()[3].held,"Pedal up retained a released zone or stopped another physical key");
+ }
 }
 void keyboardModeTests(){
  auto c=fixture();c.launchGrid=0;c.switchGrid=0;c.keyboardMode=KeyboardMode::toggle;
@@ -114,12 +138,12 @@ void keyboardModeTests(){
  // Hold behaves like sustain, including retriggers rather than toggle-off.
  c.keyboardMode=KeyboardMode::hold;
  run({{0,0x91,60,100},{1,0x81,60,64},{2,0x91,60,100},{3,0x81,60,64},{4,0x92,61,100}});
- check(playing(scheduler,60)==2&&scheduler.contacts()[2].held,"Hold incorrectly toggled off a repeated key");
+ check(playing(scheduler,60)==1&&scheduler.contacts()[2].held,"Hold did not retrigger with one owner per key");
  run({{0,0xb0,64,0}});check(playing(scheduler,60)==0&&scheduler.contacts()[2].held,"Hold pedal release failed to retain the physical key");
  run({{0,0x82,61,64}});c.keyboardMode=KeyboardMode::normal;run({});check(!scheduler.hasHeldNotes(),"Leaving Hold stranded a latch");
- // A real pedal retains its owners when switching modes, and entering Toggle deduplicates per key.
+ // A real pedal retains the latest owner when switching modes.
  run({{0,0xb0,64,127},{1,0x91,60,100},{2,0x81,60,64},{3,0x93,60,100}});
- check(playing(scheduler,60)==2,"Normal mode changed its existing overlapping-owner behavior");
+ check(playing(scheduler,60)==1,"Normal mode retained an overlapping owner for the same key");
  c.keyboardMode=KeyboardMode::toggle;run({});check(playing(scheduler,60)==1&&scheduler.contacts()[3].toggled,"Entering Toggle did not select one newest owner per key");
  run({{0,0x83,60,64}});c.keyboardMode=KeyboardMode::normal;run({});check(playing(scheduler,60)==1,"Mode change ignored a real sustain pedal");
  run({{0,0xb0,64,0}});check(!scheduler.hasHeldNotes(),"Real pedal release stranded a mode-change owner");
@@ -203,15 +227,16 @@ void intentTests(){
  Midi fill[]={{0,0xb1,74,127},{0,0x91,60,127},{1,0xd1,127,0}};
  scheduler.process(config,{0,120,48000,true},128,fill,3,Capture::take,&out);
  check(scheduler.contacts()[1].zone==1&&scheduler.contacts()[1].clip==13,"Pressure escaped the selected fill region");
- config.keys[60].zoneCount=1;config.keys[60].zones[0]={1,0,0};config.keys[60].intentWeights={{0,0,0,1}};scheduler.reset();out.events.clear();
- Midi strike[]={{0,0x91,60,1},{0,0x92,60,127}};
+ config.keys[60].zoneCount=1;config.keys[60].zones[0]={1,0,0};config.keys[60].intentWeights={{0,0,0,1}};config.keys[61]=config.keys[60];scheduler.reset();out.events.clear();
+ Midi strike[]={{0,0x91,60,1},{0,0x92,61,127}};
  scheduler.process(config,{0,120,48000,true},128,strike,2,Capture::take,&out);
  check(scheduler.contacts()[1].clip==0&&scheduler.contacts()[2].clip==1,"Strike did not establish initial variation intent");
 }
 int main() {try {
  sustainTests();
+ singleZoneTests();
  keyboardModeTests();
- for(auto mode:{KeyboardMode::hold,KeyboardMode::toggle}){const auto events=keyboardModeRender(mode,64);for(int block:{1,257,2048})check(keyboardModeRender(mode,block)==events,"Hold/Toggle depends on host buffer size");}
+ for(auto mode:{KeyboardMode::normal,KeyboardMode::hold,KeyboardMode::toggle}){const auto events=keyboardModeRender(mode,64);for(int block:{1,257,2048})check(keyboardModeRender(mode,block)==events,"Keyboard mode timing depends on host buffer size");}
  intentTests();
  reconfigureTests();
  check(render(64)==render(257),"Timing depends on host buffer size");
@@ -305,20 +330,6 @@ int main() {try {
  s.process(c,{0,120,48000,true},64,masterSlide,3,Capture::take,&out);
  check(s.contacts()[1].zone==0&&s.contacts()[15].zone==0,"Master CC74 was broadcast into member contacts");
  check(std::none_of(out.events.begin(),out.events.end(),[](const Event&e){return e.type==Event::globalCC&&e.cc==74;}),"CC74 escaped into global controllers");
- // Same note number on two channels still has two separate expression owners.
- {auto isolated=fixture();isolated.switchGrid=0;isolated.launchGrid=0;s.reset();out.events.clear();
-  Midi start[]={{0,0xb1,74,0},{0,0x91,60,100},{0,0xb2,74,127},{0,0x92,60,100}};
-  s.process(isolated,{0,120,48000,true},64,start,4,Capture::take,&out);
-  const auto ownerA=s.contacts()[1].owner,ownerB=s.contacts()[2].owner;check(ownerA!=ownerB,"Overlapping note pitches share expression ownership");
-  out.events.clear();Midi change[]={{0,0xb1,74,64},{1,0xb0,74,0}};
-  s.process(isolated,{64/24000.,120,48000,true},64,change,2,Capture::take,&out);
-  check(s.contacts()[1].zone==1&&s.contacts()[2].zone==2,"Slide crossed channel boundaries for the same note");
-  for(const auto&e:out.events)if(e.type==Event::expression||e.type==Event::switchZone)check(e.owner==ownerA,"Slide modified another voice owner");
-  Midi reuse[]={{0,0x81,60,64},{1,0xb1,74,0},{2,0x91,61,100}};
-  s.process(isolated,{128/24000.,120,48000,true},64,reuse,3,Capture::take,&out);
-  check(s.contacts()[1].key==61&&s.contacts()[1].zone==0&&s.contacts()[1].owner!=ownerA,"Channel reuse failed to bind expression to the new note");
-  check(s.contacts()[2].key==60&&s.contacts()[2].zone==2&&s.contacts()[2].owner==ownerB,"Channel reuse changed the other held note");
- }
 
  Midi unassigned{0,0x93,99,100};s.process(c,{64/24000.,120,48000,true},64,&unassigned,1,Capture::take,&out);
  check(s.contacts()[3].down&&!s.contacts()[3].held,"Unassigned physical finger missing from telemetry");
