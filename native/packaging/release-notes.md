@@ -1,13 +1,16 @@
-# Roli Drummer 0.1.0
+# Roli Drummer 0.2.0
 
-An MPE drum instrument for the ROLI Seaboard, with independent drum parts and expression for each held key.
+Hold and Toggle modes bring hands-free, per-key pattern control to the main keyboard.
 
-- Import MIDI folders or ZIP libraries, then search a musical name such as **Heavy Rock** to resolve compatible sparse grooves, steady beats and fills. Each key keeps its drum-note filter.
-- Slide selects pattern regions; Strike, Glide and Press shape intent and sound independently per contact. Lift shapes release, and CC64 sustains lifted parts. Playback follows the DAW or runs from the current tempo while transport is stopped.
-- Optional seeded variations recombine compatible pattern fragments. Saved patches and DAW sessions retain the resolved MIDI notes, mappings and assigned sample data.
-- The sound engine incorporates SSB 0.6.2: Granulator III CLASSIC/LOOP/CLOUD modes, variation and scanning, expanded modulation, stereo state-variable filters and key scaling. Loop interpolation and mono/poly note-release fixes are included.
-- Existing presets, patch contents and levels are preserved by this sound-engine update. Legacy grainReverse gesture bindings still reverse the whole sample; grainLoopReverse controls LOOP segment reverse probability.
-- Delay and room tails remain independent between contacts, with exact drum-release timing across host buffer sizes. Panic clears held and sustained voices.
+- **Normal** plays a part while its key is held, with ordinary sustain-pedal support.
+- **Hold** keeps released keys playing, like CC64 sustain.
+- **Toggle** latches each key independently. Press the same zone again to stop that key; press another zone to replace its old pattern. One active owner per key is maintained across MPE member-channel changes, and stale finger input cannot change the replacement.
+- Toggled keys have purple backgrounds and matching finger markers. Released Hold keys retain ordinary sustain styling.
+- Pedal-up clears released latches while physically held keys continue. The selected mode stays armed for subsequent releases. Pedal reassignment and Panic remain supported.
+- Mode selections are saved in patches and DAW sessions. Live latched notes are not restored; older patches default to Normal. Existing sound settings, drum-note filters and pattern timing remain intact.
+- Release archive names now match the filenames in **SHA256SUMS** after downloading from GitHub.
+
+This release retains the neural MIDI library search, resolved per-key pattern regions, seeded variations and SSB 0.6.2 sound engine from 0.1.0.
 
 ## Install the AU on another Mac
 
@@ -21,7 +24,7 @@ Your personal MIDI library is not included in these downloads. Use a portable **
 
 ## Validation and limits
 
-All 17 native suites, 119 editor tests and universal bundle checks pass. Engine and expression checks pass on Apple Silicon and Intel; Apple auval and VST3 pluginval strictness 5 pass. Hardware feel and musical listening remain dependent on the controller, host and material.
+All 17 native suites, 121 editor tests and universal bundle checks pass. Hold/Toggle scheduler, allocation-guard and processor checks also pass under x86_64. Apple auval and VST3 pluginval strictness 5 pass. Hardware feel and musical listening remain dependent on the controller, host and material.
 
 The instrument supports up to 64 voices. Extreme CLOUD settings with 20 grains per side across all 64 voices exceed real time at 96 kHz on the measured development machine; reduce density/polyphony or use a lower sample rate for that workload. See IMPLEMENTATION.md in the repository for measured operating limits.
 

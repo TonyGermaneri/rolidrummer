@@ -26,7 +26,9 @@ for item in 'AU/Roli Drummer.component' 'VST3/Roli Drummer.vst3' 'Standalone/Rol
  done
  done
  name="${bundle##*/}"
- ditto -c -k --keepParent --sequesterRsrc "$bundle" "$out/$name-$version-macOS-universal.zip"
+ # GitHub normalizes spaces in asset names; make checksums use the published names.
+ archive_name="${name// /.}"
+ ditto -c -k --keepParent --sequesterRsrc "$bundle" "$out/$archive_name-$version-macOS-universal.zip"
 done
 cp "$root/native/packaging/release-notes.md" "$out/README.md"
 cp "$root/LICENSE" "$root/THIRD_PARTY.md" "$root/native/packaging/SIGNING.md" "$out/"
