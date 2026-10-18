@@ -34,6 +34,8 @@ As in SSB, CI adds the temporary signing keychain to the existing user search li
 
 Run `python3 native/tools/test-macos-signing.py` to exercise the actual workflow setup/cleanup blocks and signing script with mocked system commands. These tests cover nested signing, paths with spaces and restoration after failures without using real credentials or keychains. They also run in CI before the editor build.
 
+After signing, CI follows SSB's validation sequence: install the AU, refresh `AudioComponentRegistrar`, validate its component codes with Apple's `auval`, then validate the VST3 with pluginval in process at strictness 5. Logs from both validators are retained on failure, and pipeline errors propagate through log capture.
+
 Pushes to `main` build and validate universal macOS AU, VST3 and standalone artifacts, signing them when credentials are present. Version tags (`v0.1.0`, for example) additionally require signing/notarization credentials, notarize and staple the bundles, and publish a GitHub Release with archives and SHA-256 checksums. A tag must match both `package.json` and `native/CMakeLists.txt`; update both before tagging a new version. No release is published if validation or notarization fails.
 
 The **Plugins** workflow can also be dispatched manually with **notarize** enabled to produce notarized artifacts without creating a release. Development artifacts report their actual signing/notarization status in `BUILD.txt`. Windows publishing is not configured.
