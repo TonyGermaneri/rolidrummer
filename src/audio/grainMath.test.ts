@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  GRAIN_FREQ_FLOOR, grainFreqMin, grainLevel, hermite, readAt, scanOffset, sprayOffset, tuneRndRatio, windowAt, windowTable, WINDOW_POINTS,
+  cloudGain, cloudLength, GRAIN_FREQ_FLOOR, grainFreqMin, grainLevel, hermite, loopFade, loopSegment, readAt, scanOffset,
+  skewExponent, skewPhase, sprayOffset, tuneRndRatio, varGain, varPitchRatio, varPosOffset, varSizeRatio, windowAt, windowTable,
+  WINDOW_POINTS,
 } from './grainMath'
 
 describe('grain window (Granulator II\'s Window patch)', () => {
@@ -95,6 +97,96 @@ describe('per-grain draws', () => {
     expect(scanOffset(1, 200, 1, 1, 2)).toBeCloseTo(0.5)
     expect(scanOffset(1, 100, 1, 2, 2)).toBeCloseTo(0.5)
     expect(scanOffset(1, 100, 0.25, 1, 2)).toBeCloseTo(0.5)
+  })
+
+  it('S.LOOP starts SCAN over at its distance; S.KEY\'s speed scales how fast it gets there', () => {
+    expect(scanOffset(2.5, 100, 1, 1, 2, true)).toBeCloseTo(0.5)
+    expect(scanOffset(4.5, 100, 1, 1, 2, true)).toBeCloseTo(0.5)
+    expect(scanOffset(2.5, 100, 1, 1, 2, false)).toBeCloseTo(2)
+    expect(scanOffset(0.5, 100, 1, 1, 2, false, 2)).toBeCloseTo(1)
+    expect(scanOffset(1.5, 100, 1, 1, 2, true, 2)).toBeCloseTo(1)
+  })
+})
+
+describe('Granulator III', () => {
+  it('SKEW: an exponent on the window\'s phase, 1 in the middle', () => {
+    expect(skewExponent(0.5)).toBeCloseTo(1, 6)
+    expect(skewExponent(0)).toBeCloseTo(0.1 ** 1.5, 6)
+    expect(skewExponent(1)).toBeCloseTo(10 ** 1.5, 6)
+    expect(skewExponent(-1)).toBe(skewExponent(0))
+    expect(skewExponent(2)).toBe(skewExponent(1))
+    for (let s = 0.05; s < 1; s += 0.05) expect(skewExponent(s)).toBeGreaterThan(skewExponent(s - 0.05))
+    expect(skewPhase(0.3, 1)).toBe(0.3)
+    expect(skewPhase(0, 0.03)).toBe(0)
+    expect(skewPhase(0.25, 2)).toBeCloseTo(0.0625)
+    // low SKEW reaches the window's top (phase 0.5) almost at once; high SKEW only near the end
+    expect(0.5 ** (1 / skewExponent(0.1))).toBeLessThan(0.001)
+    expect(0.5 ** (1 / skewExponent(0.9))).toBeGreaterThan(0.93)
+  })
+
+  it('CLOUD: grain i lasts 1 + √i grains; the level falls towards 0.9 as there are more', () => {
+    expect([0, 1, 2, 3].map(cloudLength)).toEqual([1, 2, 1 + Math.SQRT2, 1 + Math.sqrt(3)])
+    expect(cloudGain(2)).toBeCloseTo(0.9 * 2 ** (1.0573 / 2), 9)
+    expect(cloudGain(20)).toBeLessThan(cloudGain(2))
+    expect(cloudGain(1e9)).toBeCloseTo(0.9, 6)
+  })
+
+  it('VARIATION: off at 0; each draw scales within its range', () => {
+    for (const u of [0, 0.3, 1]) {
+      expect(varGain(0, 1, u)).toBe(1)
+      expect(varGain(12, 0, u)).toBe(1)
+      expect(varSizeRatio(0, 1, u)).toBe(1)
+      expect(varSizeRatio(12, 0, u)).toBe(1)
+      expect(varPitchRatio(0, 1, u)).toBe(1)
+      expect(varPosOffset(0, 1, u)).toBe(0)
+      expect(varPosOffset(500, 0, u)).toBe(0)
+    }
+    // VOL: from 1.75 of its dB quieter to a quarter of it louder
+    expect(varGain(12, 1, 0)).toBeCloseTo(10 ** (-21 / 20), 9)
+    expect(varGain(12, 1, 1)).toBeCloseTo(10 ** (3 / 20), 9)
+    expect(varGain(12, 0.5, 1)).toBeCloseTo(10 ** (1.5 / 20), 9)
+    // SIZE: ± its semitones × amount
+    expect(varSizeRatio(12, 1, 1)).toBeCloseTo(2)
+    expect(varSizeRatio(12, 1, 0)).toBeCloseTo(0.5)
+    expect(varSizeRatio(12, 0.5, 1)).toBeCloseTo(Math.SQRT2)
+    expect(varSizeRatio(12, 1, 0.5)).toBe(1)
+    // PITCH: the full interval at amount 1, a linear share of it below
+    expect(varPitchRatio(12, 1, 1)).toBeCloseTo(2)
+    expect(varPitchRatio(12, 1, 0)).toBeCloseTo(0.5)
+    expect(varPitchRatio(12, 0.5, 1)).toBeCloseTo(1.5)
+    expect(varPitchRatio(12, 0.5, 0)).toBeCloseTo(0.75)
+    // POS: always later, by up to amount² × ms
+    expect(varPosOffset(1000, 1, 0)).toBeCloseTo(1)
+    expect(varPosOffset(1000, 1, 1)).toBeCloseTo(1)
+    expect(varPosOffset(1000, 1, 0.5)).toBe(0)
+    expect(varPosOffset(1000, 0.5, 1)).toBeCloseTo(0.25)
+    for (let u = 0; u <= 1; u += 0.1) expect(varPosOffset(800, 0.7, u)).toBeGreaterThanOrEqual(0)
+  })
+
+  it('LOOP: XFADE is SKEW of the span, no more than the room left', () => {
+    expect(loopFade(0.5, 1000, 5000)).toBe(500)
+    expect(loopFade(0.5, 1000, 200)).toBe(200)
+    expect(loopFade(0, 1000, 200)).toBe(0)
+    expect(loopFade(0.5, 1000, -10)).toBe(0)
+  })
+
+  it('LOOP: a forward segment reads up from where it wants, leaving room for the fade', () => {
+    expect(loopSegment(100, 50, 10, 0, 1000, 1)).toEqual({ head: 100, end: 150, room: 850 })
+    // too near the top: pulled down so its end plus the fade fits
+    expect(loopSegment(980, 50, 10, 0, 1000, 1)).toEqual({ head: 940, end: 990, room: 10 })
+    // below the clip: pulled up to its start
+    expect(loopSegment(-20, 50, 10, 100, 1000, 1)).toEqual({ head: 100, end: 150, room: 850 })
+    // a span longer than the clip: the clip
+    expect(loopSegment(0, 5000, 0, 100, 1000, 1)).toEqual({ head: 100, end: 1000, room: 0 })
+  })
+
+  it('LOOP: a reversed segment reads down from its top, leaving room below it for the fade', () => {
+    expect(loopSegment(100, 50, 10, 0, 1000, -1)).toEqual({ head: 150, end: 100, room: 100 })
+    // too near the bottom: pushed up past the fade's room
+    expect(loopSegment(3, 50, 10, 0, 1000, -1)).toEqual({ head: 60, end: 10, room: 10 })
+    // too near the top: its top stays in the clip
+    expect(loopSegment(990, 50, 10, 0, 1000, -1)).toEqual({ head: 1000, end: 950, room: 950 })
+    expect(loopSegment(400, 50, 10, 200, 1000, -1).room).toBe(200)
   })
 })
 

@@ -144,68 +144,181 @@ inline float lfoValue (LfoShape shape, double phase) noexcept
     }
 }
 
-/** A running LFO (audio/lfo.ts). Random shapes draw a new value at every whole cycle: `random`
-    jumps to it (sample & hold), `smooth` ramps to it across the cycle before. */
+// ------------------------------------------------------------------------------------ Granulator III's filter
+// src/audio/svfMath.ts: two 12 dB trapezoidal state-variable stages in series.
+
+/** A stage: 0 off (passes, state held), 1 LP, 2 NOTCH (Granulator III's: x − bp + (1 − k)·lp), 3 HP. */
+struct SvfType { uint8_t stage1, stage2; bool width, q2Res; };
+
+/** SVF_TABLE, by svfType 1..9 (index 0 unused). */
+inline const SvfType& svfType (uint8_t t) noexcept
+{
+    static const SvfType table[] {
+        { 0, 0, false, false },
+        { 1, 0, false, false }, { 1, 1, false, false }, { 1, 3, true, true }, { 1, 2, true, false }, { 2, 0, false, false },
+        { 2, 2, true, true }, { 3, 2, true, false }, { 3, 0, false, false }, { 3, 3, false, false },
+    };
+    return table[t < 10 ? t : 0];
+}
+
+/** stage 2's Q: 0.707, or RES mapped 0.7..7 → 0.7..3 for LP+HP and NO+NO */
+inline double svfQ2 (uint8_t t, double q) noexcept { return svfType (t).q2Res ? 0.7 + (q - 0.7) * 2.3 / 6.3 : 0.707; }
+
+constexpr double svfSmooth = 0.02;   // the knob's cutoff follows it by this much a sample
+
+/** g for a cutoff, clamped to 10 Hz .. 0.45 × the sample rate */
+inline double svfG (double fc, double sampleRate) noexcept
+{
+    return std::tan (pi * std::clamp (fc, 10.0, 0.45 * sampleRate) / sampleRate);
+}
+
+struct SvfStage
+{
+    double s1 { 0 }, s2 { 0 };
+
+    float tick (uint8_t mode, double g, double k, float x) noexcept
+    {
+        if (mode == 0) return x;
+        const double hp = (x - s2 - (k + g) * s1) / (1 + g * (g + k));
+        const double bp = s1 + g * hp;
+        const double lp = s2 + g * bp;
+        s1 = bp + g * hp;
+        s2 = lp + g * bp;
+        return (float) (mode == 1 ? lp : mode == 3 ? x - k * bp - lp : x - bp + (1 - k) * lp);
+    }
+    void reset() noexcept { s1 = s2 = 0; }
+};
+
+/** lfoQuant (lfoMath.ts): QUANT's steps, halves rounding away from 0. */
+inline float lfoQuant (float v, float quant) noexcept
+{
+    if (quant <= 0) return v;
+    const double q = quant + 1e-6;
+    return (float) ((v < 0 ? -1.0 : v > 0 ? 1.0 : 0.0) * std::round (std::abs (v) / q) * q);
+}
+
+/** lfoMath.ts LfoState: a running LFO, two sides STEREO apart. Random shapes draw two streams a and b at each step
+    (S&H and SMOOTH once a cycle, RAND four times); with k = STEREO / 180 a side is a·(1 − k) ± b·k. RAND closes in
+    on its step by 10 × the cycles a sample. */
 class Lfo
 {
 public:
-    void start (const LfoDef& def, double bpm, uint32_t seed) noexcept
+    void start (const LfoDef& def, double bpm, uint32_t seed, double phase = 0) noexcept
     {
         shape = def.shape;
-        hz = std::max (0.001, def.hz (bpm));
-        phase = 0;
+        stereo = def.stereo;
+        quant = def.quant;
+        hz = std::max (0.0, def.hz (bpm));
         rng = seed ? seed : 0x9e3779b9u;
-        prev = 0;
-        next = nextRandom();
+        reset (phase);
     }
 
-    /** Follow a changed shape or rate, keeping phase continuous. */
+    /** Follow changed settings, keeping the phase running. */
     void set (const LfoDef& def, double bpm) noexcept
     {
-        hz = std::max (0.001, def.hz (bpm));
-        shape = def.shape;
+        hz = std::max (0.0, def.hz (bpm));
+        stereo = def.stereo;
+        quant = def.quant;
+        if (def.shape != shape)
+        {
+            shape = def.shape;
+            reset (phase);
+        }
     }
 
-    void restart() noexcept { phase = 0; }
+    void restart() noexcept { reset (0); }
+
+    /** Start from `p` cycles: random shapes draw afresh, RAND sits on its first value. */
+    void reset (double p) noexcept
+    {
+        phase = p;
+        step = (long) std::floor (phase * stepsPerCycle());
+        prevA = prevB = 0;
+        nextA = draw();
+        nextB = draw();
+        if (shape == LfoShape::random || shape == LfoShape::wander) { prevA = nextA; prevB = nextB; }
+        y[0] = target (0);
+        y[1] = target (1);
+    }
 
     /** Jump to an absolute phase (cycles), e.g. the host's position / the LFO's division, so a
-        synced LFO stays locked to the song. Random shapes step when a cycle boundary is crossed. */
-    void syncTo (double cycles) noexcept
+        synced LFO stays locked to the song. Random shapes step when a step boundary is crossed. */
+    void syncTo (double cycles) noexcept { advance (cycles - phase, 1); }
+
+    /** The raw shape on `side` (0 left, 1 right), QUANT applied: -1..1. */
+    float value (int side = 0) const noexcept
     {
-        if (std::floor (cycles) != std::floor (phase))
+        float v;
+        switch (shape)
         {
-            prev = shape == LfoShape::random ? nextRandom() : next;
-            next = nextRandom();
+            case LfoShape::random: v = target (side); break;
+            case LfoShape::wander: v = y[side ? 1 : 0]; break;
+            case LfoShape::smooth:
+            {
+                const float k = std::clamp (stereo / 180.0f, 0.0f, 1.0f);
+                const float f = (float) (phase - std::floor (phase));
+                const float a = prevA + (nextA - prevA) * f, b = prevB + (nextB - prevB) * f;
+                v = a * (1 - k) + (side ? -k : k) * b;
+                break;
+            }
+            default:
+            {
+                const double s = stereo / 720.0;
+                v = lfoValue (shape, phase + (side ? -s : s));
+            }
         }
-        phase = cycles;
+        return lfoQuant (v, quant);
     }
 
-    float value() const noexcept
+    /** Move on `inc` cycles over `n` samples. */
+    void advance (double inc, int n) noexcept
     {
-        if (shape == LfoShape::random)
-            return prev;
-        if (shape == LfoShape::smooth)
-            return (float) (prev + (next - prev) * (phase - std::floor (phase)));
-        return lfoValue (shape, phase);
-    }
-
-    void advance (double seconds) noexcept
-    {
-        const double before = std::floor (phase);
-        phase += seconds * hz;
-        const auto crossed = (long) (std::floor (phase) - before);
-        for (long i = 0; i < std::min (crossed, 4L); ++i)
+        phase += inc;
+        const int spc = stepsPerCycle();
+        const auto s = (long) std::floor (phase * spc);
+        if (s != step)
         {
-            // S&H lands on the value it will hold; smooth has ramped into it.
-            prev = shape == LfoShape::random ? nextRandom() : next;
-            next = nextRandom();
+            const long crossed = std::min (4L, std::abs (s - step));
+            step = s;
+            for (long i = 0; i < crossed; ++i)
+            {
+                // S&H and RAND land on the value they hold; SMOOTH has ramped into it
+                prevA = shape == LfoShape::smooth ? nextA : draw();
+                prevB = shape == LfoShape::smooth ? nextB : draw();
+                nextA = draw();
+                nextB = draw();
+            }
         }
-        if (phase > 1e6)
+        if (shape == LfoShape::wander)
+        {
+            const double c = std::min (1.0, 10.0 * std::abs (inc) / std::max (1, n));
+            const double g = n <= 1 ? c : 1.0 - std::pow (1.0 - c, n);
+            for (int side = 0; side < 2; ++side)
+                y[side] += (float) (g * (target (side) - y[side]));
+        }
+        if (phase > 1e6 || phase < -1e6)
+        {
             phase -= std::floor (phase);
+            step = (long) std::floor (phase * spc);
+        }
     }
+
+    /** Advance by `seconds` at its frequency × `factor` (RATE's routes, RATIO's note), `n` samples. */
+    void run (double seconds, int n, double factor = 1) noexcept { advance (seconds * hz * factor, n); }
+
+    double frequency() const noexcept { return hz; }
+    double phaseNow() const noexcept { return phase; }
 
 private:
-    float nextRandom() noexcept
+    int stepsPerCycle() const noexcept { return shape == LfoShape::wander ? 4 : 1; }
+
+    float target (int side) const noexcept
+    {
+        const float k = std::clamp (stereo / 180.0f, 0.0f, 1.0f);
+        return prevA * (1 - k) + (side ? -k : k) * prevB;
+    }
+
+    float draw() noexcept
     {
         rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
         return (float) ((rng & 0xffffff) / (double) 0x800000 - 1.0);
@@ -213,8 +326,11 @@ private:
 
     LfoShape shape { LfoShape::sine };
     double hz { 1 }, phase { 0 };
+    float stereo { 0 }, quant { 0 };
     uint32_t rng { 1 };
-    float prev { 0 }, next { 0 };
+    long step { 0 };
+    float prevA { 0 }, nextA { 0 }, prevB { 0 }, nextB { 0 };
+    float y[2] { 0, 0 };
 };
 
 // ------------------------------------------------------------------------------------ grains
@@ -319,13 +435,88 @@ inline float grainLevel (GrainAmpMode mode, float amount, float voidLevel, float
     return (float) (g * g * std::pow (10.0, 6.0 * amount / 20.0));
 }
 
-/** SCAN's offset from POS (seconds), `t` seconds after the note. */
-inline double scanOffset (double t, float timePct, float dist, float curve, double clipLen) noexcept
+/** SCAN's speed, as the share of its distance it travels a second: 100 / S.TIME of real time, × `speed`. */
+inline double scanRate (float timePct, float dist, double clipLen, double speed = 1) noexcept
+{
+    const double d = dist * clipLen;
+    return d > 0 ? speed * (100.0 / timePct) / d : 0.0;
+}
+
+/** How far SCAN has got, as a share of its distance: held at either end, or (S.LOOP) around again. */
+inline double scanWrap (double x, bool loop) noexcept { return loop ? x - std::floor (x) : std::clamp (x, 0.0, 1.0); }
+
+/** SCAN's offset from POS (seconds), `t` seconds after the note; S.LOOP starts it over, S.KEY's ratio is `speed`. */
+inline double scanOffset (double t, float timePct, float dist, float curve, double clipLen,
+                          bool loop = false, double speed = 1) noexcept
 {
     const double d = dist * clipLen;
     if (d <= 0) return 0;
-    const double x = std::clamp (t * (100.0 / timePct) / d, 0.0, 1.0);
-    return d * std::pow (x, (double) curve);
+    return d * std::pow (scanWrap (t * scanRate (timePct, dist, clipLen, speed), loop), (double) curve);
+}
+
+// ------------------------------------------------------------------------- Granulator III (grainMath.ts)
+
+constexpr int densityMin = 2, densityMax = 20;   // CLOUD's grains a side
+
+/** SKEW as an exponent on a CLASSIC window's phase: (9.9 s / (10 − 9 s) + 0.1)^1.5, 1 at 0.5. */
+inline double skewExponent (float skew) noexcept
+{
+    const double s = std::clamp ((double) skew, 0.0, 1.0);
+    return std::pow (9.9 * s / (10.0 - 9.0 * s) + 0.1, 1.5);
+}
+
+/** A window's phase (0..1) skewed by exponent `e`. */
+inline double skewPhase (double phase, double e) noexcept { return e == 1.0 || phase <= 0 ? phase : std::pow (phase, e); }
+
+/** CLOUD: a side's grain `i` lasts 1 + √i grains. */
+inline double cloudLength (int i) noexcept { return 1.0 + std::sqrt ((double) i); }
+
+/** CLOUD's level for `n` grains a side: 0.9 · 2^(1.0573 / n). */
+inline float cloudGain (int n) noexcept { return (float) (0.9 * std::pow (2.0, 1.0573 / n)); }
+
+/** VARIATION on a grain's level: VOL dB × amount × (n − 0.75), n = 2u − 1. */
+inline float varGain (float db, float amount, float u) noexcept
+{
+    if (db <= 0 || amount <= 0) return 1.0f;
+    return (float) std::pow (10.0, db * amount * (2.0 * u - 1.0 - 0.75) / 20.0);
+}
+
+/** VARIATION on a grain's length, as a factor: up to ±SIZE semitones × amount. */
+inline double varSizeRatio (float semis, float amount, float u) noexcept
+{
+    return semis > 0 && amount > 0 ? std::pow (2.0, (2.0 * u - 1.0) * semis * amount / 12.0) : 1.0;
+}
+
+/** VARIATION on a CLOUD grain's pitch, as a rate factor: 1 + amount · (2^(±PITCH / 12) − 1). */
+inline double varPitchRatio (float semis, float amount, float u) noexcept
+{
+    return semis > 0 && amount > 0 ? 1.0 + amount * (std::pow (2.0, (2.0 * u - 1.0) * semis / 12.0) - 1.0) : 1.0;
+}
+
+/** VARIATION on where a grain starts, seconds, always later: |2u − 1| · amount² · ms. */
+inline double varPosOffset (float ms, float amount, float u) noexcept
+{
+    return ms > 0 && amount > 0 ? std::abs (2.0 * u - 1.0) * amount * amount * ms / 1000.0 : 0.0;
+}
+
+/** A LOOP segment's crossfade, frames: SKEW of its span, no longer than the outgoing head's room. */
+inline double loopFade (float skew, double span, double room) noexcept
+{
+    return std::min (std::max (0.0, skew * span), std::max (0.0, room));
+}
+
+/** Where a LOOP segment goes (grainMath.ts loopSegment), frames. */
+struct LoopSegment { double head, end, room; };
+inline LoopSegment loopSegment (double at, double span, double fade, double lo, double hi, int dir) noexcept
+{
+    const double len = std::min (span, hi - lo);
+    if (dir > 0)
+    {
+        const double head = std::max (lo, std::min (at, hi - fade - len));
+        return { head, head + len, hi - (head + len) };
+    }
+    const double start = std::max (lo, std::min (std::max (at, lo + fade), hi - len));
+    return { start + len, start, start - lo };
 }
 
 /** 4-point, 3rd-order Hermite interpolation: `f` (0..1) of the way from y0 to y1. */

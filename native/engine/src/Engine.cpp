@@ -19,6 +19,19 @@ constexpr int delayBuses = 8;
 constexpr int reverbSlots = 6;
 constexpr float chorusBase = 0.018f, chorusMaxDepth = 0.008f;
 
+// Keep non-neutral window shaping behind a call boundary. Apple Clang otherwise
+// speculates pow() even when the ternary selects the unchanged phase, making
+// every CLASSIC grain pay for SKEW while it is neutral.
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+float skewedWindowAt (const dsp::WindowTable& window, double phase, double exponent) noexcept
+{
+    return dsp::windowAt (window, dsp::skewPhase (phase - std::floor (phase), exponent));
+}
+
 /** A fixed-capacity single-producer / single-consumer ring. */
 template <typename T, size_t N>
 class Ring
@@ -125,6 +138,7 @@ struct Engine::Voice
     float velocity { 1 }, level { 1 };
     int midiNote { -1 }, channel { -1 };
     float pressure { 0 }, bend { 0 }, noteBend { 0 }, timbre { 0 };
+    float noteRandom { 0 };   // RANDOM in the matrix: -1..1, drawn for the note
 
     // time, in seconds since note-on
     double t { 0 };
@@ -173,10 +187,16 @@ struct Engine::Voice
     int routeCount { 0 };
     float tremBase { 1 };
     bool vcoRoutes { false };
+    bool audioLfo { false };   // a RATIO-mode pad LFO drives the grains: those routes run every sample (the page's are a-rate)
     const ModMatrix* routeFrom[2] { nullptr, nullptr };   // what `routes` was built from
 
     // control-rate values (refreshed every `controlEvery` samples)
     float cPitch { 0 }, cCut { 0 }, cRes { 0 }, cTrem { 1 }, cPan { 0 }, cDelay { 0 }, cReverb { 0 };
+    float cCutR { 0 };   // the cutoff routes for Granulator III's filter's right side (an LFO's STEREO)
+    // Granulator III's filter: [side][stage] state and coefficients, and the knob's cutoff (log2 Hz) followed
+    std::array<std::array<dsp::SvfStage, 2>, 2> svf {};
+    std::array<std::array<double, 2>, 2> svfG {}, svfK {};
+    double svfLf { -1 };
     int countdown { 0 };
 
     // grains (voice.ts): 'cloud' is Granulator II's voice (grains.worklet.ts renderCloud), 'stretch' walks
@@ -185,16 +205,29 @@ struct Engine::Voice
     Kind kind { Kind::sample };
     // cloud: a phasor per side (left, right) at GRAIN; each runs two slots, A from the wrap and B from half a
     // period later, windowed by the phasor's phase, so a grain lasts one period and two overlap
-    struct Slot { bool on { false }; double pos { 0 }; double step { 1 }; float amp { 1 }; };
+    struct Slot { bool on { false }; double pos { 0 }; double step { 1 }; float amp { 1 }; double e { 1 }; };   // e: SKEW's exponent
     std::array<Slot, 4> slots {};          // left A, left B, right A, right B
     std::array<double, 2> phase {};
     bool cloudStarted { false };
+    GrainMode runningGrainMode { GrainMode::classic };
     float rndFrom { 0 }, rndTo { 0 };
     double rndPhase { 1 };                 // G<RND (rand~): a line to a new target 8 × GRAIN times a second
     double fmPhase { 0 };
     dsp::WindowTable window {};
     float windowShape { -1 };
     GrainSymmetry windowSym { GrainSymmetry::std };
+    // Granulator III (grains.worklet.ts): its modes keep their own state, a side at a time
+    double noteSemis { 0 };                    // N<RND: this note's random pitch, semitones
+    std::array<double, 2> scanX { 0, 0 };      // SCAN: how far each side has got, a share of S.DIST (before CURVE)
+    std::array<double, 2> sizeVar { 1, 1 };    // CLASSIC: VARIATION on each side's grain length
+    struct Head { bool on { false }; double pos { 0 }, step { 1 }; float amp { 1 }; int dir { 1 }; double end { 0 }; };
+    struct LoopSide { Head cur, old; double xf { 1 }, xfStep { 1 }, room { 0 }; bool due { true }; };
+    std::array<LoopSide, 2> loopSides {};      // LOOP: the segment playing and the one fading out
+    struct CloudGrain { bool on { false }; double pos { 0 }, step { 0 }, phase { 0 }, phaseStep { 0 }; float amp { 0 }; };
+    std::array<std::array<CloudGrain, dsp::densityMax>, 2> cloudGrains {};
+    int cloudCount { 0 };                      // CLOUD: grains a side, fixed when the note starts
+    float cloudLevel { 1 };                    // normalisation for that count, outside the sample loop
+    std::array<bool, 2> cloudLive {};          // CLOUD: a side's grains are set going
     // stretch: steady grains, four overlapping
     struct Grain
     {
@@ -206,7 +239,11 @@ struct Engine::Voice
     std::array<Grain, 64> grainPool {};    // the sounding ones are [0, grainCount)
     int grainCount { 0 };
     double nextStretch { 0 };
-    float cGrainPos { 0 }, cGrainSize { 0 };
+    // routes to the grains, left and right (an LFO's STEREO sets them apart)
+    std::array<float, 2> cGrainPos {}, cGrainSize {}, cGrainSkew {}, cGrainVar {}, cGrainDetune {}, cGrainScan {};
+    std::array<float, 2> cLfoRate {}, cLfoAmt {};   // routes to the pad LFOs' RATE (semitones) and AMOUNT
+    // with audioLfo: the grain routes but the audio-rate LFOs', from the last control update
+    std::array<float, 2> kGrainPos {}, kGrainSize {}, kGrainSkew {}, kGrainVar {}, kGrainDetune {}, kGrainScan {};
 
     // VCO -> pitch, held for Web Audio's 128-sample render quantum: in the page it drives an
     // AudioBufferSourceNode's detune, which is a k-rate parameter, so that is the FM the page makes
@@ -471,13 +508,51 @@ struct Engine::Impl
         float zoneFreq { 0 };
     };
 
+    static bool isGrainDest (ModDest d) noexcept
+    {
+        return d == ModDest::grainPos || d == ModDest::grainSize || d == ModDest::grainSkew || d == ModDest::grainVar
+            || d == ModDest::grainDetune || d == ModDest::grainScan;
+    }
+
+    /** A pad LFO in RATIO mode (an audio-rate one). */
+    static bool audioRateLfo (const Voice& v, ModSource src) noexcept
+    {
+        return (src == ModSource::lfo1 && v.sound->s.mod.lfo1.ratioMode) || (src == ModSource::lfo2 && v.sound->s.mod.lfo2.ratioMode);
+    }
+
+    /** The routes from audio-rate pad LFOs into the grains, this sample: added to what controlUpdate summed. */
+    void audioLfoRoutes (Voice& v) noexcept
+    {
+        v.cGrainPos = v.kGrainPos; v.cGrainSize = v.kGrainSize; v.cGrainSkew = v.kGrainSkew;
+        v.cGrainVar = v.kGrainVar; v.cGrainDetune = v.kGrainDetune; v.cGrainScan = v.kGrainScan;
+        for (int i = 0; i < v.routeCount; ++i)
+        {
+            const auto& r = v.routes[(size_t) i];
+            if (! r.pad || ! audioRateLfo (v, r.source) || ! isGrainDest (r.dest)) continue;
+            const float x = r.gain * sourceValue (v, true, r.source), xr = r.gain * sourceValue (v, true, r.source, 1);
+            auto& g = r.dest == ModDest::grainPos ? v.cGrainPos : r.dest == ModDest::grainSize ? v.cGrainSize
+                    : r.dest == ModDest::grainSkew ? v.cGrainSkew : r.dest == ModDest::grainVar ? v.cGrainVar
+                    : r.dest == ModDest::grainDetune ? v.cGrainDetune : v.cGrainScan;
+            g[0] += x;
+            g[1] += xr;
+        }
+    }
+
+    /** The pad LFO a destination drives (0 / 1), or -1. */
+    static int lfoDest (ModDest d) noexcept
+    {
+        return d == ModDest::lfo1Rate || d == ModDest::lfo1Amt ? 0 : d == ModDest::lfo2Rate || d == ModDest::lfo2Amt ? 1 : -1;
+    }
+
     void buildRoutes (Voice& v) noexcept
     {
         v.routeCount = 0;
         v.tremBase = 1;
         v.vcoRoutes = false;
+        v.audioLfo = false;
         v.routeFrom[0] = &perf->globalMod;
         v.routeFrom[1] = &v.sound->s.mod;
+        int lfoEdges = 0;   // bit from * 2 + into: pad LFO `from` drives LFO `into`
         for (int scope = 0; scope < 2; ++scope)
             for (const auto& r : v.routeFrom[scope]->routes)
             {
@@ -485,6 +560,18 @@ struct Engine::Impl
                     continue;
                 if (v.routeCount >= (int) v.routes.size())
                     break;
+                if (const int into = lfoDest (r.dest); into >= 0)
+                {
+                    // a pad's own LFOs only; never itself, and only one way between the two (voice.ts wireRoutes)
+                    const auto self = into ? ModSource::lfo2 : ModSource::lfo1;
+                    if (scope != 1 || r.source == self) continue;
+                    if (r.source == ModSource::lfo1 || r.source == ModSource::lfo2)
+                    {
+                        const int from = r.source == ModSource::lfo2 ? 1 : 0;
+                        if (lfoEdges & (1 << (into * 2 + from))) continue;
+                        lfoEdges |= 1 << (from * 2 + into);
+                    }
+                }
                 float gain = r.amount * modScale (r.dest)
                            * (r.dest == ModDest::pitch ? 100.0f : r.dest == ModDest::cutoff ? 1200.0f : 1.0f);
                 if (r.dest == ModDest::volume && isBipolar (r.source))
@@ -494,6 +581,8 @@ struct Engine::Impl
                 }
                 if (r.source == ModSource::vco1 || r.source == ModSource::vco2 || r.source == ModSource::vco3)
                     v.vcoRoutes = true;
+                if (scope == 1 && v.kind == Voice::Kind::cloud && audioRateLfo (v, r.source) && isGrainDest (r.dest))
+                    v.audioLfo = true;
                 v.routes[(size_t) v.routeCount++] = { scope == 1, r.source, r.dest, gain };
             }
     }
@@ -601,6 +690,15 @@ struct Engine::Impl
             v.filtEnv = { e.a, e.d, e.s, e.r };
             v.filtPeak = e.depth;
         }
+        // KEY on the envelopes (voice.ts keyEnv): higher notes run them faster
+        const auto keyEnv = [&v] (dsp::Env& e, float key)
+        {
+            if (key <= 0) return;
+            const float kr = (float) std::pow (2.0, key * v.glideTo / 12.0);
+            e.a /= kr; e.d /= kr; e.r /= kr;
+        };
+        keyEnv (v.ampEnv, s.envKey);
+        keyEnv (v.filtEnv, s.fEnvKey);
 
         v.kind = s.grain ? Voice::Kind::cloud : s.stretch ? Voice::Kind::stretch : Voice::Kind::sample;
         v.grainCount = 0;
@@ -612,6 +710,14 @@ struct Engine::Impl
         v.rndPhase = 1;
         v.fmPhase = 0;
         v.windowShape = -1;
+        v.sizeVar = { 1, 1 };
+        v.loopSides = {};
+        for (auto& side : v.cloudGrains)
+            for (auto& g : side) g.on = false;
+        v.cloudCount = 0;
+        v.cloudLive = {};
+        v.scanX = { 0, 0 };
+        v.noteRandom = 2.0f * random01() - 1.0f;
         // a cloud's sides are its own left and right grains
         if (v.kind == Voice::Kind::cloud)
             v.monoSource = false;
@@ -629,12 +735,22 @@ struct Engine::Impl
             v.releaseT = std::max (0.0, v.endT - v.ampEnv.r);
 
         for (auto& f : v.filt) f.reset();
+        for (auto& side : v.svf) for (auto& st : side) st.reset();
+        v.svfLf = -1;
         for (auto& f : v.lo) f.reset();
         for (auto& f : v.mid) f.reset();
         for (auto& f : v.hi) f.reset();
         v.eqKey[0] = v.eqKey[1] = v.eqKey[2] = 1e9f;
-        v.padLfo[0].start (s.mod.lfo1, bpm, rng ^ 0xa5a5u);
-        v.padLfo[1].start (s.mod.lfo2, bpm, rng ^ 0x5a5au);
+        // PHASE: where each note starts it (FREE: where one running all along would be, voice.ts padLfo)
+        for (int k = 0; k < 2; ++k)
+        {
+            const auto& def = k ? v.sound->s.mod.lfo2 : v.sound->s.mod.lfo1;
+            const double free = now * def.hz (bpm);
+            v.padLfo[(size_t) k].start (def, bpm, rng ^ (k ? 0x5a5au : 0xa5a5u),
+                                        def.phase < 0 ? free - std::floor (free) : def.phase / 360.0);
+        }
+        v.cLfoRate = {};
+        v.cLfoAmt = {};
         random01();
         buildRoutes (v);
         applyCc (v);
@@ -951,7 +1067,46 @@ struct Engine::Impl
         heldCount = w;
     }
 
+    // HOLD (board.ts noteOn / noteOff): Granulator III's latch, in front of mono / poly. Keys physically down,
+    // and the ones HOLD keeps sounding after they came up.
+    std::array<bool, 16 * 128> downKeys {}, latchedKeys {};
+    int downCount { 0 }, latchedCount { 0 };
+
     void noteOn (int note, float velocity, int channel) noexcept
+    {
+        const int key = voiceKey (note, channel);
+        // a note with no key down lets the latched chord go first; one played while keys are down joins it
+        if (perf && perf->hold && downCount == 0) releaseLatched();
+        if (! downKeys[(size_t) key]) { downKeys[(size_t) key] = true; ++downCount; }
+        if (latchedKeys[(size_t) key]) { latchedKeys[(size_t) key] = false; --latchedCount; }
+        playNoteOn (note, velocity, channel);
+    }
+
+    void noteOff (int note, int channel) noexcept
+    {
+        const int key = voiceKey (note, channel);
+        if (downKeys[(size_t) key]) { downKeys[(size_t) key] = false; --downCount; }
+        if (perf && perf->hold)
+        {
+            if (! latchedKeys[(size_t) key]) { latchedKeys[(size_t) key] = true; ++latchedCount; }
+            return;
+        }
+        playNoteOff (note, channel);
+    }
+
+    void releaseLatched() noexcept
+    {
+        if (latchedCount == 0) return;
+        for (int key = 0; key < (int) latchedKeys.size(); ++key)
+            if (latchedKeys[(size_t) key])
+            {
+                latchedKeys[(size_t) key] = false;
+                playNoteOff (key % 128, key / 128);
+            }
+        latchedCount = 0;
+    }
+
+    void playNoteOn (int note, float velocity, int channel) noexcept
     {
         if (! perf || ! perf->playable) return;
         const auto& sound = perf->playable;
@@ -1002,11 +1157,33 @@ struct Engine::Impl
         }
     }
 
-    void noteOff (int note, int channel) noexcept
+    void playNoteOff (int note, int channel) noexcept
     {
         dropNote (note);
         if (! perf) return;
-        if (perf->mono && ! isMember (channel))
+        // MONO can change while keys are down (another patch selected): what a note started under the other mode
+        // ends with it too, or it would sound on with nothing left to release it
+        const int key = voiceKey (note, channel);
+        const bool monoNow = perf->mono && ! isMember (channel);
+        if (monoNow && poly[(size_t) key].count > 0)
+        {
+            if (sustain) sustainedKeys[(size_t) key] = true;
+            else
+            {
+                releaseSet (poly[(size_t) key]);
+                poly[(size_t) key].clear();
+            }
+        }
+        if (! monoNow && mono.count > 0 && (heldCount == 0 || voices[(size_t) mono.refs[0].index].midiNote == note))
+        {
+            if (sustain) monoSustained = true;
+            else
+            {
+                releaseSet (mono);
+                mono.clear();
+            }
+        }
+        if (monoNow)
         {
             if (mono.count == 0) return;
             const auto& sound = perf->playable;
@@ -1051,7 +1228,6 @@ struct Engine::Impl
         }
         else
         {
-            const int key = voiceKey (note, channel);
             if (sustain) { sustainedKeys[(size_t) key] = true; return; }
             releaseSet (poly[(size_t) key]);
             poly[(size_t) key].clear();
@@ -1093,6 +1269,9 @@ struct Engine::Impl
 
     void allNotesOff() noexcept
     {
+        downKeys.fill (false);
+        latchedKeys.fill (false);
+        downCount = latchedCount = 0;
         heldCount = 0;
         for (auto& p : poly) p.clear();
         sustainedKeys.fill (false);
@@ -1287,8 +1466,13 @@ struct Engine::Impl
             globalLfo[(size_t) i].set (i ? perf->globalMod.lfo2 : perf->globalMod.lfo1, bpm);
         // leaving keyboard play releases what is still held (board.ts watches master.play)
         if (wasPlay && ! perf->play)
+        {
+            releaseLatched();
             for (int i = heldCount - 1; i >= 0; --i)
-                noteOff (heldOrder[(size_t) i], 0);
+                playNoteOff (heldOrder[(size_t) i], 0);
+            downKeys.fill (false);
+            downCount = 0;
+        }
         // the selected instrument's CC defaults
         if (perf->playable && (! old || ! sameSound (old->playable, perf->playable)))
             for (const auto& [n, x] : perf->playable->ccDefaults)
@@ -1298,17 +1482,38 @@ struct Engine::Impl
 
     // =============================================================================== rendering
 
-    float sourceValue (const Voice& v, bool pad, ModSource src) const noexcept
+    /** How fast a pad LFO runs, × its frequency: the routes to its RATE, and in RATIO mode the note (KEY). */
+    static double padLfoFactor (const Voice& v, int i) noexcept
+    {
+        const bool ratio = (i ? v.sound->s.mod.lfo2 : v.sound->s.mod.lfo1).ratioMode;
+        return dsp::semisToRate (v.cLfoRate[(size_t) i] + (ratio ? v.semisAt (v.t) : 0.0f));
+    }
+
+    /** A pad LFO's depth: its AMOUNT plus the routes to it, 0..1. */
+    static float padDepth (const Voice& v, int i) noexcept
+    {
+        return std::clamp ((i ? v.sound->s.mod.lfo2 : v.sound->s.mod.lfo1).amount + v.cLfoAmt[(size_t) i], 0.0f, 1.0f);
+    }
+
+    float sourceValue (const Voice& v, bool pad, ModSource src, int side = 0) const noexcept
     {
         switch (src)
         {
-            case ModSource::lfo1:       return pad ? v.padLfo[0].value() : globalLfo[0].value();
-            case ModSource::lfo2:       return pad ? v.padLfo[1].value() : globalLfo[1].value();
+            case ModSource::lfo1:
+            case ModSource::lfo2:
+            {
+                const int i = src == ModSource::lfo2 ? 1 : 0;
+                if (pad) return v.padLfo[(size_t) i].value (side) * padDepth (v, i);
+                return perf ? globalLfo[(size_t) i].value (side) * (i ? perf->globalMod.lfo2 : perf->globalMod.lfo1).amount : 0.0f;
+            }
             case ModSource::mod:        return modWheel;
             case ModSource::aftertouch: return v.pressure;
             case ModSource::velocity:   return v.velocity;
             case ModSource::bend:       return v.bend;
             case ModSource::timbre:     return v.timbre;
+            case ModSource::fenv:       return v.filtEnv.at (v.t, v.releaseT);
+            case ModSource::key:        return v.glideTo / 12.0f;
+            case ModSource::random:     return v.noteRandom;
             default:                    return 0.0f;
         }
     }
@@ -1354,11 +1559,19 @@ struct Engine::Impl
             v.clipIn=v.loopStart=in*sr;v.clipOut=v.loopEnd=out*sr;
             if(v.pos<v.clipIn || v.pos>=v.clipOut)v.pos=v.clipIn+std::fmod(std::max(0.,v.pos-v.clipIn),v.clipOut-v.clipIn);
             v.glideTo=float(v.midiNote)-s.rootNote;
+            const float ampKey = s.envKey == 0 ? 1.f : (float) dsp::semisToRate(s.envKey*v.glideTo);
+            const float filterKey = s.fEnvKey == 0 ? 1.f : (float) dsp::semisToRate(s.fEnvKey*v.glideTo);
+            v.ampEnv.a/=ampKey;v.ampEnv.d/=ampKey;v.ampEnv.r/=ampKey;
+            v.filtEnv.a/=filterKey;v.filtEnv.d/=filterKey;v.filtEnv.r/=filterKey;
             const auto kind=s.grain?Voice::Kind::cloud:s.stretch?Voice::Kind::stretch:Voice::Kind::sample;
             if(v.kind!=kind){
                 v.grainCount=0;v.nextStretch=v.t;v.cloudStarted=false;v.phase={};
+                v.sizeVar={1,1};v.loopSides={};v.cloudLive={};v.cloudCount=0;v.scanX={};
+                for(auto& side:v.cloudGrains)for(auto& grain:side)grain.on=false;
                 for(auto& slot:v.slots)slot.on=false;
                 v.rndFrom=v.rndTo=0;v.rndPhase=1;v.fmPhase=0;v.windowShape=-1;
+                v.kind=kind;
+                buildRoutes(v); // RATIO grain routes become audio-rate when GRAIN is enabled live.
             }
             v.kind=kind;v.monoSource=kind==Voice::Kind::cloud?false:v.sample->channels.size()<2;
             const double speed=s.speed*(kind==Voice::Kind::sample?v.kRate*dsp::semisToRate(v.glideTo):1.);
@@ -1372,6 +1585,8 @@ struct Engine::Impl
     {
         if(v.owner) applyExpression(v,false);
         const auto& s = v.s();
+        v.padLfo[0].set (v.sound->s.mod.lfo1, bpm);
+        v.padLfo[1].set (v.sound->s.mod.lfo2, bpm);
         float pitch = s.bendRange * 100.0f * v.bend + (perf ? perf->mpeBendRange : 48.0f) * 100.0f * v.noteBend + v.ccPitch;
         if(v.owner){
             bool assigned=false;const int rangeTarget=parameterIndex("bendRange");
@@ -1380,24 +1595,39 @@ struct Engine::Impl
             // leaves Bend useful without also bending a cutoff/reverse gesture.
             if(!assigned)pitch+=(v.expression[1]*2.f-1.f)*s.bendRange*100.f;
         }
-        float cut = v.ccCut, res = 0, trem = v.tremBase, panMod = 0, dly = 0, rev = 0, gPos = 0, gSize = 0;
+        float cut = v.ccCut, cutR = v.ccCut, res = 0, trem = v.tremBase, panMod = 0, dly = 0, rev = 0;
+        std::array<float, 2> gPos {}, gSize {}, gSkew {}, gVar {}, gDetune {}, gScan {}, lRate {}, lAmt {};
         for (int i = 0; i < v.routeCount; ++i)
         {
             const auto& r = v.routes[(size_t) i];
             if (r.source == ModSource::vco1 || r.source == ModSource::vco2 || r.source == ModSource::vco3)
                 continue;   // audio rate, per sample
+            if (v.audioLfo && r.pad && audioRateLfo (v, r.source) && isGrainDest (r.dest))
+                continue;   // every sample (audioLfoRoutes)
             const float x = r.gain * sourceValue (v, r.pad, r.source);
+            // the grains' right side reads an LFO's right side
+            const bool lfo = r.source == ModSource::lfo1 || r.source == ModSource::lfo2;
+            const float xr = lfo ? r.gain * sourceValue (v, r.pad, r.source, 1) : x;
+            const auto both = [x, xr] (std::array<float, 2>& g) { g[0] += x; g[1] += xr; };
             switch (r.dest)
             {
                 case ModDest::pitch:     pitch += x; break;
-                case ModDest::cutoff:    cut += x; break;
+                case ModDest::cutoff:    cut += x; cutR += xr; break;
                 case ModDest::resonance: res += x; break;
                 case ModDest::volume:    trem += x; break;
                 case ModDest::pan:       panMod += x; break;
                 case ModDest::delayMix:  dly += x; break;
                 case ModDest::reverbMix: rev += x; break;
-                case ModDest::grainPos:  gPos += x; break;
-                case ModDest::grainSize: gSize += x; break;
+                case ModDest::grainPos:  both (gPos); break;
+                case ModDest::grainSize: both (gSize); break;
+                case ModDest::grainSkew: both (gSkew); break;
+                case ModDest::grainVar:  both (gVar); break;
+                case ModDest::grainDetune: both (gDetune); break;
+                case ModDest::grainScan: both (gScan); break;
+                case ModDest::lfo1Rate:  lRate[0] += x; break;
+                case ModDest::lfo1Amt:   lAmt[0] += x; break;
+                case ModDest::lfo2Rate:  lRate[1] += x; break;
+                case ModDest::lfo2Amt:   lAmt[1] += x; break;
                 default: break;
             }
         }
@@ -1410,13 +1640,22 @@ struct Engine::Impl
                 switch (l.target)
                 {
                     case ZoneLfo::Target::pitch:  pitch += x * l.depth; break;
-                    case ZoneLfo::Target::cutoff: cut += x * l.depth; break;
+                    case ZoneLfo::Target::cutoff: cut += x * l.depth; cutR += x * l.depth; break;
                     case ZoneLfo::Target::volume: trem += x * (std::pow (10.0f, std::abs (l.depth) / 20.0f) - 1.0f); break;
                     case ZoneLfo::Target::pan:    panMod += x * l.depth / 100.0f; break;
                 }
             }
         v.cGrainPos = gPos;
         v.cGrainSize = gSize;
+        v.cGrainSkew = gSkew;
+        v.cGrainVar = gVar;
+        v.cGrainDetune = gDetune;
+        v.cGrainScan = gScan;
+        v.cLfoRate = lRate;
+        v.cLfoAmt = lAmt;
+        v.kGrainPos = gPos; v.kGrainSize = gSize; v.kGrainSkew = gSkew;
+        v.kGrainVar = gVar; v.kGrainDetune = gDetune; v.kGrainScan = gScan;
+        v.cCutR = cutR;
         v.cPitch = pitch; v.cCut = cut; v.cRes = res; v.cTrem = trem; v.cPan = panMod; v.cDelay = dly; v.cReverb = rev;
 
         // EQ, when its knobs moved
@@ -1438,11 +1677,31 @@ struct Engine::Impl
         else
         {
             const double q = std::max (0.1, s.resonance * std::pow (10.0, v.ccRes / 20.0)) + v.cRes + vcoRes;
-            v.fc = dsp::BiquadCoefs::make (s.filterType, s.cutoff * std::pow (2.0, cents / 1200.0), q, 0, engine.rate);
+            const double key = s.filterKey * 100.0 * v.semisAt (v.t);   // F.KEY: cents
+            if (s.svfType)
+            {
+                // Granulator III's filter (svfMath.ts / the svf processor): the knob followed, then each side's cents
+                const double target = std::log2 (std::max (1.0f, s.cutoff));
+                if (v.svfLf < 0) v.svfLf = target;
+                v.svfLf += (1.0 - std::pow (1.0 - dsp::svfSmooth, controlEvery)) * (target - v.svfLf);
+                const auto& t = dsp::svfType (s.svfType);
+                const double width = t.width ? s.filterWidth : 0.0;
+                const double qq = std::max (0.1, q), k2 = 1.0 / dsp::svfQ2 (s.svfType, qq);
+                for (int side = 0; side < 2; ++side)
+                {
+                    const double c = env + (side ? v.cCutR : v.cCut) + vcoCut + key;
+                    const double fc = std::pow (2.0, v.svfLf + c / 1200.0);
+                    v.svfG[(size_t) side] = { dsp::svfG (fc, engine.rate), dsp::svfG (fc * std::pow (2.0, width / 12.0), engine.rate) };
+                    v.svfK[(size_t) side] = { 1.0 / qq, k2 };
+                }
+            }
+            else
+                v.fc = dsp::BiquadCoefs::make (s.filterType, s.cutoff * std::pow (2.0, (cents + key) / 1200.0), q, 0, engine.rate);
         }
     }
 
-    void report (const Voice& v, double when, double pos, double len, double dur, double rate, float pan, float gain, int stream) noexcept
+    void report (const Voice& v, double when, double pos, double len, double dur, double rate, float pan, float gain, int stream,
+                 bool reverse = false) noexcept
     {
         GrainView gv;
         gv.voice = v.order;
@@ -1453,45 +1712,271 @@ struct Engine::Impl
         gv.rate = (float) rate;
         gv.pan = pan;
         gv.gain = gain;
-        gv.reverse = v.s().reverse;
-        if(gv.reverse)gv.pos=float((v.clipOut-1)/v.sample->rate-(pos-v.clipIn/v.sample->rate)-len);
+        gv.reverse = reverse != v.s().reverse;
+        if(v.s().reverse)gv.pos=float((v.clipOut-1)/v.sample->rate-(pos-v.clipIn/v.sample->rate)-len);
         gv.stream = (uint8_t) stream;
         grainViews.push (std::move (gv));   // full (no one reading): dropped
     }
 
-    /** grains.worklet.ts startSlot(): slot `si` of side `side` starts a grain, `lead` samples ago. */
+    /** grains.worklet.ts variation() / skew(): the knobs with their routes, 0..1. */
+    static float variation (const Voice& v, int side) noexcept { return std::clamp (v.s().grainVariation + v.cGrainVar[(size_t) side], 0.0f, 1.0f); }
+    static float skew (const Voice& v, int side) noexcept { return std::clamp (v.s().grainSkew + v.cGrainSkew[(size_t) side], 0.0f, 1.0f); }
+
+    /** grains.worklet.ts grainAt(): where a grain starting now reads from, seconds of the sample. */
+    double grainAt (const Voice& v, int side, double semis) noexcept
+    {
+        const auto& s = v.s();
+        const double sr = v.sample->rate;
+        const double clipIn = v.clipIn / sr, clipLen = std::max (1e-4, (v.clipOut - v.clipIn) / sr);
+        const float u1 = random01(), u2 = random01();
+        const double scanD = s.grainScanDist * clipLen;
+        return clipIn + (s.grainPos + v.cGrainPos[(size_t) side] + s.grainPosKey * 0.01 * semis) * clipLen
+            + dsp::sprayOffset (s.grainSpray, s.grainSpraySlope, s.grainSpraySign, u1, u2) / 1000.0
+            + (s.grainScanOn && scanD > 0 ? scanD * std::pow (v.scanX[(size_t) side], (double) s.grainScanCurve) : 0.0)
+            + dsp::varPosOffset (s.grainVarPos, variation (v, side), random01());
+    }
+
+    /** grains.worklet.ts grainRate(): PITCH / FINE, T<KEY, T<RND, DETUNE and the note's N<RND. */
+    double grainRate (const Voice& v, int side, double semis) noexcept
+    {
+        const auto& s = v.s();
+        const double detune = (side ? 1.0 : -1.0) * (s.grainDetune + v.cGrainDetune[(size_t) side]);
+        double rate = v.kRate * dsp::semisToRate (semis * s.grainTuneKey + detune + v.noteSemis);
+        if (s.grainTuneRnd > 0)
+            rate *= dsp::tuneRndRatio (s.grainTuneRnd, random01());
+        return rate;
+    }
+
+    /** grains.worklet.ts grainGain(): FLUX / VOID, then VARIATION's. */
+    float grainGain (const Voice& v, int side) noexcept
+    {
+        const auto& s = v.s();
+        const float flux = s.grainAmp > 0 ? dsp::grainLevel (s.grainAmpMode, s.grainAmp, s.grainVoid, random01()) : 1.0f;
+        return flux * dsp::varGain (s.grainVarVol, variation (v, side), random01());
+    }
+
+    /** grains.worklet.ts startSlot(): CLASSIC's slot `si` of side `side` starts a grain, `lead` samples ago. */
     void startSlot (Voice& v, int si, int side, double at, double lead, double semis, double f) noexcept
     {
         const auto& s = v.s();
-        const auto& smp = *v.sample;
-        const double sr = smp.rate;
-        const double clipIn = v.clipIn / sr, clipLen = std::max (1e-4, (v.clipOut - v.clipIn) / sr);
+        const double sr = v.sample->rate;
         auto& sl = v.slots[(size_t) si];
-        const float u1 = random01(), u2 = random01();
-        const double pos = clipIn + (s.grainPos + v.cGrainPos + s.grainPosKey * 0.01 * semis) * clipLen
-            + dsp::sprayOffset (s.grainSpray, s.grainSpraySlope, s.grainSpraySign, u1, u2) / 1000.0
-            + (s.grainScanOn ? dsp::scanOffset (v.t, s.grainScanTime, s.grainScanDist, s.grainScanCurve, clipLen) : 0.0);
-        double rate = v.kRate * dsp::semisToRate (semis * s.grainTuneKey);
-        if (s.grainTuneRnd > 0)
-            rate *= dsp::tuneRndRatio (s.grainTuneRnd, random01());
+        const double pos = grainAt (v, side, semis);
+        const double rate = grainRate (v, side, semis);
         sl.step = rate * sr / engine.rate;
         sl.pos = pos * sr + sl.step * lead;
-        sl.amp = s.grainAmp > 0 ? dsp::grainLevel (s.grainAmpMode, s.grainAmp, s.grainVoid, random01()) : 1.0f;
+        sl.amp = grainGain (v, side);
         sl.on = true;
-        const double dur = 1.0 / f;
+        sl.e = dsp::skewExponent (skew (v, side));
+        v.sizeVar[(size_t) side] = dsp::varSizeRatio (s.grainVarSize, variation (v, side), random01());
+        const double dur = v.sizeVar[(size_t) side] / f;
         report (v, at - lead / engine.rate, pos, dur * rate, dur, rate, side ? 0.5f : -0.5f, std::min (1.0f, sl.amp), side);
     }
 
-    /** grains.worklet.ts renderCloud(), one sample: Granulator II's two phasors and their four grain slots. */
+    static float readGrain (const Voice& v, const float* x, double pos, long lo, long hi) noexcept
+    {
+        if (v.s().reverse) pos = v.clipOut - 1 - (pos - v.clipIn);
+        return dsp::readAt (x, pos, lo, hi);
+    }
+
+    /** grains.worklet.ts classicSide(): Granulator II's phasor and its two slots, one side, one sample. */
+    float classicSide (Voice& v, int side, bool ending, double at, double f, double semis, const float* x,
+                       double fmOffset, long lo, long hi) noexcept
+    {
+        const int a = side * 2;
+        auto& ph = v.phase[(size_t) side];
+        const double fv = f / v.sizeVar[(size_t) side];
+        if (! v.cloudStarted)
+        {
+            // the note: A starts at once, and B with it at the top of its window
+            ph = 0;
+            if (! ending)
+            {
+                startSlot (v, a, side, at, 0, semis, fv);
+                startSlot (v, a + 1, side, at, 0, semis, fv);
+            }
+        }
+        else
+        {
+            const double step = std::min (dsp::maxPhaseStep, fv / engine.rate);
+            const double prev = ph;
+            double next = prev + step;
+            if (next >= 1)
+            {
+                next -= 1;
+                if (ending) v.slots[(size_t) a].on = false;
+                else startSlot (v, a, side, at, next / step, semis, fv);
+            }
+            else if (prev < 0.5 && next >= 0.5)
+            {
+                if (ending) v.slots[(size_t) a + 1].on = false;
+                else startSlot (v, a + 1, side, at, (next - 0.5) / step, semis, fv);
+            }
+            ph = next;
+        }
+        float y = 0;
+        for (int k = 0; k < 2; ++k)
+        {
+            auto& sl = v.slots[(size_t) (a + k)];
+            if (! sl.on) continue;
+            const double p = ph + 0.5 * k;
+            const float window = sl.e == 1.0 ? dsp::windowAt (v.window, p) : skewedWindowAt (v.window, p, sl.e);
+            y += window * sl.amp
+               * readGrain (v, x, sl.pos + fmOffset, lo, hi);
+            sl.pos += sl.step;
+        }
+        return y;
+    }
+
+    /** grains.worklet.ts loopSide(): LOOP's segment and the one fading out, one side, one sample. */
+    float loopSide (Voice& v, int side, bool ending, double at, double f, double semis, const float* x,
+                    double fmOffset, long lo, long hi) noexcept
+    {
+        const auto& s = v.s();
+        const double sr = v.sample->rate;
+        auto& ls = v.loopSides[(size_t) side];
+        auto& cur = ls.cur;
+        auto& old = ls.old;
+        if (! v.cloudStarted)
+        {
+            cur.on = false;
+            ls.room = 0;
+            ls.due = true;
+        }
+        if (ls.due)
+        {
+            ls.due = false;
+            old = cur;
+            if (ending)
+            {
+                cur.on = false;
+                if (ls.xf >= 1) old.on = false;
+            }
+            else
+            {
+                const int dir = random01() < s.grainReverse ? -1 : 1;
+                const double pos = grainAt (v, side, semis);
+                const double rate = grainRate (v, side, semis);
+                const double dur = dsp::varSizeRatio (s.grainVarSize, variation (v, side), random01()) / f;
+                const double span = std::max (1.0, dur * rate * sr);
+                const double fade = dsp::loopFade (skew (v, side), span, old.on ? ls.room : 0.0);
+                const auto seg = dsp::loopSegment (pos * sr, span, fade, (double) lo, (double) hi, dir);
+                cur.on = true;
+                cur.pos = seg.head;
+                cur.end = seg.end;
+                cur.dir = dir;
+                cur.step = rate * sr / engine.rate;
+                cur.amp = grainGain (v, side);
+                ls.room = seg.room;
+                ls.xf = old.on && fade > 0 ? 0.0 : 1.0;
+                ls.xfStep = fade > 0 ? cur.step / fade : 1.0;
+                if (ls.xf >= 1) old.on = false;
+                report (v, at, std::min (seg.head, seg.end) / sr, (seg.end - seg.head) * dir / sr, span / (rate * sr), rate,
+                        side ? 0.5f : -0.5f, std::min (1.0f, cur.amp), side, dir < 0);
+            }
+        }
+        float y = 0;
+        if (ls.xf < 1)
+        {
+            // equal power: the outgoing head falls along a cosine as the new one rises along a sine
+            const double q = ls.xf * 0.5 * dsp::pi;
+            if (old.on) y += (float) std::cos (q) * old.amp * readGrain (v, x, old.pos + fmOffset, lo, hi);
+            if (cur.on) y += (float) std::sin (q) * cur.amp * readGrain (v, x, cur.pos + fmOffset, lo, hi);
+            old.pos += old.dir * old.step;
+            ls.xf = std::min (1.0, ls.xf + ls.xfStep);
+            if (ls.xf >= 1) old.on = false;
+        }
+        else if (cur.on)
+            y = cur.amp * readGrain (v, x, cur.pos + fmOffset, lo, hi);
+        if (cur.on)
+        {
+            cur.pos += cur.dir * cur.step;
+            if (cur.dir > 0 ? cur.pos > cur.end : cur.pos < cur.end)
+            {
+                if (ending) cur.on = false;
+                else ls.due = true;
+            }
+        }
+        return y;
+    }
+
+    /** grains.worklet.ts cloudSide(): CLOUD's grains, one side, one sample. */
+    float cloudSide (Voice& v, int side, bool ending, double at, double f, double semis, const float* x,
+                     double fmOffset, long lo, long hi) noexcept
+    {
+        const auto& s = v.s();
+        const double sr = v.sample->rate;
+        auto& grains = v.cloudGrains[(size_t) side];
+        const int n = v.cloudCount;
+        if (! v.cloudLive[(size_t) side])
+        {
+            // the note: staggered through their windows, silent until each first starts again (the first does at once)
+            v.cloudLive[(size_t) side] = true;
+            for (int i = 0; i < n; ++i)
+            {
+                auto& g = grains[(size_t) i];
+                g.on = ! ending;
+                g.phase = 1.0 - (double) i / n;
+                g.phaseStep = 1.0 / (dsp::cloudLength (i) / f * engine.rate);
+                g.amp = 0;
+                g.step = 0;
+            }
+        }
+        float y = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            auto& g = grains[(size_t) i];
+            if (! g.on) continue;
+            if (g.phase >= 1)
+            {
+                if (ending)
+                {
+                    g.on = false;
+                    continue;
+                }
+                const double pos = grainAt (v, side, semis);
+                const double ratio = dsp::varPitchRatio (s.grainVarPitch, variation (v, side), random01());
+                const double rate = grainRate (v, side, semis) * ratio;
+                const double dur = dsp::varSizeRatio (s.grainVarSize, variation (v, side), random01()) * dsp::cloudLength (i) / f;
+                g.phase = 0;
+                g.phaseStep = ratio / (dur * engine.rate);
+                g.pos = pos * sr;
+                g.step = rate * sr / engine.rate;
+                g.amp = grainGain (v, side);
+                report (v, at, pos, dur * rate / ratio, dur / ratio, rate, side ? 0.5f : -0.5f, std::min (1.0f, g.amp), side);
+            }
+            if (g.amp > 0)
+                y += (float) std::sin (dsp::pi * g.phase) * g.amp * readGrain (v, x, g.pos + fmOffset, lo, hi);
+            g.pos += g.step;
+            g.phase += g.phaseStep;
+        }
+        return y * v.cloudLevel;
+    }
+
+    /** grains.worklet.ts renderCloud(), one sample: the side's grains in the sound's mode. */
     void cloudSample (Voice& v, bool ending, double at, float bendSemis, float& xl, float& xr) noexcept
     {
         const auto& s = v.s();
         const auto& smp = *v.sample;
+        if (v.runningGrainMode != s.grainMode)
+        {
+            v.runningGrainMode = s.grainMode;
+            v.cloudStarted = false;
+            v.sizeVar = {1, 1}; v.loopSides = {}; v.cloudLive = {};
+            for (auto& sl : v.slots) sl.on = false;
+            for (auto& side : v.cloudGrains) for (auto& g : side) g.on = false;
+        }
         if (s.grainWindow != v.windowShape || s.grainSymmetry != v.windowSym)
         {
             dsp::windowTable (s.grainWindow, s.grainSymmetry, v.window);
             v.windowShape = s.grainWindow;
             v.windowSym = s.grainSymmetry;
+        }
+        if (! v.cloudStarted)
+        {
+            v.noteSemis = (2.0 * random01() - 1.0) * s.grainNoteRnd;
+            v.cloudCount = (int) std::lround (std::clamp (s.grainDensity, (float) dsp::densityMin, (float) dsp::densityMax));
+            v.cloudLevel = dsp::cloudGain (v.cloudCount);
         }
         const double sr = engine.rate;
         const double semis = v.semisAt (v.t) + bendSemis;
@@ -1504,7 +1989,7 @@ struct Engine::Impl
         }
         const double wander = s.grainFreqRnd > 0
             ? (v.rndFrom + (v.rndTo - v.rndFrom) * v.rndPhase) * s.grainFreqRnd * dsp::freqRndSemis : 0.0;
-        const double base = s.grainFreq * dsp::semisToRate (semis * s.grainFreqKey + wander + v.cGrainSize);
+        const double base = s.grainFreq * dsp::semisToRate (semis * s.grainFreqKey + wander);
         double fmOffset = 0;
         if (s.grainFm && s.grainFmAmount > 0)
         {
@@ -1517,50 +2002,29 @@ struct Engine::Impl
         const auto lo = (long) std::floor (v.clipIn), hi = std::min ((long) smp.frames(), (long) std::ceil (v.clipOut));
         for (int side = 0; side < 2; ++side)
         {
-            const double f = side ? base * spread : base / spread;
-            const double step = std::min (dsp::maxPhaseStep, f / sr);
-            const int a = side * 2;
-            auto& ph = v.phase[(size_t) side];
-            if (! v.cloudStarted)
+            const auto size = v.cGrainSize[(size_t) side];
+            const double f = (side ? base * spread : base / spread)
+                           * (size == 0 ? 1.0f : dsp::semisToRate (size));
+            const float* x = chans[side];
+            float y;
+            switch (s.grainMode)
             {
-                // the note: A starts at once, and B with it at the top of its window
-                ph = 0;
-                if (! ending)
-                {
-                    startSlot (v, a, side, at, 0, semis, f);
-                    startSlot (v, a + 1, side, at, 0, semis, f);
-                }
-            }
-            else
-            {
-                const double prev = ph;
-                double next = prev + step;
-                if (next >= 1)
-                {
-                    next -= 1;
-                    if (ending) v.slots[(size_t) a].on = false;
-                    else startSlot (v, a, side, at, next / step, semis, f);
-                }
-                else if (prev < 0.5 && next >= 0.5)
-                {
-                    if (ending) v.slots[(size_t) a + 1].on = false;
-                    else startSlot (v, a + 1, side, at, (next - 0.5) / step, semis, f);
-                }
-                ph = next;
-            }
-            float y = 0;
-            for (int k = 0; k < 2; ++k)
-            {
-                auto& sl = v.slots[(size_t) (a + k)];
-                if (! sl.on) continue;
-                const double read = sl.pos + fmOffset;
-                const double position = s.reverse ? v.clipOut - 1 - (read - v.clipIn) : read;
-                y += dsp::windowAt (v.window, ph + 0.5 * k) * sl.amp * dsp::readAt (chans[side], position, lo, hi);
-                sl.pos += sl.step;
+                case GrainMode::loop:  y = loopSide (v, side, ending, at, f, semis, x, fmOffset, lo, hi); break;
+                case GrainMode::cloud: y = cloudSide (v, side, ending, at, f, semis, x, fmOffset, lo, hi); break;
+                case GrainMode::classic:
+                default:               y = classicSide (v, side, ending, at, f, semis, x, fmOffset, lo, hi); break;
             }
             (side ? xr : xl) = y;
         }
         v.cloudStarted = true;
+        if (s.grainScanOn)
+        {
+            const double clipLen = std::max (1e-4, (v.clipOut - v.clipIn) / smp.rate);
+            const double step = dsp::scanRate (s.grainScanTime, s.grainScanDist, clipLen,
+                                               s.grainScanKey ? dsp::semisToRate (v.glideTo) : 1.0) / sr;
+            for (size_t side = 0; side < 2; ++side)
+                v.scanX[side] = dsp::scanWrap (v.scanX[side] + step * (1.0 + v.cGrainScan[side]), s.grainScanLoop);
+        }
     }
 
     /** grains.worklet.ts renderStretch(): start the grains due at this sample (`at` engine time). */
@@ -1592,7 +2056,13 @@ struct Engine::Impl
     bool grainsRinging (const Voice& v) const noexcept
     {
         if (v.kind == Voice::Kind::cloud)
-            return std::any_of (v.slots.begin(), v.slots.end(), [] (const auto& sl) { return sl.on; });
+        {
+            const auto on = [] (const auto& g) { return g.on; };
+            return std::any_of (v.slots.begin(), v.slots.end(), on)
+                || std::any_of (v.loopSides.begin(), v.loopSides.end(), [] (const auto& ls) { return ls.cur.on || ls.old.on; })
+                || std::any_of (v.cloudGrains.begin(), v.cloudGrains.end(),
+                                [&] (const auto& side) { return std::any_of (side.begin(), side.end(), on); });
+        }
         return v.grainCount > 0;
     }
 
@@ -1606,7 +2076,8 @@ struct Engine::Impl
         const auto frames = (double) smp.frames();
         const double dt = 1.0 / engine.rate;
         const double srRatio = smp.rate / engine.rate;
-        float velGain = s.volume * (1.0f - s.velAmount + s.velAmount * v.velocity);
+        float velGain = s.volume * (1.0f - s.velAmount + s.velAmount * v.velocity)
+                            * (float) (s.volKey == 0 ? 1.0 : std::pow (10.0, s.volKey * v.glideTo / 12.0 / 20.0));   // K>VOL
 
         const float* taps[3] = { tapOf (v, 0), tapOf (v, 1), tapOf (v, 2) };
 
@@ -1627,10 +2098,12 @@ struct Engine::Impl
             if (--v.countdown <= 0)
             {
                 controlUpdate (v);
-                velGain=s.volume*(1.0f-s.velAmount+s.velAmount*v.velocity);
+                velGain=s.volume*(1.0f-s.velAmount+s.velAmount*v.velocity)
+                    * (float) (s.volKey == 0 ? 1.0 : std::pow (10.0, s.volKey * v.glideTo / 12.0 / 20.0));
                 if (! v.vcoRoutes) updateFilter (v, 0, 0);
-                v.padLfo[0].advance (dt * controlEvery);
-                v.padLfo[1].advance (dt * controlEvery);
+                if (! v.audioLfo)
+                    for (int k = 0; k < 2; ++k)
+                        v.padLfo[(size_t) k].run (dt * controlEvery, controlEvery, padLfoFactor (v, k));
                 v.countdown = controlEvery;
             }
 
@@ -1674,7 +2147,15 @@ struct Engine::Impl
                 }
                 const float bendSemis = (v.cPitch + v.quantumPitch) / 100.0f;
                 if (v.kind == Voice::Kind::cloud)
+                {
+                    if (v.audioLfo)
+                    {
+                        audioLfoRoutes (v);
+                        for (int k = 0; k < 2; ++k)
+                            v.padLfo[(size_t) k].run (dt, 1, padLfoFactor (v, k));
+                    }
                     cloudSample (v, ended, now + i * dt, bendSemis, xl, xr);
+                }
                 else
                 {
                     if (! ended)
@@ -1701,11 +2182,16 @@ struct Engine::Impl
             {
                 const double p = s.reverse ? std::max(v.clipIn, v.clipOut - 1 - (v.pos - v.clipIn)) : v.pos;
                 const auto i0 = (size_t) p;
-                if ((double) i0 + 1 < frames)
+                // the frame after i0: past a loop's end that is the loop's start again (an AKWF wave loops every
+                // 600 frames, so stopping short at the end -- a silent frame -- would buzz)
+                const bool wraps = v.loops && v.loopEnd > v.loopStart && (double) i0 + 1 >= v.loopEnd;
+                const double next = wraps ? (double) i0 + 1 - (v.loopEnd - v.loopStart) : (double) i0 + 1;
+                if ((double) i0 < frames && next >= 0 && next < frames)
                 {
+                    const auto i1 = (size_t) next;
                     const auto f = (float) (p - (double) i0);
-                    xl = chL[i0] + (chL[i0 + 1] - chL[i0]) * f;
-                    xr = chR[i0] + (chR[i0 + 1] - chR[i0]) * f;
+                    xl = chL[i0] + (chL[i1] - chL[i0]) * f;
+                    xr = chR[i0] + (chR[i1] - chR[i0]) * f;
                 }
                 if (--v.quantumLeft <= 0)
                 {
@@ -1725,10 +2211,26 @@ struct Engine::Impl
             // amp envelope, filter, EQ
             const float amp = v.ampEnv.at (v.t, v.releaseT);
             xl *= amp; xr *= amp;
-            xl = v.filt[0].process (v.fc, xl);
-            xr = v.monoSource ? xl : v.filt[1].process (v.fc, xr);
+            const bool svf = s.svfType && ! v.zoneFilter;
+            const bool oneSide = v.monoSource && ! svf;   // Granulator III's filter is stereo (its sides can differ)
+            if (svf)
+            {
+                const auto& t = dsp::svfType (s.svfType);
+                float* x[2] { &xl, &xr };
+                for (size_t side = 0; side < 2; ++side)
+                {
+                    auto& st = v.svf[side];
+                    const float y = st[0].tick (t.stage1, v.svfG[side][0], v.svfK[side][0], *x[side]);
+                    *x[side] = st[1].tick (t.stage2, v.svfG[side][1], v.svfK[side][1], y);
+                }
+            }
+            else
+            {
+                xl = v.filt[0].process (v.fc, xl);
+                xr = oneSide ? xl : v.filt[1].process (v.fc, xr);
+            }
             xl = v.hi[0].process (v.hiC, v.mid[0].process (v.midC, v.lo[0].process (v.loC, xl)));
-            xr = v.monoSource ? xl : v.hi[1].process (v.hiC, v.mid[1].process (v.midC, v.lo[1].process (v.loC, xr)));
+            xr = oneSide ? xl : v.hi[1].process (v.hiC, v.mid[1].process (v.midC, v.lo[1].process (v.loC, xr)));
 
             // what a patch reads when this voice is one of its VCOs: the post-EQ signal, as mono
             if (! v.tap.empty())
@@ -1827,8 +2329,8 @@ struct Engine::Impl
         engine.active.store (count, std::memory_order_relaxed);
 
         const double dt = 1.0 / engine.rate;
-        globalLfo[0].advance (dt * n);
-        globalLfo[1].advance (dt * n);
+        globalLfo[0].run (dt * n, n);
+        globalLfo[1].run (dt * n, n);
 
         contactEffects.process(mainL.data()+offset,mainR.data()+offset,n);
 
@@ -1935,8 +2437,8 @@ struct Engine::Impl
                 chorusLine[0].process (0.5f * (inL + inR), chorusBase * engine.rate);
                 chorusLine[1].process (0.5f * (inL + inR), chorusBase * engine.rate);
             }
-            chorusLfo[0].advance (dt);
-            chorusLfo[1].advance (dt);
+            chorusLfo[0].run (dt, 1);
+            chorusLfo[1].run (dt, 1);
 
             // delay with a damped feedback path
             const float yl = masterDelay[0].process (inL + masterFbL, delaySamples);
@@ -2026,7 +2528,7 @@ void Engine::prepare (double sampleRate, int maxBlockSize)
     LfoDef chorus { LfoShape::sine, m.perf->fx.chorusRate, false, 1 };
     m.chorusLfo[0].start (chorus, 120, 1);
     m.chorusLfo[1].start (chorus, 120, 2);
-    m.chorusLfo[1].advance (-0.25 / std::max (0.05f, m.perf->fx.chorusRate));
+    m.chorusLfo[1].run (-0.25 / std::max (0.05f, m.perf->fx.chorusRate), 1);
     m.globalLfo[0].start (m.perf->globalMod.lfo1, m.bpm, 11);
     m.globalLfo[1].start (m.perf->globalMod.lfo2, m.bpm, 12);
 
@@ -2177,6 +2679,7 @@ void Engine::process (float* left, float* right, int n, const MidiEvent* midi, i
     Command c;
     while (m.commands.pop (c))
         m.command (c);
+    if (m.perf && ! m.perf->hold) m.releaseLatched();   // HOLD turned off
 
     int e = 0;
     for (int done = 0; done < n;)

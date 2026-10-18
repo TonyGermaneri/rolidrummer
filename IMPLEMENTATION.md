@@ -400,3 +400,27 @@ Final local AU/VST3/standalone archives are in `/private/tmp/rolidrummer-neural/
 ## User requested Ableton Live test installation
 
 After implementation validation, the user requested installation of the AU and VST3. The verified universal bundles were copied into `~/Library/Audio/Plug-Ins/Components/Roli Drummer.component` and `~/Library/Audio/Plug-Ins/VST3/Roli Drummer.vst3`. Both installed copies match every source file/link and permission and pass deep strict signature verification. The previous AU was retained under `~/Library/Audio/Plug-Ins/RoliDrummer Backups/2026-10-18_10-12-12_da6028/Components/Roli Drummer.component`; no VST3 previously occupied its destination. Installation changed no app data and launched no host. Report: `/private/tmp/rolidrummer-neural/install-report-2026-10-18_10-12-12_da6028.json`.
+
+
+## SSB 0.6.2 sound engine update
+
+- Compared the adapted aabc13d engine against SSB origin/main at 4be313f (0.6.2). Adopted e6c7fc2's Granulator III modes, skew/variation/detuning, loop/key scanning, stereo/ratio/phase/quantized LFOs, modulation sources/routes, stereo SVF filters and envelope/volume/filter key scaling. Also adopted d4d496c's seamless sample-loop interpolation and 4508110's release of notes across mono/poly mode changes. The inherited keyboard path includes HOLD; Roli Drummer's contact/pedal scheduler remains unchanged.
+- Preserved owned voices, contact effects, exact release endpoints, off-thread resource retirement, cached grain windows and synchronous initial master-reverb preparation. Sound settings and scalar MPE bindings carry the additions without copying route vectors on audio. Existing grainReverse bindings retain whole-sample reverse; grainLoopReverse selects the new LOOP reverse probability. New fields default to neutral CLASSIC behavior for older sounds. CLOUD density is captured at note-on, as in SSB.
+- Added mode-state cleanup on live mode changes and discarded completed LOOP crossfade heads, so stale grains cannot retain released voices. Global reverse also applies to each new mode and its telemetry.
+- This update imports no AKWF assets, factory presets, patch contents, level matching or preset migrations. Existing factory definitions, library data and neural resolution logic are unchanged. The existing sampler panel exposes the new sound controls.
+- Ported SSB's audio regressions and added JSON compatibility, live source/mode changes and release, per-contact gesture isolation, 64/257-sample partition equivalence and heap-guard coverage for all three modes, stereo SVF, audio-rate LFOs and random variation.
+- Cached CLOUD normalization at note-on. Apple Clang speculated pow() inside the neutral-skew ternary; a separate non-inlined shaping helper keeps that calculation out of neutral CLASSIC rendering. Neutral grain-size routes also bypass redundant pitch conversion.
+
+Local Release arm64 measurements on Apple M3 Max, 64 sustained voices, 64/256-sample blocks, three seconds of audio per case. Percent is callback time divided by audio duration; these are isolated development measurements, not a host deadline guarantee.
+
+| Profile | Before, 48 kHz | Updated, 48 kHz | Before, 96 kHz | Updated, 96 kHz |
+| --- | --- | --- | --- | --- |
+| CLASSIC stereo grains + effects | 22.0–22.1% | 24.2–24.7% | 45.0–45.7% | 49.3–50.1% |
+| CLASSIC window MPE + FM + scan + effects | 48.8–49.5% | 50.5–51.0% | 99.6–100.0% | 102.0–102.7% |
+| LOOP + stereo SVF + ratio LFO + effects | — | 32.4–32.7% | — | 64.1–65.1% |
+| CLOUD, 20 grains/side + stereo SVF + ratio LFO + effects | — | 90.5–90.6% | — | 180.1–180.6% |
+
+The maximum-density CLOUD stress case exceeds real time at 96 kHz; the older extreme CLASSIC window/FM/scan case was already near that boundary. No density or voice caps were silently reduced. Raw before/after and focused optimization measurements are in /private/tmp/rolidrummer-ssb-update; drummer-benchmark optionally accepts a profile index 0–5 to repeat an individual case.
+
+- Validation: all 17 native suites pass, with the final expression suite run explicitly on arm64 and x86_64; all 52 engine audio tests also pass on both architectures. All 119 editor tests and the production build pass. Universal AU/VST3/standalone bundles verify both executable/runtime architectures, deep signatures, current web assets and pinned neural resources. Installed AU passes Apple auval; installed VST3 passes pluginval 1.0.4 strictness 5.
+- Updated the user AU and VST3 folders with byte-verified copies of the builds. Previous versions are preserved under ~/Library/Audio/Plug-Ins/RoliDrummer Backups/2026-10-18_13-11-14_ssb-0.6.2. Host validation uses private RD_DATA_DIR directories; personal pattern libraries, saved patches and application data were not altered.

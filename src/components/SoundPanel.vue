@@ -4,7 +4,7 @@ import {clone,type Sound} from '../model'
 import {preview,audition,stopPreview} from '../preview'
 import {attempt} from '../store'
 import {request,native} from '../native/bridge'
-import { FM_AMOUNT_MAX, FM_FREQ_MAX, FM_FREQ_MIN, GRAIN_FREQ_MAX, grainFreqMin, SCAN_DIST_MIN, SCAN_TIME_MAX, SCAN_TIME_MIN, SPRAY_MAX, SPRAY_SIGNS, SYMMETRIES } from '../audio/grainMath'
+import { DENSITY_MAX, DENSITY_MIN, DETUNE_MAX, GRAIN_MODES, NOTE_RND_MAX, VAR_PITCH_MAX, VAR_POS_MAX, VAR_SIZE_MAX, VAR_VOL_MAX, FM_AMOUNT_MAX, FM_FREQ_MAX, FM_FREQ_MIN, GRAIN_FREQ_MAX, grainFreqMin, SCAN_DIST_MIN, SCAN_TIME_MAX, SCAN_TIME_MIN, SPRAY_MAX, SPRAY_SIGNS, SYMMETRIES } from '../audio/grainMath'
 import Knob from './Knob.vue'
 import Waveform from './Waveform.vue'
 import {
@@ -12,7 +12,7 @@ import {
   fmtRatio, fmtRepeat, fmtSec, fmtSemis, midiNoteName,
 } from '../lib/format'
 import {
-  FILTER_LABEL, GRAIN_DEFAULTS,
+  FILTER_LABEL, FILTER_TYPES, GRAIN_DEFAULTS,
 
 } from '../types'
 
@@ -27,7 +27,7 @@ watch(()=>[props.sound,props.sound.path,props.note],(_,previous)=>{if(previous&&
 onBeforeUnmount(()=>{if(isPreviewing.value)void attempt(stopPreview)})
 const isFolded=(k:string)=>folded.value.includes(k)
 const toggleFold=(k:string)=>{folded.value=isFolded(k)?folded.value.filter(x=>x!==k):[...folded.value,k]}
-const board={cycleFilter:()=>{s.value.filterType=({lowpass:'highpass',highpass:'bandpass',bandpass:'lowpass'} as const)[s.value.filterType]}}
+const board={cycleFilter:()=>{s.value.filterType=next(FILTER_TYPES,s.value.filterType)}}
 const peaks=ref<number[]>([]),duration=ref(.5)
 const grainMin=()=>grainFreqMin(duration.value)
 const next=<T,>(list:readonly T[],v:T):T=>list[(list.indexOf(v)+1)%list.length]
@@ -54,6 +54,7 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
         </h4>
         <div class="row">
           <Knob :data-param="'volume'" v-model="s.volume" label="VOL" :max="1.5" :default="1" :format="fmtPct" />
+          <Knob data-param="volKey" v-model="s.volKey" label="K>VOL" :min="-3" :max="3" :default="0" bipolar :format="fmtDb" />
           <Knob :data-param="'pan'" v-model="s.pan" label="PAN" :min="-1" :max="1" :default="0" bipolar :format="fmtPan" />
           <Knob :data-param="'repeat'" v-model="s.repeat" label="RPT" :min="0" :max="16" :step="1" :default="1" :format="fmtRepeat" />
           <Knob :data-param="'choke'" v-model="s.choke" label="CHOKE" :min="0" :max="8" :step="1" :default="0" :format="fmtChoke" />
@@ -112,13 +113,14 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
           <Knob :data-param="'decay'" v-model="s.decay" label="D" :min="0.001" :max="5" curve="log" :default="0.2" :format="fmtSec" />
           <Knob :data-param="'sustain'" v-model="s.sustain" label="S" :default="1" :format="fmtPct" />
           <Knob :data-param="'release'" v-model="s.release" label="R" :min="0.001" :max="10" curve="log" :default="0.02" :format="fmtSec" />
+          <Knob data-param="envKey" v-model="s.envKey" label="ENV KEY" :default="0" :format="fmtPct" />
         </div>
       </section>
 
       <section class="module" :class="{ folded: isFolded('filter') }">
         <h4>
           FILTER
-          <button class="chip on" title="Filter type — click to cycle LP / HP / BP" @click="board.cycleFilter()">
+          <button class="chip on" title="Filter type — click to cycle biquad and Granulator III filters" @click="board.cycleFilter()">
             {{ FILTER_LABEL[s.filterType] }}
           </button>
           <button class="fold" :title="isFolded('filter') ? 'Show' : 'Fold'" @click="toggleFold('filter')"><i /></button>
@@ -126,6 +128,8 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
         <div class="row">
           <Knob :data-param="'cutoff'" v-model="s.cutoff" label="CUTOFF" :min="20" :max="20000" curve="log" :default="20000" :format="fmtHz" color="secondary" />
           <Knob :data-param="'resonance'" v-model="s.resonance" label="RES" :min="0.1" :max="20" curve="log" :default="0.7" :format="fmtQ" color="secondary" />
+          <Knob data-param="filterWidth" v-model="s.filterWidth" label="WIDTH" :min="-48" :max="48" :default="-12" bipolar :format="fmtSemis" color="secondary" />
+          <Knob data-param="filterKey" v-model="s.filterKey" label="F.KEY" :default="0" :format="fmtPct" color="secondary" />
         </div>
       </section>
 
@@ -139,6 +143,7 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
           <Knob :data-param="'fDecay'" v-model="s.fDecay" label="D" :min="0.001" :max="5" curve="log" :default="0.3" :format="fmtSec" color="secondary" />
           <Knob :data-param="'fSustain'" v-model="s.fSustain" label="S" :default="0" :format="fmtPct" color="secondary" />
           <Knob :data-param="'fRelease'" v-model="s.fRelease" label="R" :min="0.001" :max="10" curve="log" :default="0.2" :format="fmtSec" color="secondary" />
+          <Knob data-param="fEnvKey" v-model="s.fEnvKey" label="ENV KEY" :default="0" :format="fmtPct" color="secondary" />
         </div>
       </section>
 
@@ -161,10 +166,17 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
           <button
             class="chip"
             :class="{ on: s.grain }"
-            :title="s.grain ? 'Grain cloud on: the sound plays as grains (Granulator II\'s engine) — click for the plain sample' : 'Play the sound as a cloud of grains (Granulator II\'s engine)'"
+            :title="s.grain ? 'Grain cloud on: the sound plays as grains (Granulator III\'s engine) — click for the plain sample' : 'Play the sound as a cloud of grains (Granulator III\'s engine)'"
             @click="s.grain = !s.grain"
           >
             {{ s.grain ? 'ON' : 'OFF' }}
+          </button>
+          <button
+            class="chip on"
+            title="Granulator III's modes. CLASSIC: Granulator II, two overlapping grains a side. LOOP: plays a segment one grain long and crossfades into the next (XFADE), backwards as often as REVERSE says. CLOUD: DENSITY grains a side, each a little longer than the last, drifting apart — click for the next"
+            @click="s.grainMode = next(GRAIN_MODES, s.grainMode)"
+          >
+            {{ s.grainMode.toUpperCase() }}
           </button>
           <button class="chip on" title="Window: STD (a sine), FALL (its falling half), RISE (its rising half), NOIZ (noise) — click for the next" @click="s.grainSymmetry = next(SYMMETRIES, s.grainSymmetry)">
             {{ s.grainSymmetry.toUpperCase() }}
@@ -177,6 +189,8 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
           </button>
           <button class="chip" :class="{ on: s.grainFm }" title="FM: a sine swings where the grains read, at FM HZ (following the keys by FM<KEY)" @click="s.grainFm = !s.grainFm">FM</button>
           <button class="chip" :class="{ on: s.grainScanOn }" title="SCAN: from each note, POS travels S.DIST of the clip; S.TIME 100 % is real time, 200 % half speed" @click="s.grainScanOn = !s.grainScanOn">SCAN</button>
+          <button class="chip" :class="{ on: s.grainScanLoop, dim: !s.grainScanOn }" title="S.LOOP: SCAN starts over each time it has travelled S.DIST, instead of stopping there" @click="s.grainScanLoop = !s.grainScanLoop">S.LOOP</button>
+          <button class="chip" :class="{ on: s.grainScanKey, dim: !s.grainScanOn }" title="S.KEY: SCAN goes faster for higher notes (an octave up, twice as fast)" @click="s.grainScanKey = !s.grainScanKey">S.KEY</button>
           <button class="fold" :title="isFolded('grain') ? 'Show' : 'Fold'" @click="toggleFold('grain')"><i /></button>
         </h4>
         <div class="row">
@@ -201,6 +215,19 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
           <Knob :data-param="'grainScanTime'" v-model="s.grainScanTime" label="S.TIME" :min="SCAN_TIME_MIN" :max="SCAN_TIME_MAX" curve="pow4" :default="GRAIN_DEFAULTS.grainScanTime" :format="fmtWholePct" color="accent" :class="{ dim: !s.grainScanOn }" />
           <Knob :data-param="'grainScanDist'" v-model="s.grainScanDist" label="S.DIST" :min="SCAN_DIST_MIN" :max="1" curve="pow4" :default="GRAIN_DEFAULTS.grainScanDist" :format="fmtFinePct" color="accent" :class="{ dim: !s.grainScanOn }" />
           <Knob :data-param="'grainScanCurve'" v-model="s.grainScanCurve" label="CURVE" :min="0.5" :max="2" curve="pow2" :default="1" :format="fmtFix2" color="accent" :class="{ dim: !s.grainScanOn }" />
+        </div>
+        <!-- Granulator III -->
+        <div class="row">
+          <Knob data-param="grainSkew" v-model="s.grainSkew" :label="s.grainMode === 'loop' ? 'XFADE' : 'SKEW'" :default="GRAIN_DEFAULTS.grainSkew" :format="fmtPct" color="accent" :class="{ dim: s.grainMode === 'cloud' }" />
+          <Knob data-param="grainDensity" v-model="s.grainDensity" label="DENSITY" :min="DENSITY_MIN" :max="DENSITY_MAX" :step="1" :default="GRAIN_DEFAULTS.grainDensity" :format="fmtNum" color="accent" :class="{ dim: s.grainMode !== 'cloud' }" />
+          <Knob data-param="grainLoopReverse" v-model="s.grainReverse" label="REVERSE" :default="0" :format="fmtPct" color="accent" :class="{ dim: s.grainMode !== 'loop' }" />
+          <Knob data-param="grainVariation" v-model="s.grainVariation" label="VARIATION" curve="pow2" :default="0" :format="fmtPct" color="accent" />
+          <Knob data-param="grainVarPos" v-model="s.grainVarPos" label="V.POS" :max="VAR_POS_MAX" curve="pow2" :default="GRAIN_DEFAULTS.grainVarPos" :format="fmtMs" color="accent" :class="{ dim: !s.grainVariation }" />
+          <Knob data-param="grainVarSize" v-model="s.grainVarSize" label="V.SIZE" :max="VAR_SIZE_MAX" :default="0" :format="fmtSemis" color="accent" :class="{ dim: !s.grainVariation }" />
+          <Knob data-param="grainVarPitch" v-model="s.grainVarPitch" label="V.PITCH" :max="VAR_PITCH_MAX" :default="0" :format="fmtSemis" color="accent" :class="{ dim: !s.grainVariation || s.grainMode !== 'cloud' }" />
+          <Knob data-param="grainVarVol" v-model="s.grainVarVol" label="V.VOL" :max="VAR_VOL_MAX" curve="pow2" :default="0" :format="fmtFix1" color="accent" :class="{ dim: !s.grainVariation }" />
+          <Knob data-param="grainDetune" v-model="s.grainDetune" label="DETUNE" :max="DETUNE_MAX" curve="pow4" :default="0" :format="fmtSemis" color="accent" />
+          <Knob data-param="grainNoteRnd" v-model="s.grainNoteRnd" label="N<RND" :max="NOTE_RND_MAX" curve="pow2" :default="0" :format="fmtSemis" color="accent" />
         </div>
       </section>
 

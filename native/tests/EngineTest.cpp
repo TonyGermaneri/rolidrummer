@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <map>
+#include <set>
 #include <thread>
 
 // The engine without a host: generated samples in, rendered audio out, measured.
@@ -927,4 +928,717 @@ TEST ("engine: cached grain window matches SSB formula across shapes and symmetr
                 CHECK (std::abs (table[size_t(i)] - expected) < 1e-7);
             }
         }
+}
+
+// ------------------------------------------------------------------------------- Granulator III's additions
+
+namespace
+{
+/** A ramp from 0 up to 1 across the sample: what a grain reads says where it reads. */
+ssb::SamplePtr ramp (double seconds)
+{
+    auto s = std::make_shared<ssb::Sample>();
+    s->rate = rate;
+    const auto n = (size_t) (seconds * rate);
+    s->channels.assign (1, std::vector<float> (n));
+    for (size_t i = 0; i < n; ++i)
+        s->channels[0][i] = (float) i / (float) n;
+    return s;
+}
+
+std::vector<ssb::GrainView> reported (Rig& rig)
+{
+    std::vector<ssb::GrainView> grains;
+    rig.engine.readGrains (grains, 10000);
+    return grains;
+}
+} // namespace
+
+TEST ("engine: SKEW leans CLASSIC's grains early or late (Granulator III's SHAPE)")
+{
+    // a constant through the two overlapping windows; a grain starts every half period (GRAIN 4 Hz: 125 ms)
+    auto lean = [] (float skew)
+    {
+        Rig rig;
+        rig.add ("a", dc (1, 4), [skew] (auto& s) { cloud (s, 4); s.grainSkew = skew; });
+        rig.commit();
+        rig.press ("a");
+        rig.render (1.0);
+        double early = 0, late = 0;
+        for (int k = 1; k < 7; ++k)
+        {
+            const double t0 = k * 0.125;
+            early += rig.rms (t0 + 0.002, t0 + 0.02);
+            late += rig.rms (t0 + 0.105, t0 + 0.123);
+        }
+        return early / late;
+    };
+    CHECK (lean (0.0f) > 3);               // a sharp attack, then it dies away
+    CHECK_NEAR (lean (0.5f), 1.0, 0.02);   // the window as it was: symmetric
+    CHECK (lean (1.0f) < 1.0 / 3);         // it swells to an abrupt end
+}
+
+TEST ("engine: LOOP plays a segment one grain long, then the next from POS; REVERSE plays them backwards")
+{
+    auto play = [] (float reverse, float xfade)
+    {
+        Rig rig;
+        rig.add ("a", ramp (2), [reverse, xfade] (auto& s)
+        {
+            cloud (s, 4);
+            s.grainMode = ssb::GrainMode::loop;
+            s.grainPos = 0.25f;
+            s.grainReverse = reverse;
+            s.grainSkew = xfade;
+        });
+        rig.commit();
+        rig.press ("a");
+        rig.render (1.0);
+        return rig.left;
+    };
+    // 250 ms segments from half a second into the 2 s ramp: 0.25 rising to 0.375, over and over (the voice's own
+    // level aside: `g` measures it at the first segment's start)
+    const auto at = [] (const std::vector<float>& x, double t) { return (double) x[(size_t) (t * rate)]; };
+    const auto fwd = play (0, 0);
+    const double g = at (fwd, 0.01) / (0.25 + 0.01 / 2);
+    CHECK_NEAR (at (fwd, 0.10) / g, 0.25 + 0.10 / 2, 0.001);
+    CHECK_NEAR (at (fwd, 0.30) / g, 0.25 + 0.05 / 2, 0.001);   // the second segment, from POS again
+    CHECK (periodicity (fwd, 0.1, 0.9, 0.25) > 0.999);
+    // backwards: from 0.375 down to 0.25
+    const auto back = play (1, 0);
+    CHECK_NEAR (at (back, 0.05) / g, 0.375 - 0.05 / 2, 0.001);
+    CHECK_NEAR (at (back, 0.30) / g, 0.375 - 0.05 / 2, 0.001);
+    // XFADE: each segment fades into the next, so nothing jumps back the 0.125 a hard loop does
+    const auto faded = play (0, 1);
+    double jump = 0, hard = 0;
+    for (size_t i = (size_t) (0.1 * rate); i < (size_t) (0.9 * rate); ++i)
+    {
+        jump = std::max (jump, (double) std::abs (faded[i] - faded[i - 4]));   // (the voice filter blurs a step)
+        hard = std::max (hard, (double) std::abs (fwd[i] - fwd[i - 4]));
+    }
+    CHECK (hard > 0.1 * g);
+    CHECK (jump < 0.001);
+}
+
+TEST ("engine: CLOUD layers DENSITY grains a side, the i-th 1 + √i grains long, starting staggered")
+{
+    Rig rig;
+    rig.add ("a", dc (1, 4), [] (auto& s)
+    {
+        cloud (s, 10);
+        s.grainMode = ssb::GrainMode::cloud;
+        s.grainDensity = 4;
+    });
+    rig.commit();
+    rig.press ("a");
+    rig.render (1.0);
+    const auto grains = reported (rig);
+    std::set<long> lengths;
+    double firstLongest = 1e9;
+    for (const auto& g : grains)
+    {
+        lengths.insert (std::lround (g.dur * 10000));
+        if (std::lround (g.dur * 10000) == 2732) firstLongest = std::min (firstLongest, g.when);
+    }
+    CHECK ((lengths == std::set<long> { 1000, 2000, 2414, 2732 }));   // 100 ms × 1, 2, 1 + √2, 1 + √3
+    CHECK_NEAR (firstLongest, 3.0 / 4 * 0.2732, 0.002);               // a quarter of its window still to run
+    CHECK (rig.rms (0.5, 1.0) > 0.5);
+}
+
+TEST ("engine: VARIATION starts grains later and changes their level; DETUNE and N<RND pitch them")
+{
+    {
+        Rig rig;
+        rig.add ("a", sine (440, 4), [] (auto& s)
+        {
+            cloud (s, 20);
+            s.grainPos = 0.25f;
+            s.grainVariation = 1;
+            s.grainVarPos = 500;
+            s.grainVarVol = 12;
+        });
+        rig.commit();
+        rig.press ("a");
+        rig.render (1.0);
+        double lo = 1e9, hi = 0, quietest = 1;
+        for (const auto& g : reported (rig))
+        {
+            lo = std::min (lo, (double) g.pos);
+            hi = std::max (hi, (double) g.pos);
+            quietest = std::min (quietest, (double) g.gain);
+        }
+        CHECK (lo >= 1.0 - 1e-4);              // never before POS (a quarter of 4 s)
+        CHECK (hi <= 1.5 + 1e-4 && hi > 1.4);  // up to V.POS after it
+        CHECK (quietest < 0.3);                // down to −21 dB
+    }
+    {
+        Rig rig;
+        rig.add ("a", sine (440, 4), [] (auto& s) { cloud (s, 10); s.grainDetune = 12; });
+        rig.commit();
+        rig.press ("a");
+        rig.render (0.5);
+        for (const auto& g : reported (rig))
+            CHECK_NEAR (g.rate, g.stream ? 2.0 : 0.5, 1e-4);   // left an octave down, right an octave up
+        CHECK_NEAR (rig.hz (0.1, 0.45), 220.0, 3.0);
+    }
+    {
+        Rig rig;
+        rig.add ("a", sine (440, 4), [] (auto& s) { cloud (s, 10); s.grainNoteRnd = 12; });
+        rig.commit();
+        rig.press ("a");
+        rig.render (0.5);
+        const auto grains = reported (rig);
+        CHECK (! grains.empty());
+        for (const auto& g : grains)
+        {
+            CHECK_NEAR (g.rate, grains[0].rate, 1e-6);   // one pitch for the whole note
+            CHECK (g.rate >= 0.5 - 1e-6 && g.rate <= 2.0 + 1e-6);
+        }
+    }
+}
+
+TEST ("engine: S.LOOP starts SCAN over at its distance; S.KEY makes it faster for higher notes")
+{
+    // where grains start, against when: SCAN from POS 0 over a quarter of the 4 s sample
+    auto play = [] (bool loop, bool key, int note)
+    {
+        Rig rig;
+        rig.add ("a", sine (440, 4), [loop, key] (auto& s)
+        {
+            cloud (s, 20);
+            s.rootNote = 60;
+            s.grainFreqKey = 0;
+            s.grainTuneKey = 0;
+            s.grainPos = 0;
+            s.grainScanOn = true;
+            s.grainScanDist = 0.25f;
+            s.grainScanLoop = loop;
+            s.grainScanKey = key;
+        });
+        rig.set ("play", true);
+        rig.set ("playable", "a");
+        rig.commit();
+        rig.render (1.6, { on (0.0, note) });
+        return reported (rig);
+    };
+    auto at = [] (const std::vector<ssb::GrainView>& grains, double when)
+    {
+        double best = 1e9, pos = -1;
+        for (const auto& g : grains)
+            if (std::abs (g.when - when) < best) { best = std::abs (g.when - when); pos = g.pos; }
+        return pos;
+    };
+    const auto stops = play (false, false, 60);
+    CHECK_NEAR (at (stops, 0.5), 0.5, 0.03);
+    CHECK_NEAR (at (stops, 1.5), 1.0, 0.03);   // it went its 1 s and stopped
+    const auto loops = play (true, false, 60);
+    CHECK_NEAR (at (loops, 1.5), 0.5, 0.03);   // and round again
+    const auto keyed = play (false, true, 72);
+    CHECK_NEAR (at (keyed, 0.25), 0.5, 0.03);  // an octave up: twice as fast
+}
+
+TEST ("engine: the matrix reaches SKEW, VARIATION and DETUNE; FILTER ENV is a source")
+{
+    using ssb::ModDest;
+    using ssb::ModSource;
+    auto play = [] (float velocity, double seconds, std::function<void (ssb::Settings&)> tweak)
+    {
+        auto rig = std::make_unique<Rig>();
+        rig->add ("a", sine (440, 4), [&] (auto& s) { cloud (s, 10); s.grainPos = 0.25f; tweak (s); });
+        rig->commit();
+        rig->press ("a", velocity);
+        rig->render (seconds);
+        return rig;
+    };
+    {
+        // velocity 0.5 → DETUNE at 12 st: 6 st each way
+        auto rig = play (0.5f, 0.5, [] (auto& s) { s.mod.routes.push_back ({ ModSource::velocity, ModDest::grainDetune, 1.0f }); });
+        const auto grains = reported (*rig);
+        CHECK (! grains.empty());
+        for (const auto& g : grains)
+            CHECK_NEAR (g.rate, g.stream ? std::sqrt (2.0) : std::sqrt (0.5), 1e-3);
+    }
+    {
+        // VARIATION's knob at 0, all of it from velocity
+        auto rig = play (1.0f, 1.0, [] (auto& s)
+        {
+            s.grainVarPos = 500;
+            s.grainVarVol = 12;
+            s.mod.routes.push_back ({ ModSource::velocity, ModDest::grainVar, 1.0f });
+        });
+        double hi = 0, quietest = 1;
+        for (const auto& g : reported (*rig))
+        {
+            hi = std::max (hi, (double) g.pos);
+            quietest = std::min (quietest, (double) g.gain);
+        }
+        CHECK (hi > 1.4 && hi <= 1.5 + 1e-4);
+        CHECK (quietest < 0.3);
+    }
+    {
+        // SKEW at 0.5 less a whole route's 0.5: a sharp attack, then it dies away
+        auto rig = std::make_unique<Rig>();
+        rig->add ("a", dc (1, 4), [] (auto& s)
+        {
+            cloud (s, 4);
+            s.mod.routes.push_back ({ ModSource::velocity, ModDest::grainSkew, -1.0f });
+        });
+        rig->commit();
+        rig->press ("a");
+        rig->render (1.0);
+        double early = 0, late = 0;
+        for (int k = 1; k < 7; ++k)
+        {
+            const double t0 = k * 0.125;
+            early += rig->rms (t0 + 0.002, t0 + 0.02);
+            late += rig->rms (t0 + 0.105, t0 + 0.123);
+        }
+        CHECK (early / late > 3);
+    }
+    {
+        // FILTER ENV → DETUNE: up to 12 st as it peaks, settling at SUSTAIN's half
+        auto rig = play (1.0f, 0.6, [] (auto& s)
+        {
+            s.fAttack = 0.001f;
+            s.fDecay = 0.2f;
+            s.fSustain = 0.5f;
+            s.mod.routes.push_back ({ ModSource::fenv, ModDest::grainDetune, 1.0f });
+        });
+        double early = 0;
+        int late = 0;
+        for (const auto& g : reported (*rig))
+        {
+            if (! g.stream) continue;
+            if (g.when > 0.02 && g.when < 0.1) early = std::max (early, (double) g.rate);
+            if (g.when > 0.3)
+            {
+                CHECK_NEAR (g.rate, std::sqrt (2.0), 2e-3);
+                ++late;
+            }
+        }
+        CHECK (early > 1.8);
+        CHECK (late > 0);
+    }
+}
+
+TEST ("engine: KEY and RANDOM are matrix sources; SCAN SPEED scales SCAN, backwards below -100 %")
+{
+    using ssb::ModDest;
+    using ssb::ModSource;
+    // notes played on a sine pad (ROOT C4), the grains' starts reported
+    auto play = [] (int note, std::function<void (ssb::Settings&)> tweak)
+    {
+        Rig rig;
+        rig.add ("a", sine (440, 4), [&] (auto& s)
+        {
+            cloud (s, 20);
+            s.rootNote = 60;
+            s.grainFreqKey = 0;
+            s.grainTuneKey = 0;
+            s.grainPos = 0;
+            tweak (s);
+        });
+        rig.set ("play", true);
+        rig.set ("playable", "a");
+        rig.commit();
+        rig.render (0.6, { on (0.0, note, 127) });
+        return reported (rig);
+    };
+    // KEY: an octave above ROOT is 1; half of DETUNE's 12 st
+    for (const auto& g : play (72, [] (auto& s) { s.mod.routes.push_back ({ ModSource::key, ModDest::grainDetune, 0.5f }); }))
+        CHECK_NEAR (g.rate, g.stream ? std::sqrt (2.0) : std::sqrt (0.5), 1e-3);
+    // RANDOM: one draw a note, -1..1 (two notes, one after the other)
+    {
+        Rig rig;
+        rig.add ("a", sine (440, 4), [] (auto& s)
+        {
+            cloud (s, 20);
+            s.grainTuneKey = 0;
+            s.mod.routes.push_back ({ ModSource::random, ModDest::grainDetune, 1.0f });
+        });
+        rig.set ("play", true);
+        rig.set ("playable", "a");
+        rig.commit();
+        rig.render (0.8, { on (0.0, 60), off (0.3, 60), on (0.4, 60) });
+        std::set<long> first, second;
+        for (const auto& g : reported (rig))
+        {
+            if (! g.stream) continue;
+            CHECK (g.rate >= 0.5 - 1e-6 && g.rate <= 2.0 + 1e-6);
+            if (g.when < 0.28) first.insert (std::lround (g.rate * 1e5));
+            if (g.when > 0.45) second.insert (std::lround (g.rate * 1e5));
+        }
+        CHECK (first.size() == 1 && second.size() == 1);
+        CHECK (first != second);
+    }
+    // SCAN SPEED: velocity 1 × 50 % = twice as fast; -100 % (× -1) runs it backwards, round from the end with S.LOOP
+    auto at = [] (const std::vector<ssb::GrainView>& grains, double when)
+    {
+        double best = 1e9, pos = -1;
+        for (const auto& g : grains)
+            if (std::abs (g.when - when) < best) { best = std::abs (g.when - when); pos = g.pos; }
+        return pos;
+    };
+    auto scan = [] (ssb::Settings& s, bool loop)
+    {
+        s.grainScanOn = true;
+        s.grainScanDist = 0.25f;
+        s.grainScanLoop = loop;
+    };
+    const auto fast = play (60, [&] (auto& s) { scan (s, false); s.mod.routes.push_back ({ ModSource::velocity, ModDest::grainScan, 0.5f }); });
+    CHECK_NEAR (at (fast, 0.25), 0.5, 0.03);
+    const auto back = play (60, [&] (auto& s) { scan (s, true); s.mod.routes.push_back ({ ModSource::velocity, ModDest::grainScan, -1.0f }); });
+    CHECK_NEAR (at (back, 0.25), 0.75, 0.03);
+}
+
+TEST ("engine: Granulator III's LFO: STEREO, PHASE, QUANT, RAND, RATE / AMOUNT routes and RATIO")
+{
+    using ssb::ModDest;
+    using ssb::ModSource;
+    // LFO 1 → GRAIN POS at 100 % (±half the clip), on a 4 s sine pad with grains at 20 Hz: where grains start
+    // says what the LFO was, a side at a time
+    auto play = [] (std::function<void (ssb::LfoDef&)> lfo, std::function<void (ssb::Settings&)> more = {}, float velocity = 1)
+    {
+        Rig rig;
+        rig.add ("a", sine (440, 4), [&] (auto& s)
+        {
+            cloud (s, 20);
+            s.mod.lfo1 = {};
+            s.mod.lfo1.rate = 1;
+            lfo (s.mod.lfo1);
+            s.mod.routes.push_back ({ ModSource::lfo1, ModDest::grainPos, 1.0f });
+            if (more) more (s);
+        });
+        rig.commit();
+        rig.press ("a", velocity);
+        rig.render (1.0);
+        return reported (rig);
+    };
+    // the LFO's value for a grain: its offset from POS (2 s) over half the clip
+    auto lfoOf = [] (const ssb::GrainView& g) { return (g.pos - 2.0) / 2.0; };
+    auto near = [] (const std::vector<ssb::GrainView>& grains, int stream, double when)
+    {
+        const ssb::GrainView* best = nullptr;
+        for (const auto& g : grains)
+            if (g.stream == stream && (! best || std::abs (g.when - when) < std::abs (best->when - when))) best = &g;
+        return best;
+    };
+    {
+        // sine, 1 Hz; STEREO 180°: the left a quarter cycle ahead, the right a quarter behind -- opposite
+        const auto grains = play ([] (auto& l) { l.stereo = 180; });
+        CHECK_NEAR (lfoOf (*near (grains, 0, 0.0)), 1.0, 0.03);
+        CHECK_NEAR (lfoOf (*near (grains, 1, 0.0)), -1.0, 0.03);
+        CHECK_NEAR (lfoOf (*near (grains, 0, 0.5)), -1.0, 0.03);
+        CHECK_NEAR (lfoOf (*near (grains, 1, 0.5)), 1.0, 0.03);
+        CHECK_NEAR (lfoOf (*near (grains, 0, 0.25)), 0.0, 0.03);
+    }
+    {
+        // PHASE 90°: the note starts at the top; STEREO 0: the sides together
+        const auto grains = play ([] (auto& l) { l.phase = 90; });
+        CHECK_NEAR (lfoOf (*near (grains, 0, 0.0)), 1.0, 0.02);
+        CHECK_NEAR (lfoOf (*near (grains, 1, 0.0)), 1.0, 0.02);
+        CHECK_NEAR (lfoOf (*near (grains, 0, 0.5)), -1.0, 0.03);
+    }
+    {
+        // QUANT 50 %: steps of a half
+        for (const auto& g : play ([] (auto& l) { l.quant = 0.5f; }))
+        {
+            const double x = lfoOf (g) * 2;
+            CHECK_NEAR (x, std::round (x), 1e-3);
+        }
+    }
+    {
+        // RAND: steps four times a cycle, smoothed: it moves, never jumps, stays in range
+        const auto grains = play ([] (auto& l) { l.shape = ssb::LfoShape::wander; l.rate = 2; });
+        double lo = 1, hi = -1, jump = 0, last = 0;
+        bool first = true;
+        for (const auto& g : grains)
+        {
+            if (g.stream) continue;
+            const double x = lfoOf (g);
+            lo = std::min (lo, x);
+            hi = std::max (hi, x);
+            if (! first) jump = std::max (jump, std::abs (x - last));
+            last = x;
+            first = false;
+        }
+        CHECK (hi - lo > 0.2);
+        CHECK (lo >= -1.0 - 1e-6 && hi <= 1.0 + 1e-6);
+        CHECK (jump < 0.6);
+    }
+    {
+        // RATE: velocity 1 → +12 st (a third of 36) doubles it: the top at 1/8 s
+        const auto grains = play ([] (auto&) {}, [] (auto& s) { s.mod.routes.push_back ({ ModSource::velocity, ModDest::lfo1Rate, 1.0f / 3 }); });
+        CHECK_NEAR (lfoOf (*near (grains, 0, 0.125)), 1.0, 0.04);
+        CHECK_NEAR (lfoOf (*near (grains, 0, 0.25)), 0.0, 0.05);
+    }
+    {
+        // AMOUNT 0, all of it from velocity 0.5: half the swing
+        const auto grains = play ([] (auto& l) { l.amount = 0; },
+                                  [] (auto& s) { s.mod.routes.push_back ({ ModSource::velocity, ModDest::lfo1Amt, 1.0f }); }, 0.5f);
+        CHECK_NEAR (lfoOf (*near (grains, 0, 0.25)), 0.5, 0.03);
+        // and an LFO can't drive its own amount
+        const auto self = play ([] (auto& l) { l.amount = 0; },
+                                [] (auto& s) { s.mod.routes.push_back ({ ModSource::lfo1, ModDest::lfo1Amt, 1.0f }); });
+        for (const auto& g : self) CHECK_NEAR (lfoOf (g), 0.0, 1e-3);
+    }
+    {
+        // RATIO 1: middle C at ROOT, an octave up for a note an octave up -- as a tremolo on a constant
+        auto hz = [] (int note)
+        {
+            Rig rig;
+            rig.add ("a", dc (1, 4), [] (auto& s)
+            {
+                s.rootNote = 60;
+                s.mod.lfo1 = {};
+                s.mod.lfo1.ratioMode = true;
+                s.mod.routes.push_back ({ ModSource::lfo1, ModDest::volume, -1.0f });
+            });
+            rig.set ("play", true);
+            rig.set ("playable", "a");
+            rig.commit();
+            rig.render (0.5, { on (0.0, note, 127) });
+            // rising crossings of the swing about its mean, 0.1 .. 0.4 s
+            const auto a = (size_t) (0.1 * rate), b = (size_t) (0.4 * rate);
+            double mean = 0;
+            for (auto i = a; i < b; ++i) mean += rig.left[i];
+            mean /= (double) (b - a);
+            int n = 0;
+            double first = -1, last = -1;
+            for (auto i = a + 1; i < b; ++i)
+                if (rig.left[i - 1] <= mean && rig.left[i] > mean)
+                {
+                    const double t = (double) i / rate;
+                    if (first < 0) first = t;
+                    last = t;
+                    ++n;
+                }
+            return n > 1 ? (n - 1) / (last - first) : 0.0;
+        };
+        CHECK_NEAR (hz (60), 261.63, 3.0);
+        CHECK_NEAR (hz (72), 523.25, 6.0);
+    }
+}
+
+TEST ("engine: Granulator III's filter: its types, WIDTH, its NOTCH, F.KEY and a STEREO LFO on the cutoff")
+{
+    using ssb::ModDest;
+    using ssb::ModSource;
+    // a sine through the filter, its level against the same with the filter wide open (LP 12 at 20 kHz)
+    auto level = [] (double hz, const char* type, float cutoff, std::function<void (ssb::Settings&)> more = {}, int note = 60)
+    {
+        auto play = [&] (const char* t, float c, bool right = false)
+        {
+            Rig rig;
+            rig.add ("a", sine (hz, 2), [&] (auto& s)
+            {
+                s.rootNote = 60;
+                s.resonance = 1;
+                s.svfType = 0;
+                static const char* names[] { "lp12", "lp24", "lphp", "lpnotch", "notch", "notch2", "hpnotch", "hp12", "hp24" };
+                for (uint8_t i = 0; i < 9; ++i) if (juce::String (t) == names[i]) s.svfType = (uint8_t) (i + 1);
+                s.cutoff = c;
+                if (more) more (s);
+            });
+            rig.set ("play", true);
+            rig.set ("playable", "a");
+            rig.commit();
+            rig.render (1.0, { on (0.0, note, 127) });
+            double sum = 0;
+            const auto& x = right ? rig.right : rig.left;
+            for (auto i = (size_t) (0.5 * rate); i < (size_t) (0.9 * rate); ++i) sum += (double) x[i] * x[i];
+            return std::sqrt (sum / (0.4 * rate));
+        };
+        return play (type, cutoff) / play ("lp12", 20000);
+    };
+    const auto db = [] (double g) { return 20 * std::log10 (g); };
+    // LP 12 / LP 24 at 1 kHz: 12 / 24 dB an octave above (the trapezoidal 2-pole's: at 8 kHz -37.7 dB, not -36)
+    CHECK_NEAR (db (level (100, "lp12", 1000)), 0.0, 0.3);
+    CHECK_NEAR (db (level (8000, "lp12", 1000)), -37.7, 0.5);
+    CHECK_NEAR (db (level (8000, "lp24", 1000)), -75.4, 1.5);
+    // HP 12 at 1 kHz
+    CHECK_NEAR (db (level (125, "hp12", 1000)), -36.0, 2.5);
+    CHECK_NEAR (db (level (8000, "hp12", 1000)), 0.0, 0.3);
+    // NOTCH at Q 1: the textbook notch (deep at the cutoff); at Q 0.707 Granulator III's lows sit 4.6 dB down
+    CHECK (db (level (1000, "notch", 1000)) < -30);
+    CHECK_NEAR (db (level (40, "notch", 1000, [] (auto& s) { s.resonance = 0.707f; })), -4.6, 0.4);
+    // LP+HP, WIDTH -12: a band from half the cutoff to the cutoff
+    CHECK (level (700, "lphp", 1000) > 4 * level (100, "lphp", 1000));
+    CHECK (level (700, "lphp", 1000) > 4 * level (8000, "lphp", 1000));
+    // F.KEY: an octave up moves the cutoff an octave (T<KEY doesn't matter here: tape plays the sine an octave up too,
+    // so compare the same 4 kHz through a 1 kHz LP 24 with and without it)
+    const double keyed = level (2000, "lp24", 1000, [] (auto& s) { s.filterKey = 1; }, 72);
+    const double fixed = level (2000, "lp24", 1000, [] (auto&) {}, 72);
+    CHECK (db (keyed / fixed) > 20);
+    // a STEREO LFO on the cutoff: the sides differ
+    Rig rig;
+    rig.add ("a", sine (1000, 2), [] (auto& s)
+    {
+        s.svfType = 2;   // LP 24
+        s.cutoff = 1000;
+        s.mod.lfo1 = {};
+        s.mod.lfo1.rate = 1;
+        s.mod.lfo1.stereo = 180;
+        s.mod.routes.push_back ({ ModSource::lfo1, ModDest::cutoff, 0.4f });
+    });
+    rig.commit();
+    rig.press ("a");
+    rig.render (0.3);
+    double l = 0, r = 0;
+    for (auto i = (size_t) (0.02 * rate); i < (size_t) (0.1 * rate); ++i) { l += rig.left[i] * rig.left[i]; r += rig.right[i] * rig.right[i]; }
+    CHECK (l > 10 * r);   // left's cutoff two octaves up, right's two down
+}
+
+TEST ("engine: KEY on the ADSR runs it faster for higher notes; K>VOL is dB an octave")
+{
+    // a constant through a 1 s attack: its level a quarter second in, at ROOT and an octave up
+    auto at = [] (int note, std::function<void (ssb::Settings&)> tweak)
+    {
+        Rig rig;
+        rig.add ("a", dc (1, 4), [&] (auto& s)
+        {
+            s.rootNote = 60;
+            s.attack = 1;
+            s.sustain = 1;
+            tweak (s);
+        });
+        rig.set ("play", true);
+        rig.set ("playable", "a");
+        rig.commit();
+        rig.render (1.5, { on (0.0, note, 127) });
+        return std::vector<double> { rig.rms (0.24, 0.26), rig.rms (1.3, 1.4) };
+    };
+    const auto root = at (60, [] (auto& s) { s.envKey = 1; });
+    const auto up = at (72, [] (auto& s) { s.envKey = 1; });
+    CHECK_NEAR (up[0] / root[0], 2.0, 0.05);            // twice as far through its (halved) attack
+    const auto loud = at (72, [] (auto& s) { s.volKey = 3; });
+    const auto flat = at (72, [] (auto&) {});
+    CHECK_NEAR (20 * std::log10 (loud[1] / flat[1]), 3.0, 0.05);
+}
+
+TEST ("engine: a note held while another patch is chosen still ends -- whether MONO changed under it or not")
+{
+    auto sounding = [] (Rig& rig) { return rig.engine.activeVoices(); };
+    for (const bool fromMono : { true, false })
+    {
+        Rig rig;
+        rig.add ("a", sine (440, 4), [] (auto& s) { s.release = 0.01f; });
+        rig.add ("b", sine (330, 4), [] (auto& s) { s.release = 0.01f; });
+        rig.set ("play", true);
+        rig.set ("playable", "a");
+        rig.set ("mono", fromMono);
+        rig.commit();
+        rig.render (0.2, { on (0.0, 60) });
+        CHECK (sounding (rig) == 1);
+        // the other patch, with the other MONO, while the key is still down
+        rig.set ("playable", "b");
+        rig.set ("mono", ! fromMono);
+        rig.commit();
+        rig.render (0.3, { off (0.05, 60) });
+        CHECK (sounding (rig) == 0);
+        // and the new patch plays and ends as usual
+        rig.render (0.3, { on (0.0, 62), off (0.1, 62) });
+        CHECK (sounding (rig) == 0);
+        CHECK (rig.rms (0.0, 0.1) > 0.01);
+    }
+}
+
+TEST ("engine: HOLD latches released keys until a note comes with none down; notes played over held keys join in")
+{
+    auto sounding = [] (Rig& rig) { return rig.engine.activeVoices(); };
+    Rig rig;
+    rig.add ("a", sine (440, 4), [] (auto& s) { s.release = 0.01f; });
+    rig.set ("play", true);
+    rig.set ("playable", "a");
+    rig.set ("hold", true);
+    rig.commit();
+    // C and E together, both let go: both keep sounding
+    rig.render (0.3, { on (0.0, 60), on (0.01, 64), off (0.1, 60), off (0.1, 64) });
+    CHECK (sounding (rig) == 2);
+    // G with no key down: the chord goes, G sounds
+    rig.render (0.3, { on (0.0, 67) });
+    CHECK (sounding (rig) == 1);
+    // A while G is still down: it joins; both let go, both stay
+    rig.render (0.3, { on (0.0, 69), off (0.1, 67), off (0.1, 69) });
+    CHECK (sounding (rig) == 2);
+    // HOLD off: everything goes
+    rig.set ("hold", false);
+    rig.commit();
+    rig.render (0.3);
+    CHECK (sounding (rig) == 0);
+}
+
+TEST ("engine: a one-cycle loop wraps seamlessly: past its last frame it reads its first")
+{
+    // an AKWF wave: one cycle in 600 frames, at the rate that makes it C2, looped (a cosine: full scale at the seam)
+    auto s = std::make_shared<ssb::Sample>();
+    s->rate = 39244;
+    s->channels.assign (1, std::vector<float> (600));
+    for (size_t i = 0; i < 600; ++i)
+        s->channels[0][i] = (float) std::cos (2 * ssb::dsp::pi * (double) i / 600.0);
+    Rig rig;
+    rig.add ("a", s);
+    rig.commit();
+    rig.press ("a");
+    rig.render (0.5);
+    double peak = 0, step = 0;
+    for (auto i = (size_t) (0.1 * rate); i < (size_t) (0.4 * rate); ++i)
+    {
+        peak = std::max (peak, (double) std::abs (rig.left[i]));
+        step = std::max (step, (double) std::abs (rig.left[i] - rig.left[i - 1]));
+    }
+    // a 65 Hz cosine moves at most 2π·65/48000 of its peak per frame; a silent frame at the seam would jump ~all of it
+    CHECK (peak > 0.1);
+    CHECK (step < 0.02 * peak);
+    CHECK_NEAR (rig.hz (0.1, 0.4), 39244.0 / 600.0, 0.5);
+}
+
+TEST ("engine: changing grain modes while held leaves no stale grains after release")
+{
+    for (auto from : {ssb::GrainMode::classic, ssb::GrainMode::loop, ssb::GrainMode::cloud})
+        for (auto into : {ssb::GrainMode::classic, ssb::GrainMode::loop, ssb::GrainMode::cloud})
+        {
+            Rig rig;
+            auto configure = [] (auto& s) { cloud(s, 30); s.grainSkew=0; s.release=.01f; s.mode=ssb::TriggerMode::hold; };
+            rig.add("a", sine(440, 4), configure).s.grainMode=from;
+            rig.commit(); rig.press("a"); rig.render(.15);
+            rig.add("a", sine(440, 4), configure).s.grainMode=into;
+            rig.commit(); rig.render(.15);
+            CHECK(rig.rms(.05,.14)>.01);
+            rig.engine.post(ssb::Command::make(ssb::Command::Type::release,"a")); rig.render(1);
+            CHECK(rig.engine.activeVoices()==0);
+            CHECK(rig.rms(.8,.99)<1e-6);
+        }
+}
+
+TEST ("engine: saved sound settings select Granulator III without changing older sound defaults")
+{
+    const auto old = ssb::settingsFromJson(juce::JSON::parse(R"({"grain":true,"grainFreq":12,"grainPos":0.23,"volume":0.47,"cutoff":1700,"filterType":"highpass"})"));
+    CHECK(old.grainMode==ssb::GrainMode::classic);
+    CHECK(old.svfType==0 && old.filterType==ssb::FilterType::highpass);
+    CHECK_NEAR(old.volume,.47f,1e-6); CHECK_NEAR(old.cutoff,1700,1e-6);
+    CHECK_NEAR(old.grainPos,.23f,1e-6);
+    CHECK(old.grainVariation==0 && old.grainDetune==0 && old.envKey==0 && old.volKey==0);
+    CHECK(old.mod.lfo1.amount==1 && !old.mod.lfo1.ratioMode && old.mod.lfo1.stereo==0);
+    const auto current = ssb::settingsFromJson(juce::JSON::parse(R"({
+      "grain":true,"grainFreq":40,"grainMode":"cloud","grainDensity":9,"grainSkew":0.3,
+      "grainReverse":0.7,"grainVariation":0.8,"grainVarPos":250,"grainVarSize":12,
+      "grainVarPitch":7,"grainVarVol":6,"grainDetune":3,"grainNoteRnd":2,
+      "grainScanLoop":true,"grainScanKey":true,"filterType":"lphp","filterWidth":-7,
+      "filterKey":0.6,"envKey":0.5,"fEnvKey":0.4,"volKey":-2,
+      "mod":{"lfo1":{"shape":"wander","ratioMode":true,"ratio":2,"amount":0.6,"stereo":180,"phase":90,"quant":0.25},
+      "routes":[{"source":"key","dest":"grainSkew","amount":0.5},{"source":"fenv","dest":"grainVar","amount":0.2},
+      {"source":"random","dest":"lfo2Rate","amount":0.3}]}
+    })"));
+    CHECK(current.grainMode==ssb::GrainMode::cloud && current.grainDensity==9);
+    CHECK_NEAR(current.grainSkew,.3f,1e-6); CHECK_NEAR(current.grainReverse,.7f,1e-6);
+    CHECK_NEAR(current.grainVariation,.8f,1e-6); CHECK(current.grainVarPos==250 && current.grainVarSize==12);
+    CHECK(current.grainVarPitch==7 && current.grainVarVol==6 && current.grainDetune==3 && current.grainNoteRnd==2);
+    CHECK(current.grainScanLoop && current.grainScanKey && current.svfType==3 && current.filterWidth==-7);
+    CHECK_NEAR(current.envKey,.5f,1e-6); CHECK_NEAR(current.fEnvKey,.4f,1e-6);
+    CHECK_NEAR(current.filterKey,.6f,1e-6); CHECK(current.volKey==-2);
+    CHECK(current.mod.lfo1.shape==ssb::LfoShape::wander && current.mod.lfo1.ratioMode);
+    CHECK(current.mod.lfo1.ratio==2 && current.mod.lfo1.phase==90 && current.mod.lfo1.stereo==180);
+    CHECK_NEAR(current.mod.lfo1.amount,.6f,1e-6); CHECK_NEAR(current.mod.lfo1.quant,.25f,1e-6);
+    CHECK(current.mod.routes.size()==3);
 }

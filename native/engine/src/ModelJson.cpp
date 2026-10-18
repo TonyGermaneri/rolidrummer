@@ -44,6 +44,7 @@ LfoShape lfoShape (const juce::String& s)
     if (s == "rampDown") return LfoShape::rampDown;
     if (s == "random")   return LfoShape::random;
     if (s == "smooth")   return LfoShape::smooth;
+    if (s == "wander")   return LfoShape::wander;
     return LfoShape::sine;
 }
 
@@ -51,8 +52,9 @@ std::optional<ModSource> modSource (const juce::String& s)
 {
     static const std::pair<const char*, ModSource> table[] {
         { "lfo1", ModSource::lfo1 }, { "lfo2", ModSource::lfo2 }, { "mod", ModSource::mod },
-        { "aftertouch", ModSource::aftertouch }, { "velocity", ModSource::velocity }, { "bend", ModSource::bend },
-        { "timbre", ModSource::timbre }, { "vco1", ModSource::vco1 }, { "vco2", ModSource::vco2 }, { "vco3", ModSource::vco3 },
+        { "aftertouch", ModSource::aftertouch }, { "velocity", ModSource::velocity },
+        { "key", ModSource::key }, { "random", ModSource::random }, { "bend", ModSource::bend },
+        { "timbre", ModSource::timbre }, { "fenv", ModSource::fenv }, { "vco1", ModSource::vco1 }, { "vco2", ModSource::vco2 }, { "vco3", ModSource::vco3 },
     };
     for (const auto& [name, v] : table)
         if (s == name) return v;
@@ -64,7 +66,10 @@ std::optional<ModDest> modDest (const juce::String& s)
     static const std::pair<const char*, ModDest> table[] {
         { "pitch", ModDest::pitch }, { "cutoff", ModDest::cutoff }, { "resonance", ModDest::resonance },
         { "volume", ModDest::volume }, { "pan", ModDest::pan }, { "grainPos", ModDest::grainPos },
-        { "grainSize", ModDest::grainSize }, { "delayMix", ModDest::delayMix }, { "reverbMix", ModDest::reverbMix },
+        { "grainSize", ModDest::grainSize }, { "grainSkew", ModDest::grainSkew }, { "grainVar", ModDest::grainVar },
+        { "grainDetune", ModDest::grainDetune }, { "grainScan", ModDest::grainScan },
+        { "lfo1Rate", ModDest::lfo1Rate }, { "lfo1Amt", ModDest::lfo1Amt }, { "lfo2Rate", ModDest::lfo2Rate },
+        { "lfo2Amt", ModDest::lfo2Amt }, { "delayMix", ModDest::delayMix }, { "reverbMix", ModDest::reverbMix },
     };
     for (const auto& [name, v] : table)
         if (s == name) return v;
@@ -79,6 +84,12 @@ LfoDef lfoFromJson (const juce::var& o, const LfoDef& fallback)
     l.rate = num (o, "rate", fallback.rate);
     l.sync = flag (o, "sync", false);
     l.divisionBeats = num (o, "divisionBeats", fallback.divisionBeats);
+    l.ratioMode = flag (o, "ratioMode", false);
+    l.ratio = std::clamp (num (o, "ratio", 1), 0.25f, 8.0f);
+    l.amount = std::clamp (num (o, "amount", 1), 0.0f, 1.0f);
+    l.stereo = std::clamp (num (o, "stereo", 0), 0.0f, 180.0f);
+    l.phase = num (o, "phase", 0);
+    l.quant = std::clamp (num (o, "quant", 0), 0.0f, 1.0f);
     return l;
 }
 
@@ -211,6 +222,18 @@ Settings settingsFromJson (const juce::var& o)
     s.sustain = num (o, "sustain", s.sustain);
     s.release = num (o, "release", s.release);
     s.filterType = filterType (str (o, "filterType"));
+    {
+        static const char* svf[] { "lp12", "lp24", "lphp", "lpnotch", "notch", "notch2", "hpnotch", "hp12", "hp24" };
+        const auto t = str (o, "filterType");
+        s.svfType = 0;
+        for (uint8_t i = 0; i < 9; ++i)
+            if (t == svf[i]) s.svfType = (uint8_t) (i + 1);
+    }
+    s.filterWidth = std::clamp (num (o, "filterWidth", -12), -48.0f, 48.0f);
+    s.filterKey = std::clamp (num (o, "filterKey", 0), 0.0f, 1.0f);
+    s.volKey = std::clamp (num (o, "volKey", 0), -3.0f, 3.0f);
+    s.envKey = std::clamp (num (o, "envKey", 0), 0.0f, 1.0f);
+    s.fEnvKey = std::clamp (num (o, "fEnvKey", 0), 0.0f, 1.0f);
     s.cutoff = num (o, "cutoff", s.cutoff);
     s.resonance = num (o, "resonance", s.resonance);
     s.fEnvAmount = num (o, "fEnvAmount", 0);
@@ -249,6 +272,21 @@ Settings settingsFromJson (const juce::var& o)
         s.grainScanTime = std::max (1.0f, num (o, "grainScanTime", s.grainScanTime));
         s.grainScanDist = num (o, "grainScanDist", s.grainScanDist);
         s.grainScanCurve = num (o, "grainScanCurve", s.grainScanCurve);
+        // Granulator III's additions (absent before 0.5: their defaults leave the cloud as it was)
+        const auto grainMode = str (o, "grainMode");
+        s.grainMode = grainMode == "loop" ? GrainMode::loop : grainMode == "cloud" ? GrainMode::cloud : GrainMode::classic;
+        s.grainSkew = std::clamp (num (o, "grainSkew", s.grainSkew), 0.0f, 1.0f);
+        s.grainDensity = std::clamp (num (o, "grainDensity", s.grainDensity), 2.0f, 20.0f);   // DENSITY_MIN, DENSITY_MAX
+        s.grainReverse = num (o, "grainReverse", s.grainReverse);
+        s.grainVariation = num (o, "grainVariation", s.grainVariation);
+        s.grainVarPos = num (o, "grainVarPos", s.grainVarPos);
+        s.grainVarSize = num (o, "grainVarSize", s.grainVarSize);
+        s.grainVarPitch = num (o, "grainVarPitch", s.grainVarPitch);
+        s.grainVarVol = num (o, "grainVarVol", s.grainVarVol);
+        s.grainDetune = num (o, "grainDetune", s.grainDetune);
+        s.grainNoteRnd = num (o, "grainNoteRnd", s.grainNoteRnd);
+        s.grainScanLoop = flag (o, "grainScanLoop", false);
+        s.grainScanKey = flag (o, "grainScanKey", false);
     }
     else
     {
@@ -321,6 +359,7 @@ PerformancePtr buildPerformance (const juce::var& meta, const std::map<std::stri
     p->volume = num (meta, "volume", 0.8f);
     p->muted = flag (meta, "muted", false);
     p->mono = flag (meta, "mono", false);
+    p->hold = flag (meta, "hold", false);
     p->play = flag (meta, "play", false);
     p->mpe = flag (meta, "mpe", false);
     p->glide = num (meta, "glide", 0);

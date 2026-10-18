@@ -48,6 +48,10 @@ double difference(const Samples&a,const Samples&b){check(a.size()==b.size(),"Mis
 Samples mapped(const std::string&name,float value,bool route,int source=3){
  Run run;const int index=ssb::parameterIndex(name);check(index!=-1,"Unknown target "+name);
  if(name.starts_with("grain"))run.sound->s.grain=true;
+ if(name=="grainLoopReverse")run.sound->s.grainMode=ssb::GrainMode::loop;
+ if(name=="grainDensity")run.sound->s.grainMode=ssb::GrainMode::cloud;
+ if(name=="filterWidth")run.sound->s.svfType=3;
+ if(name=="filterKey"||name=="envKey"||name=="fEnvKey"||name=="volKey")run.sound->s.rootNote=48;
  if(name.starts_with("delay"))run.sound->s.delayMix=.7f;
  if(name.starts_with("reverb"))run.sound->s.reverbMix=.7f;
  if(route){run.sound->expressionRouteCount=1;run.sound->expressionRoutes[0]={source,index,value,value,1,0};}
@@ -82,9 +86,65 @@ void checkMasterEffects(){
   }
  }
 }
+void checkGranulatorIII(){
+ // Enabling GRAIN before the first rendered sample must match starting with it
+ // enabled, including RATIO LFO routes which depend on the voice's source kind.
+ auto enabled=[](bool initially){
+  Run run;auto& s=run.sound->s;s.grain=initially;s.grainFreq=31;s.grainPos=.3f;
+  s.mod.lfo1.ratioMode=true;s.mod.lfo1.stereo=180;
+  s.mod.routes.push_back({ssb::ModSource::lfo1,ssb::ModDest::grainPos,.1f});
+  run.ready();run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,1,0});
+  if(!initially){
+   auto sound=std::make_shared<ssb::Sound>(*run.sound);sound->s.grain=true;
+   auto next=std::make_shared<ssb::Performance>(*run.performance);next->byId[sound->id]=sound;
+   run.engine.setPerformance(next);
+  }
+  return run.render(4000);
+ };
+ check(difference(enabled(true),enabled(false))<.00002,"Live GRAIN enable lost audio-rate RATIO modulation");
+ for(auto mode:{ssb::GrainMode::classic,ssb::GrainMode::loop,ssb::GrainMode::cloud}){
+  auto play=[&](bool change,int block){
+   Run run;auto& s=run.sound->s;s.grain=true;s.grainMode=mode;s.grainFreq=40;s.grainPos=.1f;
+   s.svfType=3;s.cutoff=3500;s.filterWidth=-7;s.release=.01f;s.pan=-1;
+   s.mod.lfo1.ratioMode=true;s.mod.lfo1.ratio=.25f;s.mod.lfo1.stereo=180;
+   s.mod.routes.push_back({ssb::ModSource::lfo1,ssb::ModDest::grainPos,.02f});
+   run.sound->expressionRouteCount=1;
+   run.sound->expressionRoutes[0]={2,ssb::parameterIndex("grainDetune"),0,7,1,8};
+   auto other=std::make_shared<ssb::Sound>(*run.sound);other->id="g3-other";other->s.pan=1;
+   run.performance->byId[other->id]=other;run.ready();
+   run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,1,0});
+   run.engine.drumHit(other,2,2,1,{1,.5f,0,1,0});
+   run.render(511,block);
+   if(change)run.engine.drumExpression(1,{1,.5f,1,1,0});
+   auto out=run.render(4000,block);
+   run.engine.drumRelease(1,{1,.5f,1,1,0},false);
+   run.engine.drumRelease(2,{1,.5f,0,1,0},false);run.render(4800,block);
+   check(run.engine.activeVoices()==0,"Granulator III retained a released contact");
+   return out;
+  };
+  const auto still=play(false,64),moved=play(true,64);
+  check(difference(moved,play(true,257))<.00002,"Granulator III depends on host block size");
+  double changed=0;
+  for(size_t i=0;i<moved.size();i+=2){
+   changed+=std::abs(moved[i]-still[i]);
+   check(std::abs(moved[i+1]-still[i+1])<.00002,"Granulator III gesture changed another contact");
+  }
+  check(changed>1,"Granulator III gesture did not affect its contact");
+  // New mode state, stereo SVF, audio-rate LFO and random variation stay on the stack/in voice pools.
+  Run run;auto& s=run.sound->s;s.grain=true;s.grainMode=mode;s.grainDensity=20;s.grainVariation=.8f;
+  s.grainVarSize=12;s.grainVarPitch=7;s.grainVarVol=6;s.svfType=6;
+  s.mod.lfo1.ratioMode=true;s.mod.routes.push_back({ssb::ModSource::lfo1,ssb::ModDest::grainSkew,.3f});
+  run.ready();std::array<float,128> l{},r{};const auto allocated=realtime::allocations,deleted=realtime::deletions;
+  realtime::watching=true;run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,1,0});
+  for(int i=0;i<100;++i)run.engine.process(l.data(),r.data(),128,nullptr,0);
+  run.engine.drumRelease(1,{1,.5f,0,1,0},true);realtime::watching=false;
+  check(realtime::allocations==allocated&&realtime::deletions==deleted,"Granulator III allocated or destroyed heap memory");
+ }
+}
 int main(int argc,char** argv){try{
  if(argc==2&&std::string(argv[1])=="--master-effects"){checkMasterEffects();std::cout<<"master effects passed\n";return 0;}
  check(argc==1,"Usage: drummer-expression [--master-effects]");
+ checkGranulatorIII();
  const std::pair<const char*,float> controls[]={
   {"delayTime",.07f},{"delayFeedback",.6f},{"delayMix",.4f},{"reverbSize",.6f},{"reverbDecay",1.3f},{"reverbMix",.5f},
   {"volume",.27f},{"pan",-.73f},{"pitch",7},{"fine",42},{"speed",1.7f},{"reverse",1},
@@ -92,6 +152,9 @@ int main(int argc,char** argv){try{
   {"attack",.018f},{"decay",.047f},{"sustain",.41f},{"release",.11f},
   {"cutoff",1800},{"resonance",2.4f},{"fEnvAmount",2},{"fAttack",.004f},{"fDecay",.08f},{"fSustain",.3f},{"fRelease",.12f},
   {"eqLow",-8},{"eqMid",7},{"eqHigh",-5},
+  {"volKey",-2},{"envKey",.7f},{"fEnvKey",.6f},{"filterWidth",-7},{"filterKey",.8f},
+  {"grainSkew",.2f},{"grainDensity",9},{"grainLoopReverse",.8f},{"grainVariation",.6f},
+  {"grainVarPos",400},{"grainVarSize",12},{"grainVarPitch",7},{"grainVarVol",9},{"grainDetune",5},{"grainNoteRnd",3},
   {"grainFreq",55.500175f},
   {"grainFreqKey",0.37f},
   {"grainFreqRnd",0.37f},

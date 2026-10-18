@@ -71,6 +71,23 @@ inline constexpr Parameter parameters[] {
     {"bendRange", &Settings::bendRange, 0.0f, 48.0f},
     {"repeat", nullptr, 0.0f, 16.0f, &Settings::repeat},
     {"choke", nullptr, 0.0f, 8.0f, &Settings::choke},
+    // SSB 0.6.2 engine controls. grainReverse retains its legacy binding;
+    // grainLoopReverse is the new LOOP segment reverse probability.
+    {"volKey", &Settings::volKey, -3.0f, 3.0f},
+    {"envKey", &Settings::envKey, 0.0f, 1.0f},
+    {"fEnvKey", &Settings::fEnvKey, 0.0f, 1.0f},
+    {"filterWidth", &Settings::filterWidth, -48.0f, 48.0f},
+    {"filterKey", &Settings::filterKey, 0.0f, 1.0f},
+    {"grainSkew", &Settings::grainSkew, 0.0f, 1.0f},
+    {"grainDensity", &Settings::grainDensity, 2.0f, 20.0f},
+    {"grainLoopReverse", &Settings::grainReverse, 0.0f, 1.0f},
+    {"grainVariation", &Settings::grainVariation, 0.0f, 1.0f},
+    {"grainVarPos", &Settings::grainVarPos, 0.0f, 2000.0f},
+    {"grainVarSize", &Settings::grainVarSize, 0.0f, 36.0f},
+    {"grainVarPitch", &Settings::grainVarPitch, 0.0f, 24.0f},
+    {"grainVarVol", &Settings::grainVarVol, 0.0f, 24.0f},
+    {"grainDetune", &Settings::grainDetune, 0.0f, 12.0f},
+    {"grainNoteRnd", &Settings::grainNoteRnd, 0.0f, 12.0f},
 };
 inline int parameterIndex(std::string_view name) { if(name=="reverse")return -2; for(int i=0;i<(int)std::size(parameters);++i)if(name==parameters[i].name)return i;return -1; }
 inline void setParameter(Settings& s,const Parameter& p,float value,double clipSeconds) noexcept {
@@ -92,6 +109,25 @@ inline void setParameter(Settings& s,const Parameter& p,float value,double clipS
     }
 }
 inline void copyScalars(Settings& to,const Settings& from) {
+    to.volKey=from.volKey;
+    to.envKey=from.envKey;
+    to.fEnvKey=from.fEnvKey;
+    to.filterWidth=from.filterWidth;
+    to.filterKey=from.filterKey;
+    to.grainSkew=from.grainSkew;
+    to.grainDensity=from.grainDensity;
+    to.grainReverse=from.grainReverse;
+    to.grainVariation=from.grainVariation;
+    to.grainVarPos=from.grainVarPos;
+    to.grainVarSize=from.grainVarSize;
+    to.grainVarPitch=from.grainVarPitch;
+    to.grainVarVol=from.grainVarVol;
+    to.grainDetune=from.grainDetune;
+    to.grainNoteRnd=from.grainNoteRnd;
+    to.svfType=from.svfType;
+    to.grainMode=from.grainMode;
+    to.grainScanLoop=from.grainScanLoop;
+    to.grainScanKey=from.grainScanKey;
     to.volume=from.volume;
     to.pan=from.pan;
     to.pitch=from.pitch;

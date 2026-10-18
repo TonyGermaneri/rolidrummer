@@ -1,4 +1,8 @@
-import { GRAIN_FREQ_FLOOR, GRAIN_FREQ_MAX, type AmpMode, type SpraySign, type Symmetry } from './audio/grainMath'
+import {
+  GRAIN_FREQ_FLOOR, GRAIN_FREQ_MAX, type AmpMode, type GrainMode, type SpraySign, type Symmetry,
+} from './audio/grainMath'
+import { SVF_TYPES, type SvfType } from './audio/svfMath'
+
 /** What pressing a pad does while that sound is already playing. */
 export type TriggerMode = 'stack' | 'stop' | 'restart' | 'hold'
 
@@ -11,16 +15,22 @@ export const TRIGGER_MODE_INFO: Record<TriggerMode, { label: string; icon: strin
   hold: { label: 'HOLD', icon: 'mdi-gesture-tap-hold', hint: 'Plays only while held down' },
 }
 
-export type FilterType = 'lowpass' | 'highpass' | 'bandpass'
-export const FILTER_TYPES: FilterType[] = ['lowpass', 'highpass', 'bandpass']
-export const FILTER_LABEL: Record<FilterType, string> = { lowpass: 'LP', highpass: 'HP', bandpass: 'BP' }
+/** SSB's own (Web Audio's biquads), then Granulator III's (svfMath.ts: two state-variable stages, WIDTH apart) */
+export type FilterType = 'lowpass' | 'highpass' | 'bandpass' | SvfType
+export const FILTER_TYPES: FilterType[] = ['lowpass', 'highpass', 'bandpass', ...SVF_TYPES]
+export const FILTER_LABEL: Record<FilterType, string> = {
+  lowpass: 'LP', highpass: 'HP', bandpass: 'BP',
+  lp12: 'LP 12', lp24: 'LP 24', lphp: 'LP+HP', lpnotch: 'LP+NO', notch: 'NOTCH', notch2: 'NO+NO', hpnotch: 'HP+NO', hp12: 'HP 12', hp24: 'HP 24',
+}
 
 // ── modulation ─────────────────────────────────────────────────────────────
 export type ModSource =
-  | 'lfo1' | 'lfo2' | 'mod' | 'aftertouch' | 'velocity' | 'bend' | 'timbre' | 'vco1' | 'vco2' | 'vco3'
+  | 'lfo1' | 'lfo2' | 'mod' | 'aftertouch' | 'velocity' | 'key' | 'random' | 'bend' | 'timbre' | 'fenv'
+  | 'vco1' | 'vco2' | 'vco3'
 export type ModDest =
-  | 'pitch' | 'cutoff' | 'resonance' | 'volume' | 'pan' | 'grainPos' | 'grainSize' | 'delayMix' | 'reverbMix'
-export type LfoShape = 'sine' | 'triangle' | 'square' | 'sawtooth' | 'rampDown' | 'random' | 'smooth'
+  | 'pitch' | 'cutoff' | 'resonance' | 'volume' | 'pan' | 'grainPos' | 'grainSize' | 'grainSkew' | 'grainVar'
+  | 'grainDetune' | 'grainScan' | 'lfo1Rate' | 'lfo1Amt' | 'lfo2Rate' | 'lfo2Amt' | 'delayMix' | 'reverbMix'
+export type LfoShape = 'sine' | 'triangle' | 'square' | 'sawtooth' | 'rampDown' | 'random' | 'smooth' | 'wander'
 
 export const MOD_SOURCES: { id: ModSource; label: string }[] = [
   { id: 'lfo1', label: 'LFO 1' },
@@ -28,8 +38,11 @@ export const MOD_SOURCES: { id: ModSource; label: string }[] = [
   { id: 'mod', label: 'MOD WHEEL' },
   { id: 'aftertouch', label: 'AFTERTOUCH' },
   { id: 'velocity', label: 'VELOCITY' },
+  { id: 'key', label: 'KEY' }, // octaves from the pad's ROOT
+  { id: 'random', label: 'RANDOM' }, // -1..1, drawn for each note
   { id: 'bend', label: 'PITCH BEND' },
   { id: 'timbre', label: 'TIMBRE (CC74)' },
+  { id: 'fenv', label: 'FILTER ENV' }, // the filter's ADSR, 0..1 (Granulator III's second envelope)
   { id: 'vco1', label: 'VCO 1' },
   { id: 'vco2', label: 'VCO 2' },
   { id: 'vco3', label: 'VCO 3' },
@@ -63,8 +76,9 @@ export const MAX_VCOS = 3
 /**
  * scale: destination units at amount ±1.
  * audio: wired as an AudioParam connection (otherwise read when each grain starts).
+ * pad: only in a pad's matrix (the pad's own LFOs; the global ones are shared by every voice).
  */
-export const MOD_DESTS: Record<ModDest, { label: string; scale: number; unit: string; audio: boolean }> = {
+export const MOD_DESTS: Record<ModDest, { label: string; scale: number; unit: string; audio: boolean; pad?: boolean }> = {
   pitch: { label: 'PITCH', scale: 12, unit: 'st', audio: true },
   cutoff: { label: 'CUTOFF', scale: 5, unit: 'oct', audio: true },
   resonance: { label: 'RESONANCE', scale: 10, unit: 'Q', audio: true },
@@ -72,11 +86,21 @@ export const MOD_DESTS: Record<ModDest, { label: string; scale: number; unit: st
   pan: { label: 'PAN', scale: 1, unit: '', audio: true },
   grainPos: { label: 'GRAIN POS', scale: 0.5, unit: '', audio: false },
   grainSize: { label: 'GRAIN', scale: 24, unit: 'st', audio: false }, // the grain rate, like Granulator II's Grain<LFO
+  // Granulator III's SHAPE, VARIATION and SPREAD targets: read as each grain starts
+  grainSkew: { label: 'SKEW / XFADE', scale: 0.5, unit: '', audio: false },
+  grainVar: { label: 'VARIATION', scale: 1, unit: '', audio: false },
+  grainDetune: { label: 'DETUNE', scale: 12, unit: 'st', audio: false },
+  grainScan: { label: 'SCAN SPEED', scale: 2, unit: '', audio: false }, // × (1 + x): ±200 %, backwards below -100 %
+  // the pad's LFOs: RATE in semitones of their frequency (Granulator III's ±36), AMT added to their AMOUNT
+  lfo1Rate: { label: 'LFO 1 RATE', scale: 36, unit: 'st', audio: true, pad: true },
+  lfo1Amt: { label: 'LFO 1 AMOUNT', scale: 1, unit: '', audio: true, pad: true },
+  lfo2Rate: { label: 'LFO 2 RATE', scale: 36, unit: 'st', audio: true, pad: true },
+  lfo2Amt: { label: 'LFO 2 AMOUNT', scale: 1, unit: '', audio: true, pad: true },
   delayMix: { label: 'DELAY MIX', scale: 1, unit: '', audio: true },
   reverbMix: { label: 'REVERB MIX', scale: 1, unit: '', audio: true },
 }
 export const MOD_DEST_IDS = Object.keys(MOD_DESTS) as ModDest[]
-export const LFO_SHAPES: LfoShape[] = ['sine', 'triangle', 'square', 'sawtooth', 'rampDown', 'random', 'smooth']
+export const LFO_SHAPES: LfoShape[] = ['sine', 'triangle', 'square', 'sawtooth', 'rampDown', 'random', 'smooth', 'wander']
 
 /** Tempo divisions for synced LFOs / delay, in beats (quarter notes). */
 export const DIVISIONS: { id: string; beats: number }[] = [
@@ -103,10 +127,24 @@ export interface Lfo {
   rate: number // Hz, when not synced
   sync: boolean
   division: string // DIVISIONS id, when synced
+  // Granulator III's
+  ratioMode: boolean // RATIO: the LFO runs at RATIO × the note's frequency (from middle C at the pad's ROOT)
+  ratio: number // 0.25..8
+  amount: number // 0..1: its depth, before the routes' amounts
+  stereo: number // degrees 0..180: the right side's phase apart from the left (grain routes play each side's)
+  phase: number // a pad's LFO starts each note here, degrees (0 / 90 / 180); -1: FREE (where a running LFO would be)
+  quant: number // 0..1: steps the output into multiples of this (0: smooth)
 }
+export const LFO_RATIO_MIN = 0.25
+export const LFO_RATIO_MAX = 8
+/** RATIO mode's reference: middle C */
+export const LFO_RATIO_HZ = 261.63
+export const LFO_PHASES = [0, 90, 180, -1]
 
-/** LFO frequency in Hz: free rate, or one cycle per division at the current tempo. */
-export const lfoHz = (lfo: Lfo, bpm: number) => (lfo.sync ? bpm / 60 / divisionBeats(lfo.division) : lfo.rate)
+/** LFO frequency in Hz: free rate, one cycle per division at the current tempo, or RATIO × middle C (a pad's LFO
+ *  follows the note from there). */
+export const lfoHz = (lfo: Lfo, bpm: number) =>
+  lfo.ratioMode ? LFO_RATIO_HZ * lfo.ratio : lfo.sync ? bpm / 60 / divisionBeats(lfo.division) : lfo.rate
 export interface ModRoute {
   source: ModSource
   dest: ModDest
@@ -117,9 +155,10 @@ export interface ModMatrix {
   lfo2: Lfo
   routes: ModRoute[]
 }
+const LFO_G3 = { ratioMode: false, ratio: 1, amount: 1, stereo: 0, phase: 0, quant: 0 }
 export const defaultMatrix = (): ModMatrix => ({
-  lfo1: { shape: 'sine', rate: 5, sync: false, division: '1/8' },
-  lfo2: { shape: 'triangle', rate: 0.5, sync: false, division: '1/1' },
+  lfo1: { shape: 'sine', rate: 5, sync: false, division: '1/8', ...LFO_G3 },
+  lfo2: { shape: 'triangle', rate: 0.5, sync: false, division: '1/1', ...LFO_G3 },
   routes: [],
 })
 const migrateMatrix = (m?: Partial<ModMatrix>): ModMatrix => {
@@ -135,6 +174,7 @@ export interface SoundSettings {
   tag: string
   // play
   volume: number // 0..1.5 linear gain
+  volKey: number // dB an octave from ROOT, -3..3 (Granulator III's Key > Vol)
   pan: number // -1..1
   repeat: number // 0 = loop forever, N = play N times
   choke: number // 0 = none, 1..8 = choke group
@@ -152,16 +192,20 @@ export interface SoundSettings {
   decay: number
   sustain: number
   release: number
+  envKey: number // 0..1: higher notes run the ADSR faster, × 2^(it × semitones from ROOT / 12) (Key > Env 1)
   // filter
   filterType: FilterType
   cutoff: number // Hz
   resonance: number // Q
+  filterWidth: number // semitones -48..48: Granulator III's types, the second stage from the first
+  filterKey: number // 0..1: the cutoff follows the note from ROOT (1: an octave an octave)
   // filter envelope
   fEnvAmount: number // octaves -5..5
   fAttack: number
   fDecay: number
   fSustain: number
   fRelease: number
+  fEnvKey: number // 0..1: likewise the filter ADSR (Key > Env 2)
   // grain cloud (audio/grainMath.ts): Granulator II's, its parameter names in brackets
   grain: boolean // on: the pad plays as a cloud of grains
   grainFreq: number // [GrainSize] Hz: grains start this often per slot and last one period (two overlap)
@@ -188,6 +232,20 @@ export interface SoundSettings {
   grainScanTime: number // [ScanTime] %: 100 = real time
   grainScanDist: number // [ScanDistance] 0..1 of the clip
   grainScanCurve: number // [ScanCurve] 0.5..2
+  // Granulator III's additions, its parameter names in brackets
+  grainMode: GrainMode // [Grain Mode] CLASSIC (Granulator II) / LOOP / CLOUD
+  grainSkew: number // [Shape] 0..1, 0.5 = none: CLASSIC's window leans early / late; LOOP's crossfade
+  grainDensity: number // [Density] 2..20: CLOUD's grains a side
+  grainReverse: number // [Reverse] 0..1: the chance a LOOP segment plays backwards
+  grainVariation: number // [Variation] 0..1: scales the random amounts below
+  grainVarPos: number // [Position Variation] ms, always later in the sample
+  grainVarSize: number // [Grain Size Variation] semitones of grain length, ±
+  grainVarPitch: number // [Pitch Variation] semitones, ± (CLOUD)
+  grainVarVol: number // [Volume Variation] dB
+  grainDetune: number // [Spread] semitones: left lower, right higher
+  grainNoteRnd: number // [Random > Pitch] semitones: each note's pitch, ± at random
+  grainScanLoop: boolean // [Loop] SCAN starts over at S.DIST
+  grainScanKey: boolean // [Key > Scan] SCAN's speed follows the note
   // delay
   delayTime: number // seconds
   delayFeedback: number // 0..0.9
@@ -319,6 +377,20 @@ export const GRAIN_DEFAULTS = {
   grainScanTime: 100,
   grainScanDist: 1,
   grainScanCurve: 1,
+  // Granulator III's defaults (CLASSIC: Granulator II as it was)
+  grainMode: 'classic' as GrainMode,
+  grainSkew: 0.5,
+  grainDensity: 4,
+  grainReverse: 0,
+  grainVariation: 0,
+  grainVarPos: 1000,
+  grainVarSize: 0,
+  grainVarPitch: 0,
+  grainVarVol: 0,
+  grainDetune: 0,
+  grainNoteRnd: 0,
+  grainScanLoop: false,
+  grainScanKey: false,
 }
 
 export function defaultSettings(name = 'SOUND'): SoundSettings {
@@ -326,6 +398,7 @@ export function defaultSettings(name = 'SOUND'): SoundSettings {
     name,
     tag: '',
     volume: 1,
+    volKey: 0,
     pan: 0,
     repeat: 1,
     choke: 0,
@@ -340,14 +413,18 @@ export function defaultSettings(name = 'SOUND'): SoundSettings {
     decay: 0.2,
     sustain: 1,
     release: 0.02,
+    envKey: 0,
     filterType: 'lowpass',
     cutoff: 20000,
     resonance: 0.7,
+    filterWidth: -12,
+    filterKey: 0,
     fEnvAmount: 0,
     fAttack: 0.001,
     fDecay: 0.3,
     fSustain: 0,
     fRelease: 0.2,
+    fEnvKey: 0,
     ...GRAIN_DEFAULTS,
     delayTime: 0.25,
     delayFeedback: 0.35,

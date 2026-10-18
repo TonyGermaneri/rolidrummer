@@ -9,10 +9,13 @@
 #include <stdexcept>
 #include <sys/resource.h>
 
-int main(){juce::ScopedJuceInitialiser_GUI gui;
+int main(int argc,char** argv){juce::ScopedJuceInitialiser_GUI gui;
  try {
+  const int selected=argc==2?std::stoi(argv[1]):-1;
+  if(argc>2||selected< -1||selected>5)throw std::runtime_error("Usage: drummer-benchmark [PROFILE_INDEX_0_TO_5]");
   std::cout<<"rate,block,profile,voices,audio_seconds,render_seconds,realtime_percent,p99_block_ms,max_block_ms,peak_rss_mib\n";
-  for(double rate:{48000.,96000.})for(int block:{64,256})for(int profile=0;profile<4;++profile){
+  for(double rate:{48000.,96000.})for(int block:{64,256})for(int profile=0;profile<6;++profile){
+   if(selected>=0&&profile!=selected)continue;
    auto sample=std::make_shared<ssb::Sample>();sample->rate=48000;sample->channels.resize(1);sample->channels[0].resize(24000);
    for(int i=0;i<24000;++i)sample->channels[0][size_t(i)]=float(.1*std::sin(i*.033)+.05*std::sin(i*.317));
    auto performance=std::make_shared<ssb::Performance>();performance->volume=.1f;performance->contactEffectsOnly=true;
@@ -21,6 +24,10 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;
     if(profile){sound->s.delayMix=.4f;sound->s.reverbMix=.3f;sound->expressionRouteCount=2;sound->expressionRoutes[0]={3,ssb::parameterIndex("reverbSize"),.1f,6,1,10};sound->expressionRoutes[1]={2,ssb::parameterIndex("delayTime"),.02f,.8f,1,10};}
     if(profile>=2){sound->s.grain=true;sound->s.grainFreq=60;sound->s.grainStereo=.7f;sound->s.grainSpray=40;}
     if(profile==3){sound->s.grainFm=true;sound->s.grainFmAmount=80;sound->s.grainScanOn=true;sound->expressionRouteCount=3;sound->expressionRoutes[2]={2,ssb::parameterIndex("grainWindow"),0,1,1,10};}
+    if(profile>=4){sound->s.grainMode=profile==4?ssb::GrainMode::loop:ssb::GrainMode::cloud;sound->s.grainDensity=20;
+     sound->s.grainVariation=.5f;sound->s.grainVarSize=12;sound->s.grainVarPitch=7;sound->s.svfType=3;sound->s.cutoff=4000;
+     sound->s.mod.lfo1.ratioMode=true;sound->s.mod.lfo1.ratio=.25f;sound->s.mod.lfo1.stereo=180;
+     sound->s.mod.routes.push_back({ssb::ModSource::lfo1,ssb::ModDest::grainPos,.02f});}
     sounds[size_t(contact)]=sound;performance->byId[sound->id]=sound;
    }
    ssb::Engine engine;engine.prepare(rate,block);engine.setPerformance(performance);std::vector<float> left(size_t(block),0),right(size_t(block),0);engine.process(left.data(),right.data(),0,nullptr,0);
@@ -35,7 +42,8 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;
    }
    if(engine.activeVoices()!=64)throw std::runtime_error("Benchmark did not sustain full polyphony");
    std::sort(times.begin(),times.end());rusage usage{};getrusage(RUSAGE_SELF,&usage);
-   std::cout<<int(rate)<<','<<block<<','<<(profile==0?"sample":profile==1?"sample+effects":profile==2?"stereo-grains+effects":"grain-window-mpe+fm+scan+effects")<<",64,3,"<<std::fixed<<std::setprecision(4)<<total<<','<<total/3*100<<','<<times[size_t(times.size()*.99)]*1000<<','<<times.back()*1000<<','<<double(usage.ru_maxrss)/1048576<<std::endl;
+   const char* profiles[]{"sample","sample+effects","stereo-grains+effects","grain-window-mpe+fm+scan+effects","g3-loop+svf+ratio-lfo+effects","g3-cloud20+svf+ratio-lfo+effects"};
+   std::cout<<int(rate)<<','<<block<<','<<profiles[profile]<<",64,3,"<<std::fixed<<std::setprecision(4)<<total<<','<<total/3*100<<','<<times[size_t(times.size()*.99)]*1000<<','<<times.back()*1000<<','<<double(usage.ru_maxrss)/1048576<<std::endl;
   }
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

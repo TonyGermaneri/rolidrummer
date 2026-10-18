@@ -1,6 +1,6 @@
 # Source provenance
 
-SSB source initially adapted from commit 75656b6, with the grain engine, controls, math, preset migration and tests updated from aabc13d (MIT, Copyright 2026 Anthony Germaneri). Original MIT license below.
+SSB source initially adapted from commit 75656b6, with the grain engine, controls, math, preset migration and tests updated from aabc13d. Sound engine changes through SSB 0.6.2 (4be313f), including e6c7fc2's Granulator III engine, d4d496c's loop interpolation fix and 4508110's mono/poly note-release fix, are incorporated with Roli Drummer's per-contact adaptations. This update excludes SSB's waveform assets, factory presets, patch levels and preset migrations (MIT, Copyright 2026 Anthony Germaneri). Original MIT license below.
 
 Jamin graph, MIDI and percussion source adapted from commit a93064b (GPL-3.0-or-later).
 
