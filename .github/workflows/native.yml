@@ -43,7 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Signing workflow regression tests
-        run: python3 native/tools/test-macos-signing.py
+        run: |
+          python3 native/tools/test-macos-signing.py
+          python3 native/tools/test-macos-notarize.py
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

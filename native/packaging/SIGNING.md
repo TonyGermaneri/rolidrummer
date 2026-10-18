@@ -18,6 +18,8 @@ native/tools/macos-notarize.sh native/build-universal/plugin release Release
 
 This command uploads the bundles to Apple, staples accepted tickets, and creates archives. It is an optional release operation; it is not part of the ordinary build or test commands. Credentials are not stored in this repository.
 
+After Apple accepts a submission, ticket propagation can briefly lag behind. As in SSB, stapling retries each bundle up to six times before failing with Apple's diagnostic. Archives are created only after every bundle has its ticket.
+
 ## GitHub Actions
 
 The workflows are adapted from SSB and use the same repository secrets:
@@ -33,6 +35,8 @@ The API-key route takes precedence when both notarization methods are configured
 As in SSB, CI adds the temporary signing keychain to the existing user search list and restores the original list during cleanup. Passing `--keychain` to `codesign` selects the identity; the search list must also contain the certificates needed to build its chain. The import step checks for a valid Developer ID Application identity before signing. See [GitHub's macOS certificate setup](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications).
 
 Run `python3 native/tools/test-macos-signing.py` to exercise the actual workflow setup/cleanup blocks and signing script with mocked system commands. These tests cover nested signing, paths with spaces and restoration after failures without using real credentials or keychains. They also run in CI before the editor build.
+
+Run `python3 native/tools/test-macos-notarize.py` to check delayed-ticket retries, bounded failures and rejected submissions with synthetic credentials and mocked Apple tools. These checks also run before CI builds the editor.
 
 After signing, CI follows SSB's validation sequence: install the AU, refresh `AudioComponentRegistrar`, validate its component codes with Apple's `auval`, then validate the VST3 with pluginval in process at strictness 5. Logs from both validators are retained on failure, and pipeline errors propagate through log capture.
 
