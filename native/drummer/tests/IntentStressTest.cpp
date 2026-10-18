@@ -69,6 +69,26 @@ std::vector<int> pressureStep(int block,float slew,double dwell,double grid){
     }
     check(scheduler.contacts()[1].clip==1,"A sustained pressure step never reached its intended candidate");return switches(capture);
 }
+void keyboardModes(){
+    for(auto mode:{KeyboardMode::hold,KeyboardMode::toggle}){
+        auto config=pair();config.keyboardMode=mode;
+        for(auto& key:config.keys)key=config.keys[60];
+        Scheduler scheduler;Capture capture;std::array<Midi,512> input{};
+        for(int pass=0;pass<3;++pass){int used=0;
+            for(int note=0;note<128;++note){const auto ch=uint8_t(1+note%15);
+                input[size_t(used++)]={note*3,uint8_t(0xb0|ch),74,uint8_t(pass==2?127:0)};
+                input[size_t(used++)]={note*3,uint8_t(0x90|ch),uint8_t(note),100};
+                input[size_t(used++)]={note*3+1,uint8_t(0x80|ch),uint8_t(note),64};
+            }
+            process(scheduler,config,pass*512,512,input.data(),used,capture);
+        }
+        auto replacement=config;replacement.keyboardMode=KeyboardMode::normal;
+        realtime::watching=true;scheduler.reconfigure(config,replacement,1536/24000.,Capture::take,&capture);realtime::watching=false;
+        check(!realtime::allocations&&!realtime::deletions,"Keyboard mode retargeting allocated on audio");
+        process(scheduler,replacement,1536,512,nullptr,0,capture);
+        check(!scheduler.hasHeldNotes(),"Mode-change stress stranded latches");
+    }
+}
 void stabilization(){
     for(int block:{64,257,2048}){
         check(pressureStep(block,0,0,0)==std::vector<int>{100},"Immediate pressure selection added unexpected latency");
@@ -171,7 +191,7 @@ std::vector<Record> combined(int block){
 }
 }
 int main(){try{
-    stabilization();const auto reference=combined(64);
+    keyboardModes();stabilization();const auto reference=combined(64);
     for(int block:{257,2048,0})check(combined(block)==reference,"Intent/lifecycle event trace depends on host buffer partition");
     uint64_t fingerprint=14695981039346656037ULL;
     for(const auto& event:reference)std::apply([&](const auto&... fields){

@@ -128,6 +128,46 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   midi.addEvent(juce::MidiMessage::controllerEvent(1,64,127),0);midi.addEvent(juce::MidiMessage::noteOff(2,50),1);player.processBlock(audio,midi);
   midi.addEvent(juce::MidiMessage::allNotesOff(1),0);player.processBlock(audio,midi);read();check(snapshot.count==0,"Panic left finger markers");
  }
+ // Software modes reach the audio engine and telemetry without an editor, and recall as patch/session settings.
+ {
+  auto legacy=doc.clone();legacy.getDynamicObject()->removeProperty("keyboardMode");
+  check(drummer::compileDocument(legacy)->config.keyboardMode==drummer::KeyboardMode::normal,"Legacy patch did not default to Normal");
+  legacy.getDynamicObject()->setProperty("keyboardMode","invalid");
+  check(juce::JSON::parse(drummer::compileDocument(legacy)->json).getProperty("keyboardMode",{}).toString()=="normal","Invalid keyboard mode was not canonicalized");
+  for(const char* mode:{"hold","toggle"}){
+   DrummerProcessor player;auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);
+   patch.getDynamicObject()->setProperty("launchGrid",0);patch.getDynamicObject()->setProperty("switchGrid",0);
+   player.apply(drummer::compileDocument(patch));player.prepareToPlay(48000,256);Head head;head.playing=false;player.setPlayHead(&head);
+   juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer midi;DrummerProcessor::FingerSnapshot snapshot;
+   midi.addEvent(juce::MidiMessage::controllerEvent(2,74,64),0);midi.addEvent(juce::MidiMessage::noteOn(2,50,(juce::uint8)100),0);
+   midi.addEvent(juce::MidiMessage::noteOff(2,50,(juce::uint8)91),100);player.processBlock(audio,midi);
+   check(player.readFingers(snapshot)&&snapshot.count==1&&snapshot.fingers[0].sustained&&snapshot.fingers[0].playing,"Software latch did not reach processor telemetry");
+   const bool toggle=std::string(mode)=="toggle";
+   check(snapshot.fingers[0].toggled==toggle,"Telemetry confused Toggle with Hold");
+   double energy=0;for(int block=0;block<120;++block){player.processBlock(audio,midi);if(block>40)for(int i=0;i<256;++i)energy+=audio.getSample(0,i)*audio.getSample(0,i);}
+   check(energy>.01&&player.freePlaying.load(),"Released software latch stopped producing audio with a stopped host");
+   if(toggle){
+    // A held replacement in a different zone owns all subsequent expression for this key.
+    midi.addEvent(juce::MidiMessage::controllerEvent(3,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(3,50,(juce::uint8)100),0);player.processBlock(audio,midi);
+    check(player.readFingers(snapshot)&&snapshot.count==1&&snapshot.fingers[0].channel==2&&snapshot.fingers[0].zone==2&&!snapshot.fingers[0].sustained&&snapshot.fingers[0].toggled,"Zone handoff left duplicate/wrong processor owners");
+    midi.addEvent(juce::MidiMessage::controllerEvent(4,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(4,50,(juce::uint8)100),0);player.processBlock(audio,midi);
+    check(player.readFingers(snapshot)&&snapshot.count==0&&!player.freePlaying.load(),"Same-zone toggle left physical-but-suppressed markers or a running gate");
+    // Sound/routing edits must not revive either explicitly stopped physical contact.
+    patch.getDynamicObject()->setProperty("switchGrid",.25);auto keys=patch.getProperty("keys",{});(*keys.getArray())[1].getDynamicObject()->setProperty("zoneSource",3);
+    player.apply(drummer::compileDocument(patch));player.processBlock(audio,midi);
+    check(player.readFingers(snapshot)&&snapshot.count==0&&!player.freePlaying.load(),"Runtime edit resurrected toggled-off physical keys");
+    midi.addEvent(juce::MidiMessage::noteOff(3,50),0);midi.addEvent(juce::MidiMessage::noteOff(4,50),1);player.processBlock(audio,midi);
+   }
+   midi.addEvent(juce::MidiMessage::noteOn(5,48,(juce::uint8)100),0);midi.addEvent(juce::MidiMessage::controllerEvent(1,64,0),1);player.processBlock(audio,midi);
+   check(player.readFingers(snapshot)&&snapshot.count==1&&snapshot.fingers[0].note==48&&!snapshot.fingers[0].sustained,"Pedal up did not clear lifted software latches while retaining the physical key");
+   juce::MemoryBlock saved;player.getStateInformation(saved);DrummerProcessor restored;restored.setStateInformation(saved.getData(),(int)saved.getSize());
+   const auto recalled=juce::JSON::parse(restored.document());
+   check(recalled.getProperty("keyboardMode",{}).toString()==mode,"AU/VST state lost the keyboard mode");
+   check(drummer::compileDocument(recalled)->config.keyboardMode==(toggle?drummer::KeyboardMode::toggle:drummer::KeyboardMode::hold),"Patch round trip lost keyboard mode");
+   restored.prepareToPlay(48000,256);restored.processBlock(audio,midi);
+   check(restored.readFingers(snapshot)&&snapshot.count==0&&!restored.freePlaying.load(),"Recall serialized live key latches");
+  }
+ }
  // Sustain renders the same pattern as a physically held key, even with a stopped host.
  {
   auto sustainRender=[&](bool pedal,bool playing,int block){
@@ -157,6 +197,27 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
    for(size_t i=0;i<held.size();++i){error=std::max(error,double(std::abs(held[i]-pedalled[i])));if(i>24000&&i<48000)energy+=pedalled[i]*pedalled[i];}
    if(error>=.0001||energy<=.01)std::cerr<<"sustain: error="<<error<<" energy="<<energy<<" playing="<<playing<<" block="<<block<<"\n";
    check(error<.0001&&energy>.01,"Pedal-held audio differs from physical hold or loses clock sync");
+  }
+ }
+ // A software Hold/Toggle latch produces the same samples as a physical hold until pedal-up.
+ {
+  auto modeRender=[&](const char* mode,int block){
+   DrummerProcessor player;auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);
+   player.apply(drummer::compileDocument(patch));player.prepareToPlay(48000,2048);Head head;head.playing=false;player.setPlayHead(&head);
+   juce::AudioBuffer<float> audio(2,2048);juce::MidiBuffer midi;std::vector<float> result;
+   const bool normal=std::string(mode)=="normal";
+   struct Input{int at;juce::MidiMessage message;};const Input events[]={{0,juce::MidiMessage::noteOn(2,50,(juce::uint8)100)},
+    {normal?48000:1000,juce::MidiMessage::noteOff(2,50,(juce::uint8)99)},{48000,juce::MidiMessage::controllerEvent(1,64,0)}};
+   size_t index=0;
+   for(int at=0;at<96000;at+=block){const int n=std::min(block,96000-at);audio.setSize(2,n,false,false,true);midi.clear();
+    while(index<std::size(events)&&events[index].at<at+n){midi.addEvent(events[index].message,events[index].at-at);++index;}
+    player.processBlock(audio,midi);for(int i=0;i<n;++i)result.push_back(audio.getSample(0,i));
+   }return result;
+  };
+  const auto held=modeRender("normal",256);
+  for(const char* mode:{"hold","toggle"}){const auto latched=modeRender(mode,257);double error=0;
+   for(size_t i=0;i<held.size();++i)error=std::max(error,double(std::abs(held[i]-latched[i])));
+   check(error<.0001,"Software latch audio differs from physical hold across buffer sizes");
   }
  }
  // Stopped-host keys use the same shared musical clock, at the host's exact

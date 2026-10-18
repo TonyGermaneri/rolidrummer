@@ -65,3 +65,10 @@ describe('SSB grain model migration',()=>{
   p.sustainCC=66;expect(normalize(JSON.parse(JSON.stringify(p))).sustainCC).toBe(66)
   p.sustainCC=74;expect(normalize(p).sustainCC).toBe(64)
  })
+
+it('defaults legacy keyboard behavior and recalls Hold/Toggle mode',()=>{
+ const patch=factory();delete (patch as Partial<typeof patch>).keyboardMode
+ expect(normalize(patch).keyboardMode).toBe('normal')
+ for(const mode of ['hold','toggle'] as const){patch.keyboardMode=mode;expect(normalize(JSON.parse(JSON.stringify(patch))).keyboardMode).toBe(mode)}
+ ;(patch as any).keyboardMode='invalid';expect(normalize(patch).keyboardMode).toBe('normal')
+})

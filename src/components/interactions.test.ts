@@ -66,6 +66,25 @@ describe('zone component interaction contracts', () => {
 })
 
 describe('Seaboard component interaction contracts', () => {
+  it('changes the persisted keyboard mode and distinguishes toggled keys from pedal sustain',async()=>{
+    const root=await render(Seaboard,{base:36})
+    const mode=(label:string)=>find(root,n=>n.tag==='button'&&n.textContent===label)
+    expect(mode('Normal').props['aria-pressed']).toBe(true)
+    await event(mode('Hold'),'click');expect(backend.state.patch.keyboardMode).toBe('hold')
+    expect(mode('Hold').props['aria-pressed']).toBe(true)
+    await event(mode('Toggle'),'click');expect(backend.state.patch.keyboardMode).toBe('toggle')
+    backend.state.telemetry.fingers=[{owner:'201',channel:1,note:48,zone:2,slide:.9,glide:.5,pressure:.5,sustained:true,toggled:true,playing:true},{owner:'202',channel:2,note:50,zone:0,slide:.1,glide:.5,pressure:.5,sustained:true,toggled:false,playing:true}]
+    await settle()
+    const kick=find(root,n=>n.props['data-drop']==='key:48'),hat=find(root,n=>n.props['data-drop']==='key:50')
+    expect(kick.props.class).toContain('toggled');expect(kick.props['aria-pressed']).toBe(true)
+    expect(nodes(kick,n=>n.props.class==='key-toggled')).toHaveLength(1)
+    expect(hat.props['aria-pressed']).toBe(false);expect(nodes(hat,n=>n.props.class==='key-toggled')).toHaveLength(0)
+    expect(find(root,n=>n.props['data-owner']==='201').props['aria-label']).toBe('Toggled note 48')
+    backend.state.telemetry.fingers=[];await settle();expect(kick.props['aria-pressed']).toBe(false)
+    await event(mode('Normal'),'click');expect(backend.state.patch.keyboardMode).toBe('normal')
+    expect(backend.midi).not.toHaveBeenCalled()
+  })
+
   it('connects the device preset arrows to patch navigation without sending note events', async () => {
     const select=vi.fn(),root=await render(Seaboard,{base:36,onPatch:select})
     await event(find(root,n=>n.props['aria-label']==='Previous patch'),'click')

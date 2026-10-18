@@ -1,7 +1,7 @@
 import { reactive, watch } from 'vue'
 import { factory, normalize, clone, type Patch } from './model'
 import { request, native, onNative } from './native/bridge'
-export interface Finger {owner?:string;sustained?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
+export interface Finger {owner?:string;sustained?:boolean;toggled?:boolean;playing?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
 export interface Playhead {id:number;note:number;pos:number;dur:number;velocity:number;grains:boolean}
 export interface GrainMark {voice:number;when:number;pos:number;len:number;dur:number;pan:number;gain:number;reverse:boolean}
 export const state = reactive({ patch: factory(), selected: 48, tab: 'Key', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })

@@ -150,12 +150,12 @@ void DrummerProcessor::publishFingers() noexcept {
  if(fingerBusy.test_and_set(std::memory_order_acquire))return;
  fingerSnapshot.count=0;
  auto append=[&](const drummer::Contact& f,bool sustained){
-  auto& view=fingerSnapshot.fingers[(size_t)fingerSnapshot.count++];view={f.owner,f.channel,f.key,f.zone,f.values.slide,f.values.glide,f.values.press,sustained};
+  auto& view=fingerSnapshot.fingers[(size_t)fingerSnapshot.count++];view={f.owner,f.channel,f.key,f.zone,f.values.slide,f.values.glide,f.values.press,sustained,f.toggled,f.held};
   if(active&&f.key>=0&&f.key<128){const auto& key=active->config.keys[(size_t)f.key];const int group=key.zones[(size_t)std::clamp(f.zone,0,key.zoneCount-1)].group;
    if(key.intentEnabled&&group>=0&&group<(int)active->config.groups.size()){const auto& choices=active->config.groups[(size_t)group];for(int i=0;i<choices.count;++i)if(choices.candidates[(size_t)i].clip==f.clip){view.candidate=i;break;}}
   }
  };
- for(const auto& f:scheduler.contacts())if(f.down)append(f,false);
+ for(const auto& f:scheduler.contacts())if(f.down&&!f.suppressed)append(f,false);
  for(const auto& f:scheduler.sustainedContacts())if(f.held)append(f,true);
  fingerBusy.clear(std::memory_order_release);
 }

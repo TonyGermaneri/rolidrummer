@@ -35,7 +35,7 @@ public:
  std::atomic<double> hostBpm{120},hostPpq{0};std::atomic<bool> hostPlaying{false},standalonePlaying{false},freePlaying{false};
  std::array<std::atomic<int>,16> contacts{};
  std::array<std::atomic<float>,16> contactSlide{},contactGlide{},contactPressure{};
- struct FingerView { uint64_t owner=0;int channel=0,note=0,zone=0;float slide=0,glide=.5f,pressure=0;bool sustained=false;int candidate=-1; };
+ struct FingerView { uint64_t owner=0;int channel=0,note=0,zone=0;float slide=0,glide=.5f,pressure=0;bool sustained=false,toggled=false,playing=false;int candidate=-1; };
  struct FingerSnapshot { std::array<FingerView,drummer::maxContacts+drummer::Scheduler::maxSustained> fingers{};int count=0; };
  bool readFingers(FingerSnapshot&) noexcept;
  std::atomic<int> lastSlideChannel{-1},lastSlideValue{0};

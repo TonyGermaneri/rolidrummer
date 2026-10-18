@@ -67,7 +67,7 @@ juce::var defaultDocument(){
   keys.add(object({{"note",get(v,"note")},{"name",get(v,"name")},{"parts",get(v,"parts")},{"zoneSource",2},{"zones",zones},{"routes",get(v,"routes")},{"mpeDefaultsVersion",1},{"sound",object({{"path",get(v,"source")},{"s",settings}})}}));
  }
  juce::Array<juce::var> cc;for(int n:{107,109,111,113,114})cc.add(n);
- return object({{"version",1},{"id","builtin:factory"},{"name",get(data,"name")},{"keys",keys},{"clips",get(data,"clips")},{"templateZones",zones},{"launchGrid",.25},{"switchGrid",.25},{"hardRelease",false},{"sustainCC",64},{"volume",.8},{"bpm",120.},{"globalCC",cc},{"globalRoutes",juce::Array<juce::var>()}});
+ return object({{"version",1},{"id","builtin:factory"},{"name",get(data,"name")},{"keys",keys},{"clips",get(data,"clips")},{"templateZones",zones},{"launchGrid",.25},{"switchGrid",.25},{"hardRelease",false},{"sustainCC",64},{"keyboardMode","normal"},{"volume",.8},{"bpm",120.},{"globalCC",cc},{"globalRoutes",juce::Array<juce::var>()}});
 }
 std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  auto doc=input.clone();
@@ -94,6 +94,9 @@ std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  c.launchGrid=number(doc,"launchGrid",.25,0,16);c.switchGrid=number(doc,"switchGrid",.25,0,16);c.hardRelease=(bool)get(doc,"hardRelease",false);
  c.sustainCC=(int)number(doc,"sustainCC",64,0,119);if(c.sustainCC==74)c.sustainCC=64;
  doc.getDynamicObject()->setProperty("sustainCC",c.sustainCC);
+ const auto mode=get(doc,"keyboardMode").toString();
+ c.keyboardMode=mode=="toggle"?KeyboardMode::toggle:mode=="hold"?KeyboardMode::hold:KeyboardMode::normal;
+ doc.getDynamicObject()->setProperty("keyboardMode",c.keyboardMode==KeyboardMode::toggle?"toggle":c.keyboardMode==KeyboardMode::hold?"hold":"normal");
  c.hysteresis=(float)number(doc,"hysteresis",.015,0,.1);c.masterChannel=(int)number(doc,"masterChannel",0,0,15);
  std::map<juce::String,int> clipIndex;std::map<juce::String,int> contentIndex;
  std::set<juce::String> boundClips,allClipIds;

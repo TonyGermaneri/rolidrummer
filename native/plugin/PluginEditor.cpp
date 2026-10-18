@@ -133,7 +133,7 @@ void DrummerEditor::timerCallback(){
  if(plugin.readFingers(snapshot)){
   juce::Array<juce::var> fingers;
   for(int i=0;i<snapshot.count;++i){const auto& view=snapshot.fingers[(size_t)i];auto*f=new juce::DynamicObject;
-   f->setProperty("owner",juce::String((juce::int64)view.owner));f->setProperty("sustained",view.sustained);
+   f->setProperty("owner",juce::String((juce::int64)view.owner));f->setProperty("sustained",view.sustained);f->setProperty("toggled",view.toggled);f->setProperty("playing",view.playing);
    f->setProperty("channel",view.channel);f->setProperty("note",view.note);f->setProperty("zone",view.zone);
    f->setProperty("candidate",view.candidate);
    f->setProperty("slide",view.slide);f->setProperty("glide",view.glide);f->setProperty("pressure",view.pressure);fingers.add(juce::var(f));

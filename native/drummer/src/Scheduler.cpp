@@ -63,7 +63,7 @@ void prepareClip(Clip& clip) {
     }
     std::sort(clip.timeline.begin(),clip.timeline.end(),[](const auto&a,const auto&b){if(a.beat!=b.beat)return a.beat<b.beat;return a.off>b.off;});
 }
-void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};wasPlaying = false;expected = 0;pendingOffCount=0; }
+void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};wasPlaying = false;expected = 0;pendingOffCount=0;keyboardMode=KeyboardMode::normal; }
 bool Scheduler::hasHeldNotes() const noexcept {
     for (const auto& f : fingers) if (f.held) return true;
     for (const auto& f : sustained) if (f.held) return true;
@@ -71,7 +71,7 @@ bool Scheduler::hasHeldNotes() const noexcept {
 }
 void Scheduler::reconfigure(const Configuration& previous,const Configuration& next,double beat,Sink sink,void* ctx) noexcept {
     auto identity=[](const Configuration& cfg,int clip){return clip>=0&&clip<(int)cfg.clips.size()?cfg.clips[(size_t)clip].id:uint64_t(0);};
-    for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if((!f.down&&!f.held)||f.key<0||f.key>=128)continue;
+    for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if((!f.down&&!f.held)||f.suppressed||f.key<0||f.key>=128)continue;
         const auto& old=previous.keys[(size_t)f.key];const auto& key=next.keys[(size_t)f.key];
         const bool wasHeld=f.held;const int oldZone=std::clamp(f.zone,0,std::max(0,old.zoneCount-1));
         auto oldContact=f;oldContact.zone=oldZone;
@@ -96,21 +96,31 @@ void Scheduler::reconfigure(const Configuration& previous,const Configuration& n
             if(wasHeld){Event e;e.type=Event::switchZone;e.owner=f.owner;e.key=f.key;e.channel=f.channel;e.values=f.values;sink(ctx,e);}
         }
     }
+    if(next.keyboardMode==KeyboardMode::toggle)enforceToggle(0,sink,ctx);
+}
+void Scheduler::enforceToggle(int offset,Sink sink,void* ctx) noexcept {
+    std::array<Contact*,128> owners{};
+    for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if(!f.held)continue;
+        auto*& owner=owners[(size_t)f.key];
+        if(!owner){owner=&f;f.toggled=true;continue;}
+        auto* old=owner->owner<f.owner?owner:&f;if(old==owner)owner=&f;
+        old->suppressed=old->down;release(*old,offset,Event::killContact,sink,ctx);owner->toggled=true;
+    }
 }
 void Scheduler::release(Contact& f,int offset,Event::Type type,Sink sink,void* ctx) noexcept {
     if(f.held){Event e;e.type=type;e.offset=offset;e.owner=f.owner;e.key=f.key;e.channel=f.channel;e.values=f.values;e.values.lift=f.releaseVelocity;sink(ctx,e);}
-    f.held=false;
+    f.held=false;f.toggled=false;
 }
 void Scheduler::lift(Contact& f,int offset,Sink sink,void* ctx) noexcept {
     f.down=false;
     if(!f.held)return;
-    if(!pedalDown(f.channel)){release(f,offset,Event::releaseContact,sink,ctx);return;}
+    if(keyboardMode==KeyboardMode::normal && !pedalDown(f.channel)){release(f,offset,Event::releaseContact,sink,ctx);return;}
     auto slot=std::find_if(sustained.begin(),sustained.end(),[](const auto& c){return !c.held;});
     if(slot==sustained.end()){
         slot=std::min_element(sustained.begin(),sustained.end(),[](const auto&a,const auto&b){return a.owner<b.owner;});
         release(*slot,offset,Event::releaseContact,sink,ctx);
     }
-    *slot=f;f.held=false; // Keep its owner/expression independent when the MPE channel is reused.
+    *slot=f;f.held=false;f.toggled=false; // Keep its owner/expression independent when the MPE channel is reused.
 }
 void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double bpm,Sink sink,void* ctx) noexcept {
     if(m.a>127 || m.b>127)return;
@@ -128,7 +138,7 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
     if(op==0xb0 && m.a==pedalCC) {
         pedals[(size_t)ch]=m.b>=64;
         if(m.b<64)for(auto& held:sustained)
-            if(held.held && !pedalDown(held.channel))release(held,m.offset,Event::releaseContact,sink,ctx);
+            if(held.held && (ch==cfg.masterChannel || held.channel==ch) && !pedalDown(held.channel))release(held,m.offset,Event::releaseContact,sink,ctx);
         return;
     }
     // CC74 is per-channel note expression, never a global controller or a
@@ -138,11 +148,25 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
         return;
     }
     if(op==0x90 && m.b>0) {
-        if(f.held)lift(f,m.offset,sink,ctx);
         const auto& k=cfg.keys[m.a];
-        f.down=true;f.held=k.enabled;f.key=m.a;f.channel=ch;f.owner=++generation;
-        f.values.strike=m.b/127.f;f.values.lift=0;f.releaseVelocity=0;
-        f.zone=f.wanted=zoneAt(k,source(f.values,k.zoneSource));
+        auto values=f.values;values.strike=m.b/127.f;values.lift=0;
+        const int zone=zoneAt(k,source(values,k.zoneSource));
+        bool stop=false;
+        if(keyboardMode==KeyboardMode::toggle && k.enabled){
+            // Ownership is by key, independent of the member channel allocated to this press.
+            const Contact* owner=nullptr;
+            for(int i=0;i<maxContacts+maxSustained;++i){const auto& old=contact(i);
+                if(old.held&&old.key==m.a&&(!owner||old.owner>owner->owner))owner=&old;
+            }
+            stop=owner&&owner->zone==zone;
+            for(int i=0;i<maxContacts+maxSustained;++i){auto& old=contact(i);
+                if(old.held&&old.key==m.a){old.suppressed=old.down;release(old,m.offset,Event::killContact,sink,ctx);}
+            }
+        }
+        if(f.held)lift(f,m.offset,sink,ctx);
+        f.down=true;f.held=k.enabled&&!stop;f.toggled=f.held&&keyboardMode==KeyboardMode::toggle;f.suppressed=stop;
+        f.key=m.a;f.channel=ch;f.owner=++generation;f.values=values;f.releaseVelocity=0;
+        f.zone=f.wanted=zone;
         f.intent=intentTarget(f.values);f.intentBeat=beat;f.nextIntent=beat+intentTick;f.changedAt=beat;
         f.clip=f.wantedClip=chooseClip(cfg,k,f.zone,f.intent,k.zones[(size_t)f.zone].clip);
         f.opens=boundary(beat,cfg.launchGrid);f.switches=f.opens;
@@ -172,6 +196,13 @@ void Scheduler::process(const Configuration& cfg,Clock clock,int frames,const Mi
     if(pedalCC!=cfg.sustainCC || pedalMaster!=cfg.masterChannel){
         for(auto& f:sustained)release(f,0,Event::releaseContact,sink,ctx);
         pedals={};pedalCC=cfg.sustainCC;pedalMaster=cfg.masterChannel;
+    }
+    if(keyboardMode!=cfg.keyboardMode){
+        // Turning off a software latch releases only lifted keys; a real pedal still holds its owners.
+        for(auto& f:sustained)if(!pedalDown(f.channel))release(f,0,Event::releaseContact,sink,ctx);
+        keyboardMode=cfg.keyboardMode;
+        for(int i=0;i<maxContacts+maxSustained;++i)contact(i).toggled=false;
+        if(keyboardMode==KeyboardMode::toggle)enforceToggle(0,sink,ctx);
     }
     const double step=clock.bpm/(60*clock.sampleRate),end=clock.ppq+frames*step;
     const bool discontinuity=clock.discontinuity || (wasPlaying && clock.playing && std::abs(clock.ppq-expected)>step*2);

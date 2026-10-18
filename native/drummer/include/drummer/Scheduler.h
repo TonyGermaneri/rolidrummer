@@ -29,6 +29,7 @@ struct Key {
     float intentSlewMs = 35, intentPenalty = .025f;
     double intentDwell = .25;
 };
+enum class KeyboardMode { normal, hold, toggle };
 struct Configuration {
     std::array<Key,128> keys;
     std::vector<Clip> clips;
@@ -36,6 +37,7 @@ struct Configuration {
     double launchGrid = .25, switchGrid = .25;
     float hysteresis = .015f;
     bool hardRelease = false;
+    KeyboardMode keyboardMode = KeyboardMode::normal;
     int masterChannel = 0;
     int sustainCC = 64; // 0–119, except per-note Slide (74).
 };
@@ -54,6 +56,7 @@ struct Event {
 struct Contact {
     bool down = false; // Physical contact, including keys without an assigned sound.
     bool held = false;
+    bool toggled = false, suppressed = false; // Explicitly stopped physical touches cannot restart on an edit.
     int key = -1, zone = 0, wanted = 0, channel = 0;
     uint64_t owner = 0;
     double opens = 0, switches = 0;
@@ -88,8 +91,10 @@ private:
     std::array<Contact,maxSustained> sustained {};
     std::array<bool,maxContacts> pedals {};
     int pedalCC = 64, pedalMaster = 0;
+    KeyboardMode keyboardMode = KeyboardMode::normal;
     Contact& contact(int i) noexcept { return i < maxContacts ? fingers[(size_t)i] : sustained[(size_t)(i-maxContacts)]; }
     bool pedalDown(int channel) const noexcept { return pedals[(size_t)pedalMaster] || pedals[(size_t)channel]; }
+    void enforceToggle(int offset, Sink, void*) noexcept;
     void release(Contact&, int offset, Event::Type, Sink, void*) noexcept;
     void lift(Contact&, int offset, Sink, void*) noexcept;
     uint64_t generation = 0;

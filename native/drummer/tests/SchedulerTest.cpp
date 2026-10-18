@@ -72,6 +72,83 @@ void sustainTests(){
  check(!s.hasHeldNotes(),"Sustain capacity eviction stranded notes");
  check(std::count_if(out.events.begin(),out.events.end(),[](const Event&e){return e.type==Event::releaseContact;})==140,"Sustain capacity lost owner releases");
 }
+int playing(const Scheduler& scheduler,int key=-1){
+ int count=0;for(const auto& f:scheduler.contacts())if(f.held&&(key<0||f.key==key))++count;
+ for(const auto& f:scheduler.sustainedContacts())if(f.held&&(key<0||f.key==key))++count;return count;
+}
+void keyboardModeTests(){
+ auto c=fixture();c.launchGrid=0;c.switchGrid=0;c.keyboardMode=KeyboardMode::toggle;
+ Scheduler scheduler;Capture capture;int at=0;
+ auto run=[&](std::initializer_list<Midi> input){capture.events.clear();scheduler.process(c,{at/24000.,120,48000,true},64,input.begin(),(int)input.size(),Capture::take,&capture);at+=64;};
+ run({{0,0x91,60,100},{1,0x81,60,99},{2,0x92,61,90}});
+ check(playing(scheduler,60)==1&&playing(scheduler,61)==1,"Toggle did not latch independently per key");
+ const auto first=scheduler.sustainedContacts()[0];
+ check(first.toggled&&!first.down&&first.releaseVelocity==99/127.f,"Toggle lost latch telemetry or Lift");
+ // A new member channel pressing the same zone stops only this key, even under pedal.
+ run({{0,0xb0,64,127},{1,0x93,60,100}});
+ check(playing(scheduler,60)==0&&playing(scheduler,61)==1,"Same-zone toggle failed or stopped another key");
+ check(scheduler.contacts()[3].down&&!scheduler.contacts()[3].toggled&&scheduler.contacts()[3].suppressed,"Stopped toggle lost physical/suppressed state");
+ check(std::count_if(capture.events.begin(),capture.events.end(),[&](const auto&e){return e.type==Event::killContact&&e.owner==first.owner;})==1,"Toggle off did not stop the previous owner");
+ auto edited=c;edited.keys[60].zones[0].clip=1;
+ scheduler.reconfigure(c,edited,at/24000.,Capture::take,&capture);
+ check(playing(scheduler,60)==0,"A pattern edit resurrected an explicitly toggled-off touch");
+ run({{0,0x83,60,64},{1,0xb0,64,0}});
+ check(playing(scheduler,60)==0&&scheduler.contacts()[2].held,"Pedal up stopped a physically held key");
+ // Different-zone presses replace the old owner immediately, with no duplicated gate.
+ run({{0,0xb3,74,127},{1,0x93,60,100},{2,0x83,60,64}});
+ const auto old=scheduler.sustainedContacts()[0].owner;
+ run({{0,0xb4,74,64},{1,0x94,60,100}});
+ check(playing(scheduler,60)==1&&scheduler.contacts()[4].held&&scheduler.contacts()[4].zone==1&&scheduler.contacts()[4].toggled,"A different zone failed to replace the latched owner");
+ check(std::any_of(capture.events.begin(),capture.events.end(),[&](const auto&e){return e.type==Event::killContact&&e.owner==old;}),"Zone replacement left old voices owned by the key");
+ // Overlap while both fingers remain down: stale releases/pressure cannot affect the replacement.
+ run({{0,0xb5,74,0},{1,0x95,60,100},{2,0xd4,127,0},{3,0x84,60,64}});
+ check(playing(scheduler,60)==1&&scheduler.contacts()[5].held&&scheduler.contacts()[5].zone==0&&scheduler.contacts()[5].values.press==0,"An old finger changed/stopped the replacement");
+ scheduler.reconfigure(c,edited,at/24000.,Capture::take,&capture);
+ check(playing(scheduler,60)==1,"Retargeting a toggled key duplicated its owner");
+ run({{0,0x85,60,64}});
+ // A member pedal release is scoped; master release clears software latches even without prior down.
+ run({{0,0xb2,64,0}});check(playing(scheduler,60)==1,"Member pedal release cleared another key's software latch");
+ run({{0,0xb0,64,0}});check(playing(scheduler,60)==0&&scheduler.contacts()[2].held&&scheduler.contacts()[2].toggled,"Pedal release lost physical Toggle state");
+ run({{0,0x82,61,64}});check(playing(scheduler,61)==1,"A physical key could not latch after pedal release");
+ c.keyboardMode=KeyboardMode::normal;run({});check(!scheduler.hasHeldNotes(),"Leaving Toggle stranded a software latch");
+ // Hold behaves like sustain, including retriggers rather than toggle-off.
+ c.keyboardMode=KeyboardMode::hold;
+ run({{0,0x91,60,100},{1,0x81,60,64},{2,0x91,60,100},{3,0x81,60,64},{4,0x92,61,100}});
+ check(playing(scheduler,60)==2&&scheduler.contacts()[2].held,"Hold incorrectly toggled off a repeated key");
+ run({{0,0xb0,64,0}});check(playing(scheduler,60)==0&&scheduler.contacts()[2].held,"Hold pedal release failed to retain the physical key");
+ run({{0,0x82,61,64}});c.keyboardMode=KeyboardMode::normal;run({});check(!scheduler.hasHeldNotes(),"Leaving Hold stranded a latch");
+ // A real pedal retains its owners when switching modes, and entering Toggle deduplicates per key.
+ run({{0,0xb0,64,127},{1,0x91,60,100},{2,0x81,60,64},{3,0x93,60,100}});
+ check(playing(scheduler,60)==2,"Normal mode changed its existing overlapping-owner behavior");
+ c.keyboardMode=KeyboardMode::toggle;run({});check(playing(scheduler,60)==1&&scheduler.contacts()[3].toggled,"Entering Toggle did not select one newest owner per key");
+ run({{0,0x83,60,64}});c.keyboardMode=KeyboardMode::normal;run({});check(playing(scheduler,60)==1,"Mode change ignored a real sustain pedal");
+ run({{0,0xb0,64,0}});check(!scheduler.hasHeldNotes(),"Real pedal release stranded a mode-change owner");
+ c.keyboardMode=KeyboardMode::toggle;run({{0,0x91,60,100},{1,0x81,60,64},{2,0x92,61,100},{3,0x82,61,64}});
+ run({{0,0xb1,120,0}});check(playing(scheduler,60)==0&&playing(scheduler,61)==1,"Member all-sound-off leaked between toggle keys");
+ run({{0,0xb0,123,0}});check(!scheduler.hasHeldNotes(),"Panic left toggled keys running");
+ // The new press's Strike is used when Strike selects the zone.
+ c.keys[60].zoneSource=0;run({{0,0x91,60,10},{1,0x81,60,64},{2,0x92,60,127}});
+ check(playing(scheduler,60)==1&&scheduler.contacts()[2].zone==2,"Strike-based zone replacement used the old velocity");
+ c.sustainCC=66;run({});check(scheduler.contacts()[2].held,"Pedal reassignment stopped a physical toggle");
+ run({{0,0x82,60,64},{1,0xb0,64,0}});check(playing(scheduler,60)==1,"Unassigned CC64 cleared a reassigned toggle pedal");
+ run({{0,0xb0,66,0}});check(!scheduler.hasHeldNotes(),"Reassigned pedal failed to clear Toggle");
+ scheduler.reset();check(!scheduler.hasHeldNotes(),"Reset retained keyboard mode contacts");
+}
+std::vector<std::tuple<int,int,int,uint64_t,int>> keyboardModeRender(KeyboardMode mode,int block){
+ auto c=fixture();c.keyboardMode=mode;c.launchGrid=0;c.switchGrid=.25;
+ Scheduler scheduler;Capture capture;std::vector<std::tuple<int,int,int,uint64_t,int>> result;
+ const Midi input[]={{0,0x91,60,100},{0,0x92,61,100},{100,0x81,60,64},
+  {20000,0x93,60,100},{20001,0x83,60,64},{24000,0xb3,74,127},{24001,0x93,60,100},{24100,0x83,60,64},
+  {30000,0xb4,74,64},{30001,0x94,60,100},{30100,0x84,60,64},{32000,0xb0,64,0},
+  {40000,0x82,61,64},{41000,0xb0,64,0},{45000,0xb0,123,0}};
+ size_t index=0;
+ for(int at=0;at<48000;at+=block){const int n=std::min(block,48000-at);std::vector<Midi> midi;
+  while(index<std::size(input)&&input[index].offset<at+n){auto m=input[index++];m.offset-=at;midi.push_back(m);}
+  capture.events.clear();scheduler.process(c,{at/24000.,120,48000,true},n,midi.data(),(int)midi.size(),Capture::take,&capture);
+  for(const auto&e:capture.events)result.emplace_back(at+e.offset,e.type,e.key,e.owner,e.drumNote);
+ }
+ check(!scheduler.hasHeldNotes(),"Keyboard mode render retained notes");return result;
+}
 void reconfigureTests(){
  auto original=fixture();original.launchGrid=0;original.switchGrid=1;
  original.clips[0].notes={{0,1.25,36,1}};prepareClip(original.clips[0]);
@@ -133,6 +210,8 @@ void intentTests(){
 }
 int main() {try {
  sustainTests();
+ keyboardModeTests();
+ for(auto mode:{KeyboardMode::hold,KeyboardMode::toggle}){const auto events=keyboardModeRender(mode,64);for(int block:{1,257,2048})check(keyboardModeRender(mode,block)==events,"Hold/Toggle depends on host buffer size");}
  intentTests();
  reconfigureTests();
  check(render(64)==render(257),"Timing depends on host buffer size");
