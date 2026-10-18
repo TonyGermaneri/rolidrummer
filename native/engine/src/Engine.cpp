@@ -2010,12 +2010,10 @@ void Engine::prepare (double sampleRate, int maxBlockSize)
     {
         r.inL.assign (size, 0); r.inR.assign (size, 0);
         if (! r.conv) r.conv = std::make_unique<juce::dsp::Convolution> (juce::dsp::Convolution::NonUniform { 1024 });
-        r.conv->prepare (spec);
     }
     for (auto& k : m.loadedKeys) k = 0;
     for (auto& r : m.reverbs) r.key.store (0);
     if (! m.masterReverb) m.masterReverb = std::make_unique<juce::dsp::Convolution> (juce::dsp::Convolution::NonUniform { 1024 });
-    m.masterReverb->prepare (spec);
     m.masterReverbKey = 0;
     for (auto& f : m.masterFilter) f.reset();
     m.masterFilterC={};m.masterFilterTick=0;m.masterControls={0,0,0,1,(.7f-.1f)/19.9f};
@@ -2042,6 +2040,14 @@ void Engine::prepare (double sampleRate, int maxBlockSize)
         delete pending;
     }
     setPerformance (current);
+
+    // JUCE completes queued IR loading in prepare(). Load the initial/restored
+    // performance first so the first audio block uses its actual reverbs,
+    // including when an offline host outruns the background convolution worker.
+    // Later live performance changes retain their asynchronous, click-free load.
+    for (auto& r : m.reverbs)
+        r.conv->prepare (spec);
+    m.masterReverb->prepare (spec);
 }
 
 void Engine::preparePerformance (const PerformancePtr& next)

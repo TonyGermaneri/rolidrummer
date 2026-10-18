@@ -54,7 +54,37 @@ Samples mapped(const std::string&name,float value,bool route,int source=3){
  else if(index==-2)run.sound->s.reverse=value>=.5f;else set(run.sound->s,index,value);
  run.ready();run.engine.drumHit(run.sound,1,1,.71f,{.6f,.5f,.4f,.8f,.2f});return run.render(7000);
 }
-int main(){try{
+void checkMasterEffects(){
+ // Bus mapping is independent of voices and equivalent to the master knob.
+ {
+  auto busRender=[](int target,bool mapped,int source=0){Run run;auto& fx=run.performance->fx;const float x=.65f;
+   if(mapped)fx.sources[(size_t)target]=source;
+   else {if(target==0)fx.reverbMix=x;if(target==1)fx.delayMix=x;if(target==2)fx.chorusMix=x;if(target==3)fx.cutoff=20*std::pow(1000.f,x);if(target==4)fx.resonance=.1f+19.9f*x;}
+   if(target==4)fx.cutoff=700;
+   run.ready();if(mapped)run.engine.drumGlobal(source,x);
+   run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,1,0});return run.render(24000);
+  };
+  for(int target=0;target<5;++target){auto knob=busRender(target,false);for(int source=0;source<5;++source)check(difference(knob,busRender(target,true,source))<1e-5,"Master surface differs from matching knob: target="+std::to_string(target)+", source="+std::to_string(source));}
+  Run dry;dry.ready();dry.engine.drumHit(dry.sound,1,1,1,{1,.5f,0,1,0});const auto original=dry.render(24000);
+  for(int target:{1,2,3})check(difference(original,busRender(target,true))>1e-4,"Master effect did not alter the mixed audio");
+  // No wall-clock sleep: prepare must make the initial IR available even when
+  // an offline host renders faster than JUCE's background convolution worker.
+  for(int block:{64,257})for(bool restored:{false,true}){
+   Run tails;tails.performance->fx.sources[0]=4;
+   if(restored){tails.performance->fx.reverbSize=.8f;tails.engine.setPerformance(tails.performance);}
+   tails.ready();
+   if(restored){tails.engine.prepare(96000,257);float scratch=0;tails.engine.process(&scratch,&scratch,0,nullptr,0);}
+   tails.engine.drumGlobal(4,.7f);tails.engine.drumHit(tails.sound,1,1,1,{1,.5f,0,1,0});
+   tails.render(24000,block);tails.engine.drumRelease(1,{1,.5f,0,1,0},true);tails.render(12000,block);
+   const double tailEnergy=energy(tails.render(24000,block));
+   check(tailEnergy>1e-5,"Master reverb binding has no audible tail: block="+std::to_string(block)+", restored="+std::to_string(restored)+", energy="+std::to_string(tailEnergy));
+   tails.engine.drumPanic();check(energy(tails.render(24000,block))<1e-9,"Panic left master effect tails");
+  }
+ }
+}
+int main(int argc,char** argv){try{
+ if(argc==2&&std::string(argv[1])=="--master-effects"){checkMasterEffects();std::cout<<"master effects passed\n";return 0;}
+ check(argc==1,"Usage: drummer-expression [--master-effects]");
  const std::pair<const char*,float> controls[]={
   {"delayTime",.07f},{"delayFeedback",.6f},{"delayMix",.4f},{"reverbSize",.6f},{"reverbDecay",1.3f},{"reverbMix",.5f},
   {"volume",.27f},{"pan",-.73f},{"pitch",7},{"fine",42},{"speed",1.7f},{"reverse",1},
@@ -180,21 +210,7 @@ int main(){try{
   double stale=0;for(int block=0;block<160;++block){fx.begin();l.fill(0);r.fill(0);fx.process(l.data(),r.data(),32);for(int i=0;i<32;++i)stale+=std::abs(l[size_t(i)])+std::abs(r[size_t(i)]);}
   check(stale==0,"Reused effect storage leaked the previous contact's samples");
  }
- // Bus mapping is independent of voices and equivalent to the master knob.
- {
-  auto busRender=[](int target,bool mapped,int source=0){Run run;auto& fx=run.performance->fx;const float x=.65f;
-   if(mapped)fx.sources[(size_t)target]=source;
-   else {if(target==0)fx.reverbMix=x;if(target==1)fx.delayMix=x;if(target==2)fx.chorusMix=x;if(target==3)fx.cutoff=20*std::pow(1000.f,x);if(target==4)fx.resonance=.1f+19.9f*x;}
-   if(target==4)fx.cutoff=700;
-   run.ready();if(mapped)run.engine.drumGlobal(source,x);
-   run.engine.drumHit(run.sound,1,1,1,{1,.5f,0,1,0});return run.render(24000);
-  };
-  for(int target=1;target<5;++target){auto knob=busRender(target,false);for(int source=0;source<5;++source)check(difference(knob,busRender(target,true,source))<1e-5,"Master surface differs from matching knob");}
-  Run dry;dry.ready();dry.engine.drumHit(dry.sound,1,1,1,{1,.5f,0,1,0});const auto original=dry.render(24000);
-  for(int target:{1,2,3})check(difference(original,busRender(target,true))>1e-4,"Master effect did not alter the mixed audio");
-  Run tails;tails.performance->fx.sources[0]=4;tails.ready();tails.engine.drumGlobal(4,.7f);tails.engine.drumHit(tails.sound,1,1,1,{1,.5f,0,1,0});tails.render(24000);tails.engine.drumRelease(1,{1,.5f,0,1,0},true);tails.render(12000);check(energy(tails.render(24000))>1e-5,"Master reverb binding has no audible tail");
-  tails.engine.drumPanic();check(energy(tails.render(24000))<1e-9,"Panic left master effect tails");
- }
+ checkMasterEffects();
  // Offline bounces can run without a message-thread timer. Repeated notes
  // using the current immutable kit must not consume retirement capacity.
  Run offline;offline.ready();std::array<float,128> offlineLeft{},offlineRight{};
