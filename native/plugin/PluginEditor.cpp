@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 #include "PluginPaths.h"
 #include <drummer/Assets.h>
+#include <drummer/Json.h>
 #include <drummer/NeuralIndex.h>
 #include <drummer/PatchResolver.h>
 #include <drummer/PatternFamilies.h>
@@ -102,6 +103,16 @@ void DrummerEditor::request(const juce::Array<juce::var>&args,Complete complete)
    else if(method=="libraryFamilyDecision"){if(!p->library)throw std::runtime_error("Pattern library is unavailable");result=answer(p->library->families->decideSuggestion(payload));p->library->refreshFamilies();}
    else if(method=="libraryPattern"){if(!p->library)throw std::runtime_error("Pattern library is unavailable");result=answer(p->library->catalog.pattern(payload.toString()));}
    else if(method=="libraryErrors"){if(!p->library)throw std::runtime_error("Pattern library is unavailable");result=answer(p->library->catalog.errors(payload.getProperty("runId",{}).toString(),(int)payload.getProperty("offset",0),(int)payload.getProperty("limit",100)));}
+   else if(method=="systemStatus"){
+    const auto directory=drummer::dataDirectory();
+    auto bytes=[](const juce::File& file){return file.getSize()+file.getSiblingFile(file.getFileName()+"-wal").getSize()+file.getSiblingFile(file.getFileName()+"-shm").getSize();};
+    juce::Array<juce::var> databases;
+    for(const auto& name:{"shared.sqlite","library.sqlite"}){const auto file=directory.getChildFile(name);databases.add(drummer::json::object({{"name",name},{"path",file.getFullPathName()},{"bytes",(juce::int64)bytes(file)}}));}
+    const auto sounds=directory.getChildFile("assets").findChildFiles(juce::File::findFiles,false);
+    juce::int64 soundBytes=0;for(const auto& file:sounds)soundBytes+=file.getSize();
+    result=answer(drummer::json::object({{"directory",directory.getFullPathName()},{"databases",databases},{"sounds",(int)sounds.size()},{"soundBytes",soundBytes},
+     {"shared",p->shared?p->shared->statistics():juce::var()},{"patterns",p->library?p->library->catalog.status().getProperty("patterns",0):juce::var(0)}}));
+   }
    else if(method=="sharedSnapshot")result=p->shared?answer(p->shared->snapshot((juce::int64)payload)):failure("Shared settings unavailable");
    else if(method=="lease")result=p->shared?answer(p->shared->lease(payload.getProperty("resource",{}).toString(),payload.getProperty("owner",{}).toString(),(bool)payload.getProperty("release",false))):failure("Shared settings unavailable");
    else if(method=="sharedCommit")result=p->shared?answer(p->shared->commit(payload)):failure("Shared settings unavailable");

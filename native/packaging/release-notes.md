@@ -1,25 +1,22 @@
-# Roli Drummer 0.2.2
+# Roli Drummer 0.3.0
 
-macOS release packaging now follows SSB's stable naming and direct publication of notarized archives. The AU download is **RoliDrummer.component-v0.2.2.zip**, containing **RoliDrummer.component**. The bundle and archive use the same basename, without space-to-dot substitutions. VST3 and standalone downloads use the same convention.
+The pattern matcher now opens in **Auto** mode: enter a musical description, then play. A seed input and die button explore repeatable variations without choosing roles, zones or search settings.
 
-CI publishes those original archives byte for byte and checks clean extraction, code signatures and stapled notarization tickets. The instrument's display name, AU component codes, bundle identifier, patches and sound engine are unchanged.
+- Auto always uses semantic similarity and binds sparse, steady and fill regions across the keyboard. The seed selects original patterns or a kit-wide budget of one to four generated tracks, subject to compatible source material.
+- Seed changes affect original selection and gesture navigation as well as generation. Rapid changes keep the latest result; rerolls replace the previous Auto pool instead of accumulating abandoned patterns.
+- The **Save** disk button creates an independent named patch with its actual pattern notes, including generated notes. Existing saved patches are retained, and recall does not run a new search.
+- Turn Auto off to reveal manual semantic/description search, role and zone selection, phrase length and generation controls.
+- A new **Settings** tab follows Patches. Pattern imports, worker status, family maintenance, MIDI-file browsing, sound management, playback and bus options, MIDI mappings, appearance, database statistics and factory reset are collected there.
+- Matcher and Settings use compact, flat controls. The manual template-zone editor is hidden while Auto matching is active.
 
-Every keyboard mode retains one active pattern zone per key:
+Existing per-key Normal, Hold and Toggle behavior, drum-note filtering and the SSB 0.6.2 sound engine are retained. Older patches recall their stored notes.
 
-- **Normal** and **Hold** replace that key's previous owner on each new press, including when the Seaboard assigns a different MPE channel. Repeated presses retrigger the part; they do not toggle it off.
-- **Toggle** retains its existing rules: the same zone stops the key, while a different zone replaces it.
-- Replaced fingers cannot change the active zone, release its new owner or restart through a patch edit. Other keys, pedal behavior, musical quantization and drum-note filters retain their existing rules.
+Downloads contain universal Apple Silicon and Intel AU, VST3 and standalone builds. The AU archive is **RoliDrummer.component-v0.3.0.zip**, containing the **RoliDrummer.component** bundle. The release publishes the original notarized archives and verifies clean extraction, package recognition, signatures and stapled tickets.
 
-This patch retains Hold/Toggle selection recall, purple toggle indicators, neural library matching and the SSB 0.6.2 sound engine.
+Neural indexing and search require macOS 13.4 or later. Your personal MIDI library is not included. A portable **.rolidrummer** export transfers a prepared patch with its patterns, mappings and sounds.
 
-All three builds support Apple Silicon and Intel. Neural indexing/search requires macOS 13.4 or later because of the bundled inference runtime.
+## Validation
 
-Your personal MIDI library is not included in these downloads. Use a portable **.rolidrummer** export to transfer a prepared patch with its patterns, mappings and sounds, or import the library on the other Mac.
+The implementation passed 133 editor tests and all 17 native suites, with additional scheduler coverage confirming that original-only seed changes reach gesture-selected playback. Native UI checks covered search, reroll, manual controls, Settings, independent patch saving and restart/recall using a private catalog.
 
-## Validation and limits
-
-All 17 native suites, 121 editor tests and universal bundle checks pass. Hold/Toggle scheduler, allocation-guard and processor checks also pass under x86_64. Apple auval and VST3 pluginval strictness 5 pass. Hardware feel and musical listening remain dependent on the controller, host and material.
-
-The instrument supports up to 64 voices. Extreme CLOUD settings with 20 grains per side across all 64 voices exceed real time at 96 kHz on the measured development machine; reduce density/polyphony or use a lower sample rate for that workload. See IMPLEMENTATION.md in the repository for measured operating limits.
-
-Version-tag CI requires Developer ID signing and Apple notarization before publication. **BUILD.txt** records the release commit and signing/notarization status; **SHA256SUMS** contains archive checksums.
+Release CI additionally runs Apple auval, VST3 pluginval at strictness 5, universal bundle checks, Developer ID signing and Apple notarization before publication. **BUILD.txt** records the release commit and signing/notarization status; **SHA256SUMS** contains archive checksums.

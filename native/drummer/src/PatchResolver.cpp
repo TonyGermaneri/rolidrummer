@@ -72,8 +72,10 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
     if ((int) get(input, "version") != 1 || !get(input, "keys").isArray()) throw std::runtime_error("Resolve requires a supported instrument patch");
     const auto query = get(options, "query").toString().trim().substring(0, 256);
     if (query.isEmpty()) throw std::runtime_error("Enter a musical patch name to resolve");
-    const int phraseBars=std::clamp((int)number(options,"phraseBars",8),1,64);
-    const int variationCount=std::clamp((int)number(options,"variationCount",0),0,4);
+    const bool autoMode=(bool)get(options,"autoMode",false);
+    const auto seed=get(options,"seed","0").toString().substring(0,128);
+    const int phraseBars=autoMode?8:std::clamp((int)number(options,"phraseBars",8),1,64);
+    const int variationCount=autoMode?(int)(static_cast<juce::uint32>(hash("auto-generation:"+seed).substring(0,8).getHexValue32())%5):std::clamp((int)number(options,"variationCount",0),0,4);
     PatternFamilies families(library.file());
     juce::var found,indexId,familySelection;
     int numerator=0,denominator=0,selectedFeel=0;double threshold=0;bool familyBound=false;
@@ -138,7 +140,7 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
     std::map<std::set<int>,std::map<juce::String,juce::var>> partPools;
     if(familyBound){
         const double begin=juce::Time::getMillisecondCounterHiRes();
-        for(const auto& key:*get(input,"keys").getArray())if(!(bool)get(key,"neuralLock",false)){const auto mask=PartQuery::mask(get(key,"parts"));if(!mask.empty())partPools.try_emplace(mask);}
+        for(const auto& key:*get(input,"keys").getArray())if(autoMode||!(bool)get(key,"neuralLock",false)){const auto mask=PartQuery::mask(get(key,"parts"));if(!mask.empty())partPools.try_emplace(mask);}
         if(!partPools.empty()){
             juce::Array<juce::var> masks;for(const auto& [parts,unused]:partPools){juce::Array<juce::var> notes;for(int note:parts)notes.add(note);masks.add(notes);}
             const auto selection=families.selection(index,object({{"query",query},{"indexId",indexId},{"partMasks",masks},{"numerator",numerator},{"denominator",denominator},{"feel",selectedFeel?"triplet":"straight"},{"phraseBars",phraseBars},{"familyId",get(familySelection,"familyId")},{"familyBuildId",get(familySelection,"familyBuildId")},{"cpu",get(options,"cpu",false)}}),&familyContext);
@@ -180,8 +182,14 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
         return id;
     };
     int changed = 0,generatedCount=0;
-    for (auto& key : *keys.getArray()) {
-        if ((bool) get(key, "neuralLock", false)) continue;
+    std::vector<juce::var> keyOrder(keys.getArray()->begin(),keys.getArray()->end());
+    if(autoMode)std::sort(keyOrder.begin(),keyOrder.end(),[&](const juce::var& a,const juce::var& b){
+        const auto left=hash(seed+":generation-key:"+get(a,"note").toString()),right=hash(seed+":generation-key:"+get(b,"note").toString());
+        return left!=right?left<right:(int)get(a,"note")<(int)get(b,"note");
+    });
+    for (auto& key : keyOrder) {
+        if (!autoMode && (bool) get(key, "neuralLock", false)) continue;
+        if(autoMode)set(key,"neuralLock",false);
         const auto parts=PartQuery::mask(get(key,"parts"));
         if (parts.empty()) continue;
         std::vector<Candidate> steady, fill;
@@ -220,35 +228,55 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
             GroupSelection result;
             auto order=[&](const Candidate& a,const Candidate& b){const double left=quantize(space.project(rhythm(a.part))[1],1e-9),right=quantize(space.project(rhythm(b.part))[1],1e-9);return left!=right?left<right:get(a.row,"patternId").toString()<get(b.row,"patternId").toString();};
             std::sort(choices.begin(),choices.end(),order);
+            juce::String seededPrimary,generatedPrimary;
+            if(autoMode){
+                // Rank inside each musical region so an original-only seed
+                // also changes the performance without mixing region roles.
+                const auto context=seed+":"+get(key,"note").toString()+":"+region+":";
+                std::sort(choices.begin(),choices.end(),[&](const Candidate& a,const Candidate& b){
+                    const auto left=get(a.row,"patternId").toString(),right=get(b.row,"patternId").toString();
+                    const auto lh=hash(context+left),rh=hash(context+right);
+                    return lh!=rh?lh<rh:left<right;
+                });
+                if(!choices.empty())seededPrimary=get(choices.front().row,"patternId").toString();
+            }
             std::vector<Candidate> selected;std::set<juce::String> ids;
-            const int originalBudget=maxCandidates-variationCount;
+            // Auto's 1–4 generated tracks are a kit-wide budget. Seeded key
+            // order distributes that budget; manual mode remains per region.
+            const int regionVariations=autoMode?std::max(0,variationCount-generatedCount):variationCount;
+            const int originalBudget=maxCandidates-regionVariations;
             auto add=[&](const Candidate& candidate,int budget){if(selected.size()>=(size_t)budget)return;const auto id=get(candidate.row,"patternId").toString();if(ids.contains(id)||bind(candidate).isEmpty())return;ids.insert(id);selected.push_back(candidate);};
-            add(preferred,originalBudget);
+            if(!autoMode)add(preferred,originalBudget);
             const auto count=std::min((size_t)originalBudget,choices.size());
-            for(size_t i=0;i<count;++i)add(choices[count==1?0:(size_t)std::llround(i*double(choices.size()-1)/(count-1))],originalBudget);
+            for(size_t i=0;i<count;++i)add(choices[autoMode?i:count==1?0:(size_t)std::llround(i*double(choices.size()-1)/(count-1))],originalBudget);
             for(const auto& candidate:choices)add(candidate,originalBudget);
             if(selected.empty())return result;
             std::sort(selected.begin(),selected.end(),order);
-            if(variationCount){
-                PatternVariationOptions settings;settings.count=variationCount;settings.numerator=numerator;settings.denominator=denominator;settings.phraseBars=phraseBars;settings.role=region;settings.feel=selectedFeel?"triplet":"straight";
-                settings.seed=get(options,"seed","0").toString()+":"+get(key,"note").toString()+":"+region;settings.parts.assign(parts.begin(),parts.end());
+            if(regionVariations){
+                PatternVariationOptions settings;settings.count=regionVariations;settings.numerator=numerator;settings.denominator=denominator;settings.phraseBars=phraseBars;settings.role=region;settings.feel=selectedFeel?"triplet":"straight";
+                settings.seed=seed+":"+get(key,"note").toString()+":"+region;settings.parts.assign(parts.begin(),parts.end());
                 std::vector<juce::var> parents;for(const auto& candidate:selected)parents.push_back(prepared.at(get(candidate.row,"patternId").toString()));
                 for(const auto& child:generatePatternVariations(parents,settings)){
                     const auto id=get(child,"id").toString();prepared.insert_or_assign(id,child);
                     auto row=object({{"patternId",id},{"features",get(child,"features")},{"generated",true}});
                     add({row,partFeatures(row,parts)},maxCandidates);++generatedCount;
+                    if(generatedPrimary.isEmpty()&&ids.contains(id))generatedPrimary=id;
                 }
                 // If conservative generation produced fewer children, keep the
                 // available original variations in the remaining bounded slots.
                 for(const auto& candidate:choices)add(candidate,maxCandidates);
                 std::sort(selected.begin(),selected.end(),order);
             }
-            const auto preferredId=get(preferred.row,"patternId").toString();
+            const auto preferredId=autoMode?(generatedPrimary.isNotEmpty()?generatedPrimary:seededPrimary):get(preferred.row,"patternId").toString();
             result.primary=ids.contains(preferredId)?preferredId:get(selected[selected.size()/2].row,"patternId").toString();
             double low=selected.front().part.density,high=low;for(const auto& candidate:selected){low=std::min(low,candidate.part.density);high=std::max(high,candidate.part.density);}
+            // A small library may fit entirely inside the candidate budget.
+            // Rotate its variation axis too, so rerolls still change gesture
+            // selection instead of changing only a displayed primary clip.
+            const size_t rotation=autoMode?static_cast<juce::uint32>(hash(seed+":"+get(key,"note").toString()+":"+region+":navigation").substring(0,8).getHexValue32())%selected.size():0;
             for(size_t i=0;i<selected.size();++i){const auto& candidate=selected[i];const auto id=get(candidate.row,"patternId").toString();
                 const double activity=high>low?(candidate.part.density-low)/(high-low):.5;
-                result.candidates.add(object({{"clipId",id},{"position",juce::Array<juce::var>{quantize(activity),quantize(candidate.part.accents),quantize(selected.size()>1?i/double(selected.size()-1):.5),quantize(candidate.part.velocity)}},{"libraryBinding",get(candidate.row,"id")},{"generated",get(candidate.row,"generated",false)}}));
+                result.candidates.add(object({{"clipId",id},{"position",juce::Array<juce::var>{quantize(activity),quantize(candidate.part.accents),quantize(selected.size()>1?((i+rotation)%selected.size())/double(selected.size()-1):.5),quantize(candidate.part.velocity)}},{"libraryBinding",get(candidate.row,"id")},{"generated",get(candidate.row,"generated",false)}}));
                 if(id==result.primary)result.density=candidate.part.density;
             }
             return result;
@@ -282,11 +310,15 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
     if (!changed) throw std::runtime_error("No unlocked keys have drum parts covered by this query");
     const double documentStart=juce::Time::getMillisecondCounterHiRes();
     measured.selectionMilliseconds=documentStart-started-measured.intentMilliseconds-measured.partCandidateMilliseconds-measured.clipLoadMilliseconds;
-    // Retain edited/unbound clips as a patch library; replace an equal stable
-    // ID with its canonical selected notes and add only the prepared subset.
+    // Auto owns its resolved pool. Replace that pool on reroll while retaining
+    // unrelated patch clips and anything still used by template/manual zones.
+    std::set<juce::String> previousPool,referenced;
+    if(autoMode){const auto owned=get(get(input,"neural"),"managedClipIds");if(auto* ids=owned.getArray())for(const auto& id:*ids)previousPool.insert(id.toString());}
+    auto retainZones=[&](const juce::var& zones){if(auto* list=zones.getArray())for(const auto& zone:*list){referenced.insert(get(zone,"clipId").toString());const auto candidates=get(zone,"candidates");if(auto* choices=candidates.getArray())for(const auto& choice:*choices)referenced.insert(get(choice,"clipId").toString());}};
+    retainZones(get(document,"templateZones"));for(const auto& key:*keys.getArray())retainZones(get(key,"zones"));
     juce::Array<juce::var> clips;
     auto existing = get(document, "clips");
-    if (auto* list = existing.getArray()) for (const auto& clip : *list) if (!prepared.contains(get(clip, "id").toString())) clips.add(clip);
+    if (auto* list = existing.getArray()) for (const auto& clip : *list){const auto id=get(clip,"id").toString();if(!prepared.contains(id)&&(!previousPool.contains(id)||referenced.contains(id)))clips.add(clip);}
     for (const auto& [id, clip] : prepared){auto stored=clip.clone();set(stored,"features",canonicalMetrics(get(stored,"features")));clips.add(stored);}
     generatedCount=0;for(const auto& [id,clip]:prepared)if(get(clip,"generation").isObject())++generatedCount;
     set(document, "clips", clips); set(document, "name", query);
@@ -295,9 +327,11 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
     set(document, "neural", object({{"version", 1}, {"patchId", resolvedId}, {"familyId",familyId},{"familyPolicyVersion",familyPolicyVersion},{"query", query}, {"indexId", indexId},
         {"libraryRevision", get(found, "revision")}, {"modelVersion", get(found, "modelVersion")}, {"preprocessingVersion", semanticDescriptionVersion},
         {"queryVersion", musicalQueryVersion}, {"interpretedQuery", get(found, "interpretedQuery")},
-        {"featureVersion", patternFeatureVersion}, {"resolverVersion", patchResolverVersion}, {"seed", get(options, "seed", "0")},
+        {"featureVersion", patternFeatureVersion}, {"resolverVersion", patchResolverVersion}, {"seed", seed},
         {"numerator", numerator}, {"denominator", denominator}, {"feel", selectedFeel ? "triplet" : "straight"}, {"keys", resolved}, {"warnings", warnings}}));
     auto resolution=get(document,"neural");set(resolution,"phraseBars",phraseBars);
+    set(resolution,"autoMode",autoMode);
+    juce::Array<juce::var> managed;for(const auto& [id,clip]:prepared)managed.add(id);set(resolution,"managedClipIds",managed);
     set(resolution,"variationCount",variationCount);set(resolution,"generationVersion",patternVariationVersion);set(resolution,"generatedCount",generatedCount);
     set(resolution,"numericPrecision",metadataPrecision);
     if(familyBound){set(resolution,"familyBuildId",get(familySelection,"familyBuildId"));set(resolution,"familyRevision",get(familySelection,"familyRevision"));set(resolution,"familyPolicyVersion",get(familySelection,"familyPolicyVersion"));}

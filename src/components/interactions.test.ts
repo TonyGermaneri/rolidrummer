@@ -16,6 +16,7 @@ vi.mock('./Knob.vue', async () => {
 })
 import ZoneEditor from './ZoneEditor.vue'
 import Seaboard from './Seaboard.vue'
+import MidiSettings from './MidiSettings.vue'
 import MidiImport from './MidiImport.vue'
 import SoundPanel from './SoundPanel.vue'
 import Waveform from './Waveform.vue'
@@ -97,10 +98,12 @@ describe('Seaboard component interaction contracts', () => {
   it('offers direct pedal reassignment and pedal learn in the controller panel', async () => {
     const root=await render(Seaboard,{base:36})
     await event(find(root,n=>n.props['aria-label']==='Global MIDI bindings'),'click',{})
-    const selector=find(root,n=>n.props['aria-label']==='Sustain pedal CC')
+    expect(backend.state.tab).toBe('Settings');expect(backend.state.settingsSection).toBe('midi')
+    const settings=await render(MidiSettings)
+    const selector=find(settings,n=>n.props['aria-label']==='Sustain pedal CC')
     selector.props['onUpdate:modelValue'](66);await settle()
     expect(backend.state.patch.sustainCC).toBe(66)
-    const learn=find(root,n=>n.tag==='button'&&n.text==='Learn pedal')
+    const learn=find(settings,n=>n.tag==='button'&&n.text==='Learn pedal')
     await event(learn,'click',{});expect(backend.state.learn).toBe(5)
   })
 

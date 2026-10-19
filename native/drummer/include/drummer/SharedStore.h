@@ -10,6 +10,7 @@ public:
  explicit SharedStore(const juce::File&);
  ~SharedStore();
  juce::var snapshot(int64_t after=0);
+ juce::var statistics();
  bool lease(const juce::String& resource,const juce::String& owner,bool release=false);
  juce::var commit(const juce::var& operations);
 private:

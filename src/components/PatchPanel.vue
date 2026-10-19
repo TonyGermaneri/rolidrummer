@@ -3,9 +3,8 @@ import {computed} from 'vue'
 import {state,shared} from '../store'
 import type {Patch} from '../model'
 import AssetBrowser from './AssetBrowser.vue'
-import Knob from './Knob.vue'
 const props=defineProps<{choices:{id:string;name:string;value:Patch}[];busy?:boolean}>()
-const emit=defineEmits<{load:[id:string];save:[];copy:[];open:[];export:[];factory:[]}>()
+const emit=defineEmits<{load:[id:string];save:[];copy:[];open:[];export:[]}>()
 const rows=computed(()=>props.choices.map(p=>({id:p.id,path:p.id,name:p.name,folder:false,size:0,keyCount:p.value.keys.length,patternCount:p.value.clips.length})))
 const currentId=computed(()=>props.choices.find(p=>state.patch.id?p.value.id===state.patch.id:p.name===state.patch.name)?.id)
 const programLabel=computed(()=>{
@@ -14,7 +13,7 @@ const programLabel=computed(()=>{
  const slot=slots?.indexOf(state.patch.id??'')??-1
  return slot>=0?String(slot):currentId.value?'UNASSIGNED':'SAVE TO ASSIGN'
 })
-const grids=[{name:'IMMEDIATE',value:0},{name:'1/32',value:.125},{name:'1/16',value:.25},{name:'1/8',value:.5},{name:'1/4',value:1},{name:'BAR',value:4}]
+
 </script>
 <template><div class="patch-workspace">
  <aside class="patch-console ssb-chassis">
@@ -23,10 +22,7 @@ const grids=[{name:'IMMEDIATE',value:0},{name:'1/32',value:.125},{name:'1/16',va
    <button class="ssb-button patch-save" :disabled="busy||state.saving||!state.patch.name.trim()" @click="emit('save')">{{state.saving?'SAVING…':'SAVE PATCH'}}</button>
    <button class="ssb-button patch-save" :disabled="busy||state.saving||!state.patch.name.trim()" @click="emit('copy')">SAVE A COPY</button>
   </section>
-  <section class="ssb-module patch-playback"><h4>PLAYBACK</h4><div class="patch-performance-controls"><Knob v-model="state.patch.volume" label="KIT LEVEL" :max="1.5" :default=".8" :size="36" :format="v=>`${Math.round(v*100)}%`"/><Knob v-if="state.standalone" v-model="state.patch.bpm" label="BPM" :min="20" :max="400" :default="120" :size="36" :format="v=>v.toFixed(1)"/><div class="patch-quantize"><label>LAUNCH<select v-model.number="state.patch.launchGrid" class="ssb-enum" aria-label="Pattern launch quantization"><option v-for="g in grids" :key="g.value" :value="g.value">{{g.name}}</option></select></label><label>ZONE CHANGE<select v-model.number="state.patch.switchGrid" class="ssb-enum" aria-label="Zone change quantization"><option v-for="g in grids" :key="g.value" :value="g.value">{{g.name}}</option></select></label></div></div>
-   <button class="ssb-chip release-mode" :class="{on:state.patch.hardRelease}" :aria-pressed="state.patch.hardRelease" title="Click to choose whether voices ring out or stop when a key is released" @click="state.patch.hardRelease=!state.patch.hardRelease">RELEASE · {{state.patch.hardRelease?'STOP VOICES':'LET TAILS RING'}} ▸</button>
-  </section>
-  <section class="ssb-module patch-files"><h4>FILES</h4><button class="ssb-button" :disabled="busy" @click="emit('open')">OPEN PATCH…</button><button class="ssb-button" :disabled="busy" @click="emit('export')">EXPORT PORTABLE…</button><button class="ssb-button" :disabled="busy" @click="emit('factory')">LOAD FACTORY KIT</button><p>Portable patches include sounds, patterns, expression and bus settings.</p></section>
+  <section class="ssb-module patch-files"><h4>FILES</h4><button class="ssb-button" :disabled="busy" @click="emit('open')">OPEN PATCH…</button><button class="ssb-button" :disabled="busy" @click="emit('export')">EXPORT PORTABLE…</button><p>Portable patches include sounds, patterns, expression and bus settings.</p></section>
  </aside>
  <AssetBrowser :patches="rows" :current-id="currentId" :disabled="busy" @load-patch="emit('load',$event)"/>
 </div></template>

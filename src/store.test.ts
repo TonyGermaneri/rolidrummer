@@ -121,6 +121,26 @@ describe('editor document synchronization', () => {
     expect(store.shared['patch/Original name'].value.name).toBe('Renamed / instrument')
   })
 
+  it('saves a semantic search as an independent, named snapshot with generated notes',async()=>{
+    const store=await setup(),saved={...clone(factory()),id:'existing',name:'Heavy Rock'}
+    store.shared['patch/existing']={key:'patch/existing',value:clone(saved),revision:4}
+    store.state.patch=clone(saved)
+    const generated={...clone(saved.clips[0]),id:'generated-fill',generation:{version:1,seed:'812'}} as any
+    store.state.patch.clips.push(generated);store.state.patch.keys[0].zones[0].clipId=generated.id
+    vi.stubGlobal('crypto',{randomUUID:()=> '00000000-0000-4000-8000-000000000012'})
+    backend.request.mockImplementation(async(method,ops)=>{
+      if(method!=='sharedCommit')return []
+      const op=ops[0];return {ok:true,revision:5,fields:[{key:op.key,value:clone(op.value),revision:5}]}
+    })
+    expect(await store.saveSharedPatch(false,{newPatch:true,name:'Heavy Rock'})).toMatchObject({ok:true,name:'Heavy Rock 2'})
+    const field=store.shared['patch/patch-00000000-0000-4000-8000-000000000012']
+    expect(field.value.keys[0].zones[0].clipId).toBe('generated-fill')
+    expect(field.value.clips.at(-1)).toEqual(generated)
+    store.state.patch.clips.at(-1)!.notes[0]!.velocity=.1
+    expect(field.value.clips.at(-1).notes[0].velocity).not.toBe(.1)
+    expect(store.shared['patch/existing'].value).toEqual(saved)
+  })
+
   it('does not replace a host-recalled document when saving a copy finishes late',async()=>{
     const store=await setup();let finish!:(value:any)=>void
     vi.stubGlobal('crypto',{randomUUID:()=> '00000000-0000-4000-8000-000000000001'})

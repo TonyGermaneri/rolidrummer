@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {computed,onMounted,onBeforeUnmount,ref,watch} from 'vue'
 import {state,sendMidi,attempt} from '../store'
-import {colors,targets,targetLabel,newRoute} from '../model'
+import {colors} from '../model'
 import {htmlDrop} from '../drag'
 import {request} from '../native/bridge'
 import {fitSeaboard} from '../lib/seaboardLayout'
@@ -32,7 +32,7 @@ function keyLabel(name=''){return shortNames[name]??(name.length>5?name.slice(0,
 const fingerLocations=computed(()=>[...(state.telemetry.fingers??[])].sort((a,b)=>Number(!!b.sustained)-Number(!!a.sustained)).flatMap(f=>{const key=keyboard.value.find(k=>k.note===f.note);return key?[{...f,x:key.x+key.w*(.5+(f.glide-.5)*.7),y:top+3+(1-f.slide)*(key.h-6),radius:2.5+Math.max(.1,f.pressure)*3}]:[]}))
 const contacts=new Map<number,{note:number;channel:number;svg:SVGSVGElement;h:number}>()
 const keyboardContacts=new Map<number,number>()
-const macro=ref([...state.telemetry.macros]),globalOpen=ref(false)
+const macro=ref([...state.telemetry.macros])
 const touching=new Set<number>()
 watch(()=>state.telemetry.macros,values=>{values.forEach((value,i)=>{if(!touching.has(i))macro.value[i]=value})})
 function zoneBottom(zones:{upper:number}[],i:number){return i?zones[i-1].upper:0}
@@ -49,8 +49,6 @@ function keyboardDown(e:KeyboardEvent,note:number){
 function keyboardUp(note:number){const channel=keyboardContacts.get(note);if(channel!==undefined){sendMidi([0x80|channel,note,64]);keyboardContacts.delete(note)}}
 function panic(){for(const contact of contacts.values())sendMidi([0x80|contact.channel,contact.note,64]);for(const [note,channel] of keyboardContacts)sendMidi([0x80|channel,note,64]);contacts.clear();keyboardContacts.clear();touching.clear()}
 watch(()=>props.base,panic)
-function route(i:number){return state.patch.globalRoutes.find(r=>r.source===i)?.target||''}
-function map(i:number,e:Event){const target=(e.target as HTMLSelectElement).value;const routes=state.patch.globalRoutes.filter(r=>r.source!==i);if(target)routes.push(newRoute(i,target));if(state.patch.keys.some(k=>k.routes.length+routes.length>16)){state.error='A key already uses all 16 mappings. Remove a key mapping before adding this global controller.';(e.target as HTMLSelectElement).value=route(i);return}state.patch.globalRoutes=routes}
 function cc(i:number,v:number){macro.value[i]=v;state.telemetry.macros[i]=v;void attempt(()=>request('parameter',{id:`macro${i}`,value:v}))}
 function padKey(e:KeyboardEvent){if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key))return;e.preventDefault();const step=e.shiftKey?.1:.01;if(e.key==='ArrowLeft')cc(3,Math.max(0,macro.value[3]-step));else if(e.key==='ArrowRight')cc(3,Math.min(1,macro.value[3]+step));else if(e.key==='ArrowUp')cc(4,Math.min(1,macro.value[4]+step));else if(e.key==='ArrowDown')cc(4,Math.max(0,macro.value[4]-step))}
 function xy(e:PointerEvent){touching.add(3);touching.add(4);const el=e.currentTarget as HTMLElement;el.setPointerCapture(e.pointerId);const rect=el.getBoundingClientRect();const move=(ev:PointerEvent)=>{cc(3,Math.max(0,Math.min(1,(ev.clientX-rect.left)/rect.width)));cc(4,Math.max(0,Math.min(1,1-(ev.clientY-rect.top)/rect.height)))};move(e);const up=()=>{touching.delete(3);touching.delete(4);el.removeEventListener('pointermove',move);el.removeEventListener('pointerup',up);el.removeEventListener('pointercancel',up)};el.addEventListener('pointermove',move);el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up)}
@@ -96,8 +94,7 @@ window.addEventListener('blur',panic);onBeforeUnmount(()=>{window.removeEventLis
 </svg>
 <div class="seaboard-faders"><input v-for="i in 3" :key="i" :value="macro[i-1]" type="range" min="0" max="1" step=".001" :aria-label="`Global controller ${i}`" @pointerdown="touching.add(i-1)" @pointerup="touching.delete(i-1)" @pointercancel="touching.delete(i-1)" @keydown="touching.add(i-1)" @keyup="touching.delete(i-1)" @blur="touching.delete(i-1)" @input="cc(i-1,Number(($event.target as HTMLInputElement).value))"/></div>
 <div class="seaboard-xy" role="group" tabindex="0" aria-label="Global XY pad. Use arrow keys to adjust." @keydown="padKey" @pointerdown="xy"><i :style="{left:`${macro[3]*100}%`,bottom:`${macro[4]*100}%`}"/></div>
-<button class="seaboard-bindings" aria-label="Global MIDI bindings" @click="globalOpen=!globalOpen">⚙</button>
-<div v-if="globalOpen" class="seaboard-mappings"><div class="section-label">GLOBAL CONTROLLERS<button @click="globalOpen=false">×</button></div><div class="sustain-binding"><label>Sustain pedal CC<select v-model.number="state.patch.sustainCC" aria-label="Sustain pedal CC"><option v-for="cc in Array.from({length:120},(_,i)=>i).filter(cc=>cc!==74)" :key="cc" :value="cc">{{cc}}</option></select></label><button @click="state.learn=state.learn===5?-1:5">{{state.learn===5?'Press pedal…':'Learn pedal'}}</button></div><p class="pedal-help">Hold parts after lifting your fingers. Release the pedal to stop them.</p><p class="pedal-help">The assignments below affect each sound. Bind the main mix using BUS FX in the header.</p><div v-for="(_,i) in macro" :key="i" class="global-binding"><span>{{['Fader 1','Fader 2','Fader 3','Pad X','Pad Y'][i]}}</span><button @click="state.learn=state.learn===i?-1:i">{{state.learn===i?'Move control…':`CC ${state.patch.globalCC[i]}`}}</button><select :value="route(i)" @change="map(i,$event)"><option value="">Unbound</option><option v-for="t in targets" :key="t[0]" :value="t[0]">{{targetLabel(t[0])}}</option></select></div></div>
+<button class="seaboard-bindings" aria-label="Global MIDI bindings" @click="state.settingsSection='midi';state.tab='Settings'">⚙</button>
 </div></div></div></template>
 <style scoped>
 .keyboard-performance{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;--key-toggle:#be86ef}.keyboard-modes{display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex:none;padding:0 5px 3px}.keyboard-modes>span{font:7px 'Orbitron',sans-serif;letter-spacing:.1em;color:var(--text-dim);margin-right:3px}.keyboard-modes button{font-size:8px;padding:3px 8px}.keyboard-modes button.active{background:var(--c-primary);border-color:var(--c-primary);color:var(--bg)}.keyboard-modes small{font-size:9px;margin-left:5px}.key-toggled{fill:var(--key-toggle);fill-opacity:.52;stroke:var(--key-toggle);stroke-width:1.2}.seaboard-key.toggled.held .key-selected{opacity:.12}.finger-indicators .toggled .finger-glow{fill:var(--key-toggle);opacity:.35}.finger-indicators .toggled .finger-dot{fill:var(--key-toggle);filter:drop-shadow(0 0 2px var(--key-toggle))}

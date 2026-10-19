@@ -4,7 +4,7 @@ import { request, native, onNative } from './native/bridge'
 export interface Finger {owner?:string;sustained?:boolean;toggled?:boolean;playing?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
 export interface Playhead {id:number;note:number;pos:number;dur:number;velocity:number;grains:boolean}
 export interface GrainMark {voice:number;when:number;pos:number;len:number;dur:number;pan:number;gain:number;reverse:boolean}
-export const state = reactive({ patch: factory(), selected: 48, tab: 'Key', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })
+export const state = reactive({ patch: factory(), selected: 48, tab: 'Key', settingsSection: 'libraries', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })
 let applying = false, lastSaved = '', lastCheckpoint = '', inFlight = '', generation = 0, nativeRevision = 0, loading = false, legacyIdentityName = ''
 let timer: ReturnType<typeof setTimeout> | undefined, draining: Promise<void> | undefined
 type Pending = { document: Patch; generation: number; activationGrid: number; preserveActivation: boolean }
@@ -154,17 +154,19 @@ export async function writeShared<T>(key:string,value:T,expected:number){
  return{ok:false,field:shared[key]}
 }
 export async function putShared(key:string,value:unknown){return(await writeShared(key,value,shared[key]?.revision??0)).ok}
-export async function saveSharedPatch(copy=false){
+export async function saveSharedPatch(copy=false,options:{newPatch?:boolean;name?:string}={}){
  if(!copy&&!state.patch.id){const before=state.patch;await refreshShared();if(state.patch!==before)throw Error('The patch changed while preparing its saved identity. Save the current patch again.')}
  const before=state.patch,document=clone(before),originalName=before.name
+ if(options.name?.trim())document.name=options.name.trim()
  const saved=Object.values(shared).filter(field=>field.key.startsWith('patch/')&&field.value)
  const matches=saved.filter(field=>field.value.name===document.name)
- const existing=copy?undefined:document.id&&document.id!=='builtin:factory'?saved.find(field=>field.value.id===document.id):matches.length===1?matches[0]:undefined
- document.id=existing?.value.id??(!copy&&document.id&&document.id!=='builtin:factory'?document.id:`patch-${crypto.randomUUID()}`)
+ const existing=copy||options.newPatch?undefined:document.id&&document.id!=='builtin:factory'?saved.find(field=>field.value.id===document.id):matches.length===1?matches[0]:undefined
+ document.id=existing?.value.id??(!copy&&!options.newPatch&&document.id&&document.id!=='builtin:factory'?document.id:`patch-${crypto.randomUUID()}`)
+ if(options.newPatch){const name=document.name;let suffix=2;while(saved.some(field=>field.value.name===document.name))document.name=`${name} ${suffix++}`}
  if(copy){const name=document.name;let suffix=1;do{document.name=`${name} copy${suffix>1?` ${suffix}`:''}`;++suffix}while(saved.some(field=>field.value.name===document.name))}
  const key=existing?.key??`patch/${document.id}`
  const result=await writeShared(key,document,shared[key]?.revision??0)
- if(result.ok&&state.patch===before){state.patch.id=result.field.value.id;if(copy&&state.patch.name===originalName)state.patch.name=document.name}
+ if(result.ok&&state.patch===before){state.patch.id=result.field.value.id;if((copy||options.newPatch)&&state.patch.name===originalName)state.patch.name=document.name}
  const slots=shared['midi/program-bank']?.value.slots as (string|null)[]|undefined
  return{ok:result.ok,program:result.ok?slots?.indexOf(result.field.value.id)??-1:-1,name:document.name}
 }

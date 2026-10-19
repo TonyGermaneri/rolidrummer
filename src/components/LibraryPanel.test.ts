@@ -1,27 +1,30 @@
 import {afterEach,beforeEach,expect,it,vi} from 'vitest'
 import {factory,clone} from '../model'
 import {event,find,mount,settle} from '../testing/componentHost'
-const fake=vi.hoisted(()=>({state:null as any,request:vi.fn(),status:null as any,row:null as any,clip:null as any,replace:vi.fn()}))
+const fake=vi.hoisted(()=>({state:null as any,request:vi.fn(),status:null as any,row:null as any,clip:null as any,replace:vi.fn(),save:vi.fn(),flush:vi.fn()}))
 vi.mock('../native/bridge',()=>({native:()=>true,request:fake.request}))
 vi.mock('../store',async()=>{
  const {reactive}=await import('vue')
  fake.state=reactive({patch:{},selected:48,error:'',telemetry:{preview:false}})
- return {state:fake.state,replace:fake.replace.mockImplementation(async(patch:any)=>{fake.state.patch=patch}),attempt:async(job:()=>Promise<unknown>)=>{try{return await job()}catch(e){fake.state.error=String(e)}}}
+ return {flushEdits:fake.flush,saveSharedPatch:fake.save,state:fake.state,replace:fake.replace.mockImplementation(async(patch:any)=>{fake.state.patch=patch}),attempt:async(job:()=>Promise<unknown>)=>{try{return await job()}catch(e){fake.state.error=String(e)}}}
 })
 vi.mock('./DataGrid.vue',async()=>{
  const {defineComponent,h}=await import('vue')
  return {default:defineComponent({props:['rows','columns','chosen'],setup:props=>()=>h('grid-contract',{rows:props.rows})})}
 })
 import LibraryPanel from './LibraryPanel.vue'
+import {matcher} from '../matcher'
 let cleanup:(()=>void)[]=[]
 beforeEach(()=>{
  vi.useFakeTimers();vi.stubGlobal('document',{activeElement:null});vi.stubGlobal('Document',class{});vi.stubGlobal('ShadowRoot',class{})
+ Object.assign(matcher,{autoMode:true,query:'',seed:'0',phraseBars:8,variationCount:0,source:''});fake.save.mockReset().mockResolvedValue({ok:true,name:'Heavy Rock'});fake.flush.mockReset().mockResolvedValue(undefined)
  fake.state.patch=factory();fake.state.selected=48;fake.state.error='';fake.state.telemetry.activationPending=false;fake.replace.mockClear()
  fake.row={id:'binding-1',patternId:'pattern-1',path:'Rock/Groove.mid',name:'Groove.mid',description:'hard rock groove',family:'hard rock',role:'groove',length:8,numerator:4,denominator:4,density:2,coverage:1,features:{notes:16}}
  fake.clip={...clone(factory().clips[0]),id:'pattern-1',name:'Groove.mid',path:'Rock/Groove.mid'}
  fake.status={catalog:{revision:1,patterns:1,sources:[]},progress:{state:'idle',running:false}}
  fake.request.mockReset().mockImplementation(async(method,payload)=>{
   if(method==='libraryStatus')return clone(fake.status)
+  if(method==='librarySearch')return {rows:[clone(fake.row)],indexId:'index-7',revision:1}
   if(method==='libraryBrowse')return {rows:[clone(fake.row)],offset:payload.offset,more:payload.offset===0,revision:1,patterns:1}
   if(method==='libraryPattern')return clone(fake.clip)
   if(method==='libraryImport'){fake.status.progress={state:'queued',running:true};return clone(fake.status.progress)}
@@ -32,7 +35,7 @@ beforeEach(()=>{
  })
 })
 afterEach(()=>{cleanup.forEach(fn=>fn());cleanup=[];vi.clearAllTimers();vi.useRealTimers();vi.unstubAllGlobals()})
-async function render(){const view=await mount(LibraryPanel);cleanup.push(view.unmount);return view}
+async function render(auto=false){const view=await mount(LibraryPanel);cleanup.push(view.unmount);if(!auto)await event(find(view.root,n=>n.props['aria-label']==='Auto mode'),'click');return view}
 
 it('assigns a cached catalog pattern through the real drop/import path without inspecting a filesystem path',async()=>{
  const {root}=await render(),grid=find(root,n=>n.tag==='grid-contract')
@@ -43,56 +46,6 @@ it('assigns a cached catalog pattern through the real drop/import path without i
  expect(fake.state.patch.keys[0].zones[0].clipId).toBe('pattern-1')
  grid.props.onCell('assign',grid.props.rows[0]);await settle()
  expect(fake.state.patch.clips.filter((c:any)=>c.id==='pattern-1')).toHaveLength(1)
-})
-
-it('starts archive imports and leaves their worker running when the browser unmounts',async()=>{
- const view=await render()
- await event(find(view.root,n=>n.tag==='button'&&n.textContent==='IMPORT ZIP…'),'click')
- expect(fake.request).toHaveBeenCalledWith('libraryImport',{path:'/desktop/drums.zip',mapping:{id:'auto',notes:{}}})
- expect(find(view.root,n=>n.tag==='button'&&n.textContent==='PAUSE IMPORT')).toBeTruthy()
- view.unmount();cleanup=[]
- expect(fake.request.mock.calls.some(c=>c[0]==='libraryCancel')).toBe(false)
-})
-
-it('resumes an interrupted source with its saved mapping and supports explicit pause',async()=>{
- const mapping={id:'custom',notes:{96:'timbaleHigh'}}
- fake.status.catalog.sources=[{id:'source',path:'/drums.zip',publishedRun:'',state:'paused',scanned:256,total:1000,mapping}]
- const {root}=await render()
- await event(find(root,n=>n.tag==='button'&&n.textContent==='Resume drums.zip'),'click')
- expect(fake.request).toHaveBeenCalledWith('libraryImport',{path:'/drums.zip',mapping})
- await event(find(root,n=>n.tag==='button'&&n.textContent==='PAUSE IMPORT'),'click')
- expect(fake.request).toHaveBeenCalledWith('libraryCancel')
-})
-
-it('resumes paused family analysis independently of the completed search index',async()=>{
- fake.status.neural={state:'complete',readyIndexId:'index-7',stale:false}
- fake.status.progress={state:'paused',stage:'family-features',completed:123,running:false}
- const {root}=await render()
- expect(root.textContent).toContain('Family analysis paused')
- await event(find(root,n=>n.tag==='button'&&n.textContent==='RESUME FAMILIES'),'click')
- expect(fake.request).toHaveBeenCalledWith('libraryFamilyRefresh')
-})
-
-it('shows family worker failures as actionable errors',async()=>{
- fake.status.progress={state:'failed',stage:'families',error:'Catalog disk is full',running:false}
- const {root}=await render()
- expect(root.textContent).toContain('Catalog disk is full')
-})
-
-it.each(['snapshot','search-metadata'])('resumes %s preparation while the previous complete index stays searchable',async(stage)=>{
- fake.status.neural={state:'complete',readyIndexId:'index-7',stale:false}
- fake.status.progress={state:'paused',stage,running:false}
- const {root}=await render()
- expect(root.textContent).toContain('Search preparation paused')
- await event(find(root,n=>n.tag==='button'&&n.textContent==='RESUME SEARCH'),'click')
- expect(fake.request).toHaveBeenCalledWith('libraryIndex')
-})
-
-it('offers background preparation for an unchanged complete index',async()=>{
- fake.status.neural={state:'complete',readyIndexId:'index-7',stale:false,preparationNeeded:true}
- const {root}=await render()
- await event(find(root,n=>n.tag==='button'&&n.textContent==='REFRESH SEARCH'),'click')
- expect(fake.request).toHaveBeenCalledWith('libraryIndex')
 })
 
 it('pages filtered results and ignores a late response after a newer search',async()=>{
@@ -141,9 +94,9 @@ it('searches a pinned semantic index and resolves its query into a self-containe
 it('shows a prepared refresh waiting for a musical boundary',async()=>{
  fake.state.telemetry.activationPending=true
  const {root}=await render()
- expect(find(root,n=>n.props.role==='status'&&n.textContent.includes('waiting for the next bar'))).toBeTruthy()
+ expect(find(root,n=>n.props.role==='status'&&n.textContent.includes('next bar'))).toBeTruthy()
  fake.state.telemetry.activationPending=false;await settle()
- expect(root.textContent).not.toContain('waiting for the next bar')
+ expect(root.textContent).not.toContain('next bar')
 })
 
 it('resolves optional generated variations with the chosen seed and phrase cycle',async()=>{
@@ -175,18 +128,91 @@ it('protects edits made while neural resolution is pending',async()=>{
  expect(fake.state.error).toContain('patch changed during resolution')
 })
 
-it('resolves a selected family with its structural constraints and editable display name',async()=>{
- fake.status.neural={state:'complete',readyIndexId:'index-7',readyRevision:1,stale:false}
- fake.status.families={revision:3,buildId:'build-1',policyVersion:4,state:'complete',stale:false,suggestions:0,families:[{id:'family-bossa',name:'My Bossa',query:'Bossa Nova',numerator:7,denominator:8,feel:'triplet',revision:3,members:3,ambiguous:0,threshold:.8}]}
+
+function ready(){fake.status.neural={state:'complete',readyIndexId:'index-7',readyRevision:1,stale:false}}
+function autoResults(){
  const original=fake.request.getMockImplementation()!
- fake.request.mockImplementation(async(method,payload)=>{
-  if(method==='libraryFamilyMembers')return {rows:[],offset:0,more:false}
-  if(method==='libraryResolve')return {...clone(payload.document),name:payload.query,neural:{version:1,query:payload.query,numerator:7,denominator:8,feel:'triplet',keys:[],warnings:[]}}
-  return original(method,payload)
- })
- const {root}=await render();await event(find(root,n=>n.tag==='details'&&n.props.class==='family-panel'),'toggle',{target:{open:true}})
- await event(find(root,n=>n.tag==='button'&&n.textContent==='RESOLVE FAMILY'),'click')
- expect(fake.request).toHaveBeenCalledWith('libraryResolve',expect.objectContaining({query:'Bossa Nova',indexId:'index-7',familyId:'family-bossa',numerator:7,denominator:8,feel:'triplet'}))
- expect(fake.state.patch.name).toBe('My Bossa')
- expect(fake.replace).toHaveBeenCalledWith(expect.objectContaining({name:'My Bossa'}),'bar')
+ fake.request.mockImplementation(async(method,payload)=>method==='libraryResolve'?resolved(payload):original(method,payload))
+}
+function resolved(payload:any){return {...clone(payload.document),name:payload.query,neural:{version:1,query:payload.query,seed:payload.seed,autoMode:payload.autoMode,numerator:4,denominator:4,feel:'straight',keys:[],warnings:[]}}}
+function input(root:any,label:string,value:string){find(root,n=>n.props['aria-label']===label).props['onUpdate:modelValue'](value)}
+
+it('defaults to Auto and resolves only semantic intent without exposing manual or maintenance controls',async()=>{
+ ready();autoResults()
+ const {root}=await render(true)
+ expect(find(root,n=>n.props['aria-label']==='Auto mode').props['aria-pressed']).toBe(true)
+ expect(root.textContent).not.toContain('Semantic similarity')
+ expect(root.textContent).not.toContain('All roles')
+ expect(root.textContent).not.toContain('IMPORT ZIP')
+ input(root,'Filter indexed patterns','Heavy Rock')
+ await vi.advanceTimersByTimeAsync(350);await settle()
+ expect(fake.request).toHaveBeenCalledWith('libraryResolve',expect.objectContaining({query:'Heavy Rock',seed:'0',autoMode:true,indexId:'index-7'}))
+ expect(fake.request.mock.calls.some(call=>['librarySearch','libraryBrowse'].includes(call[0]))).toBe(false)
+ expect(fake.state.patch.name).toBe('Heavy Rock')
+ await event(find(root,n=>n.props['aria-label']==='Auto mode'),'click')
+ expect(find(root,n=>n.props['aria-label']==='Assignment zone')).toBeTruthy()
+ expect(find(root,n=>n.props['aria-label']==='Generated variations per region')).toBeTruthy()
+})
+
+it('rerolls immediately and coalesces rapid seed changes to the latest audible result',async()=>{
+ ready();const original=fake.request.getMockImplementation()!,pending:{payload:any;finish:(p:any)=>void}[]=[]
+ fake.request.mockImplementation((method,payload)=>method==='libraryResolve'?new Promise(finish=>pending.push({payload:clone(payload),finish})):original(method,payload))
+ vi.stubGlobal('crypto',{getRandomValues:(values:Uint32Array)=>{values[0]=12345;return values}})
+ const {root}=await render(true)
+ input(root,'Filter indexed patterns','Heavy Rock');await event(find(root,n=>n.props['aria-label']==='Filter indexed patterns'),'keydown',{key:'Enter'})
+ expect(pending).toHaveLength(1)
+ await event(find(root,n=>n.props['aria-label']==='Reroll seed'),'click')
+ expect(matcher.seed).toBe('12345')
+ input(root,'Pattern variation seed','session-final');await vi.advanceTimersByTimeAsync(350)
+ pending[0]!.finish(resolved(pending[0]!.payload));await settle()
+ expect(fake.replace).not.toHaveBeenCalled();expect(pending).toHaveLength(2)
+ expect(pending[1]!.payload.seed).toBe('session-final')
+ pending[1]!.finish(resolved(pending[1]!.payload));await settle()
+ expect(fake.replace).toHaveBeenCalledTimes(1)
+ expect(fake.state.patch.neural.seed).toBe('session-final')
+})
+
+it('resolves a dirty search before saving an independent named patch',async()=>{
+ ready();autoResults();const {root}=await render(true)
+ input(root,'Filter indexed patterns','Heavy Rock');input(root,'Pattern variation seed','812')
+ await event(find(root,n=>n.props['aria-label']==='Save search as patch'),'click')
+ expect(fake.replace).toHaveBeenCalledWith(expect.objectContaining({neural:expect.objectContaining({query:'Heavy Rock',seed:'812',autoMode:true})}),'bar')
+ expect(fake.save).toHaveBeenCalledWith(false,{newPatch:true,name:'Heavy Rock'})
+ expect(fake.flush).toHaveBeenCalledTimes(2)
+ await vi.advanceTimersByTimeAsync(350)
+ expect(fake.request.mock.calls.filter(call=>call[0]==='libraryResolve')).toHaveLength(1)
+})
+
+it('restores saved Auto intent without rerunning or replacing its embedded notes',async()=>{
+ ready();fake.state.patch={...factory(),id:'saved-groove',name:'Saved groove',neural:{version:1,autoMode:true,query:'Heavy Rock',seed:'947',numerator:4,denominator:4,feel:'straight',keys:[],warnings:[]}}
+ const {root}=await render(true);await vi.advanceTimersByTimeAsync(500)
+ expect(matcher).toMatchObject({autoMode:true,query:'Heavy Rock',seed:'947'})
+ expect(fake.request.mock.calls.some(call=>call[0]==='libraryResolve')).toBe(false)
+ expect(root.textContent).toContain('Ready to play')
+})
+
+it('discards pending Auto work when the host recalls another patch',async()=>{
+ ready();const original=fake.request.getMockImplementation()!;let finish!:(p:any)=>void;let payload:any
+ fake.request.mockImplementation((method,p)=>method==='libraryResolve'?(payload=p,new Promise(resolve=>{finish=resolve})):original(method,p))
+ const {root}=await render(true);input(root,'Filter indexed patterns','Heavy Rock')
+ await event(find(root,n=>n.props['aria-label']==='Filter indexed patterns'),'keydown',{key:'Enter'})
+ fake.state.patch={...factory(),id:'host-recall',name:'Recalled'};await settle()
+ finish(resolved(payload));await settle();await vi.advanceTimersByTimeAsync(350)
+ expect(fake.state.patch.name).toBe('Recalled');expect(fake.replace).not.toHaveBeenCalled()
+})
+
+it('opens legacy resolved patches in Auto without regenerating their saved notes',async()=>{
+ ready();fake.state.patch={...factory(),neural:{version:1,query:'Heavy Rock',seed:'legacy',numerator:4,denominator:4,feel:'straight',keys:[],warnings:[]}}
+ await render(true);await vi.advanceTimersByTimeAsync(500)
+ expect(matcher.autoMode).toBe(true)
+ expect(fake.request.mock.calls.some(call=>call[0]==='libraryResolve')).toBe(false)
+})
+
+it('does not save a recalled host patch under an earlier search name',async()=>{
+ ready();autoResults();const {root}=await render(true)
+ input(root,'Filter indexed patterns','Heavy Rock')
+ await event(find(root,n=>n.props['aria-label']==='Filter indexed patterns'),'keydown',{key:'Enter'})
+ fake.flush.mockImplementationOnce(async()=>{fake.state.patch={...factory(),id:'recalled',name:'Host recalled'}})
+ await event(find(root,n=>n.props['aria-label']==='Save search as patch'),'click')
+ expect(fake.save).not.toHaveBeenCalled();expect(fake.state.error).toContain('search changed before saving')
 })

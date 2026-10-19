@@ -3,20 +3,20 @@ import {computed,watch,onBeforeUnmount} from 'vue'
 import {THEME_GROUPS,THEMES,themeGroup,themeById,type Theme} from '../theme/themes'
 import {themeId,themePreview} from '../theme/current'
 const open=defineModel<boolean>({default:false})
-const props=withDefaults(defineProps<{busy?:boolean}>(),{busy:false})
+const props=withDefaults(defineProps<{busy?:boolean;inline?:boolean}>(),{busy:false,inline:false})
 const emit=defineEmits<{select:[id:string]}>()
 const selected=computed(()=>themeById(themeId.value))
 const groups=computed(()=>THEME_GROUPS.map(name=>({name,themes:THEMES.filter(t=>themeGroup(t)===name)})))
 function preview(t:Theme){themePreview.value=t.id}
 function restore(){themePreview.value=null}
-function pick(t:Theme){if(props.busy)return;restore();emit('select',t.id);open.value=false}
+function pick(t:Theme){if(props.busy)return;restore();emit('select',t.id);if(!props.inline)open.value=false}
 function cycle(step:number){if(props.busy)return;restore();const i=THEMES.findIndex(t=>t.id===themeId.value);emit('select',THEMES[(i+step+THEMES.length)%THEMES.length].id)}
 watch(open,value=>{if(!value)restore()})
 onBeforeUnmount(restore)
 </script>
 
 <template>
-  <div class="picker" role="dialog" aria-label="Choose color theme" @pointerdown.stop @keydown.esc="open=false">
+  <div class="picker" :role="inline?'group':'dialog'" aria-label="Choose color theme" @pointerdown.stop @keydown.esc="open=false">
     <div class="head">
       <button class="hw-btn icon" title="Previous theme" aria-label="Previous theme" :disabled="busy" @click="cycle(-1)">
         ‹
@@ -25,7 +25,7 @@ onBeforeUnmount(restore)
       <button class="hw-btn icon" title="Next theme" aria-label="Next theme" :disabled="busy" @click="cycle(1)">
         ›
       </button>
-      <span class="count">{{ THEMES.length }} THEMES · HOVER TO PREVIEW</span><button class="hw-btn icon" aria-label="Close theme picker" @click="open=false">×</button>
+      <span class="count">{{ THEMES.length }} THEMES · HOVER TO PREVIEW</span><button v-if="!inline" class="hw-btn icon" aria-label="Close theme picker" @click="open=false">×</button>
     </div>
     <div class="body" @mouseleave="restore">
       <section v-for="g in groups" :key="g.name">

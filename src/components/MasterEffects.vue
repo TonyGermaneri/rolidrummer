@@ -1,27 +1,15 @@
 <script setup lang="ts">
-import {ref} from 'vue'
 import {state} from '../store'
 import {busTargets,busLabels,surfaceLabels,busValue,fxRanges,type BusTarget} from '../masterFx'
 import Knob from './Knob.vue'
-import {DIVISIONS} from '../types'
-const open=ref(false)
 function value(target:BusTarget){const source=state.patch.fx.bindings[target];return source<0?state.patch.fx[target]:busValue(target,state.telemetry.macros[source]??0)}
 function turn(target:BusTarget,n:number){state.patch.fx.bindings[target]=-1;state.patch.fx[target]=n}
 const format=(target:BusTarget,n:number)=>target==='cutoff'?(n>=1000?`${(n/1000).toFixed(1)}k`:`${Math.round(n)}`):target==='resonance'?n.toFixed(1):`${Math.round(n*100)}%`
 </script>
 <template><section class="master-effects" aria-label="Main bus effects">
- <v-menu v-model="open" :close-on-content-click="false" location="bottom" :offset="6"><template #activator="{props}"><button v-bind="props" class="bus-menu" aria-label="Main bus settings and controller bindings">BUS<br>FX ▾</button></template>
- <div class="bus-popup" @pointerdown.stop><header>MAIN BUS <button @click="open=false" aria-label="Close main bus settings">×</button></header>
- <div class="bus-mappings"><label v-for="target in busTargets" :key="target">{{busLabels[target]}}<select v-model.number="state.patch.fx.bindings[target]" :aria-label="`${busLabels[target]} controller`"><option :value="-1">Knob</option><option v-for="(name,i) in surfaceLabels" :key="i" :value="i">{{name}} · CC {{state.patch.globalCC[i]}}</option></select></label></div>
- <p>Bindings affect the whole mix. Turning a header dial returns it to Knob control.</p>
- <div class="bus-details"><section><h5>REVERB</h5><div><Knob v-model="state.patch.fx.reverbSize" label="SIZE" :min=".1" :max="8" :default="3" :size="28"/><Knob v-model="state.patch.fx.reverbDecay" label="DECAY" :min=".5" :max="10" :default="3" :size="28"/></div></section>
- <section><h5>DELAY <button :class="{on:state.patch.fx.delaySync}" @click="state.patch.fx.delaySync=!state.patch.fx.delaySync">SYNC</button></h5><div><select v-if="state.patch.fx.delaySync" v-model.number="state.patch.fx.delayBeats" aria-label="Main delay division"><option v-for="d in DIVISIONS.filter(d=>d.beats<=8)" :key="d.id" :value="d.beats">{{d.id}}</option></select><Knob v-else v-model="state.patch.fx.delayTime" label="TIME" :min=".01" :max="2" curve="log" :default=".375" :size="28" :format="v=>`${Math.round(v*1000)}ms`"/><Knob v-model="state.patch.fx.delayFeedback" label="FDBK" :max=".9" :default=".4" :size="28"/></div></section>
- <section><h5>CHORUS</h5><div><Knob v-model="state.patch.fx.chorusRate" label="RATE" :min=".05" :max="8" curve="log" :default=".6" :size="28"/><Knob v-model="state.patch.fx.chorusDepth" label="DEPTH" :default=".5" :size="28"/></div></section></div>
- <p>Use the Seaboard’s Global MIDI bindings to reassign or learn CCs. Faders send CCs in MIDI mode.</p>
- </div></v-menu>
+ <button class="bus-menu" aria-label="Main bus settings and controller bindings" @click="state.settingsSection='playback';state.tab='Settings'">BUS<br>FX ▸</button>
  <div v-for="target in busTargets" :key="target" class="bus-dial" :class="{mapped:state.patch.fx.bindings[target]>=0}" :title="`${busLabels[target]} · ${state.patch.fx.bindings[target]<0?'Knob':surfaceLabels[state.patch.fx.bindings[target]]}`"><Knob :label="busLabels[target]" :model-value="value(target)" :min="fxRanges[target][0]" :max="fxRanges[target][1]" :default="fxRanges[target][2]" :curve="target==='cutoff'?'log':'lin'" :size="26" :format="v=>format(target,v)" @update:model-value="v=>turn(target,v)"/></div>
 </section></template>
 <style scoped>
 .master-effects{display:flex;flex:none;gap:5px;align-items:center;padding:2px 5px;border:1px solid #ffffff12;border-radius:4px;background:#0003;height:36px}.bus-menu{font:7px/1.5 'Orbitron',sans-serif!important;padding:0 3px!important;letter-spacing:.08em;background:transparent!important;border:0!important;color:var(--text-dim)}.bus-dial{position:relative}.bus-dial.mapped:after{content:'';position:absolute;width:3px;height:3px;border-radius:50%;background:var(--c-secondary);top:0;right:0}.bus-dial :deep(.knob){display:grid;grid-template-columns:26px 39px;grid-template-rows:16px 10px;column-gap:2px;width:67px;align-items:center}.bus-dial :deep(.knob-body){grid-row:1/3}.bus-dial :deep(.readout){font-size:10px;margin:0;text-align:center}.bus-dial :deep(.label){font-size:6px;text-align:center}
-.bus-popup{width:min(480px,calc(100vw - 32px));max-height:calc(100vh - 100px);overflow:auto;background:linear-gradient(var(--panel-hi),var(--panel-lo));border:1px solid #000;border-radius:5px;padding:10px;box-shadow:0 12px 32px #000b;color:var(--text)}.bus-popup header{display:flex;justify-content:space-between;align-items:center;font:9px 'Orbitron',sans-serif;letter-spacing:.15em}.bus-popup button,.bus-popup select{background:var(--lcd-bg);color:var(--c-secondary);font:11px monospace;border:1px solid #000;border-radius:3px;padding:3px 5px}.bus-popup p{font:10px/1.5 sans-serif;color:var(--text-mute);margin:8px 0}.bus-mappings{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px}.bus-mappings label{font:8px 'Orbitron',sans-serif;display:flex;justify-content:space-between}.bus-mappings select{max-width:140px}.bus-details{display:flex;gap:4px}.bus-details section{flex:1;padding:5px;border:1px solid #ffffff12;background:#0003;border-radius:3px}.bus-details h5{font:8px 'Orbitron',sans-serif;min-height:23px;display:flex;gap:5px;align-items:center}.bus-details section>div{display:flex;gap:6px;justify-content:space-around}.bus-details .on{color:var(--c-primary)}
 </style>

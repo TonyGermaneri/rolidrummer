@@ -2,11 +2,13 @@
 #include <drummer/PatchResolver.h>
 #include <drummer/PatternFamilies.h>
 #include <drummer/RhythmSpace.h>
+#include <drummer/Scheduler.h>
 #include <drummer/Json.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_cryptography/juce_cryptography.h>
 #include "../src/LibrarySqlite.h"
 #include <iostream>
+#include <map>
 #include <set>
 #include <stdexcept>
 
@@ -196,6 +198,87 @@ int main(int argc, char** argv) { try {
         }
     }
     check(juce::JSON::toString(generated,true)==juce::JSON::toString(resolveNeuralPatch(catalog,index,base,generatedOptions),true),"Seeded patch resolution was not deterministic");
+    // Auto has one repeatable musical decision surface: query + seed.
+    std::map<int,juce::String> autoSeeds;juce::String alternateOriginal;
+    for(int candidate=0;autoSeeds.size()<5||alternateOriginal.isEmpty();++candidate){
+        const auto text=juce::String(candidate);
+        const int count=(int)(static_cast<juce::uint32>(juce::SHA256(("auto-generation:"+text).toUTF8()).toHexString().substring(0,8).getHexValue32())%5);
+        if(count==0&&autoSeeds.contains(0))alternateOriginal=text;
+        autoSeeds.try_emplace(count,text);
+    }
+    juce::var originalAuto,lastAuto;
+    for(const auto& [count,autoSeed]:autoSeeds){
+        const auto options=object({{"query","Heavy Rock"},{"indexId",oldId},{"autoMode",true},{"seed",autoSeed},{"variationCount",99},{"phraseBars",1}});
+        const auto automatic=resolveNeuralPatch(catalog,index,base,options),intent=get(automatic,"neural");
+        check((bool)get(intent,"autoMode")&&(int)get(intent,"phraseBars")==8&&(int)get(intent,"variationCount")==count,"Auto exposed manual generation or phrase choices");
+        check(get(intent,"keys").getArray()->size()==5,"Auto did not assign a previously locked compatible key");
+        check(number(get(automatic,"fx"),"delayMix",0)==.37,"Auto changed sound settings");
+        check((count==0)==(number(intent,"generatedCount",0)==0),"Auto seed did not choose originals versus generated material");
+        check(number(intent,"generatedCount",0)<=count,"Auto exceeded its kit-wide limit of 1–4 generated tracks");
+        for(const auto& key:*get(automatic,"keys").getArray())for(const auto& zone:*get(key,"zones").getArray()){
+            const auto choices=get(zone,"candidates");if(!choices.isArray())continue;
+            int generatedChoices=0;bool generatedPrimary=false;
+            for(const auto& choice:*choices.getArray()){
+                bool found=false;for(const auto& clip:*get(automatic,"clips").getArray())if(get(clip,"id")==get(choice,"clipId")){
+                    found=true;if((bool)get(choice,"generated",false)){
+                        ++generatedChoices;generatedPrimary|=get(zone,"clipId")==get(clip,"id");
+                        for(const auto& note:*get(clip,"notes").getArray())check(get(key,"parts").getArray()->contains(get(note,"note")),"Auto generated notes leaked across drum parts");
+                    }
+                }check(found,"Auto zone contains a dangling clip reference");
+            }
+            check(generatedChoices<=count,"Auto exceeded the seed-selected generation count");
+            check(!generatedChoices||generatedPrimary,"Generated Auto seed still starts an original pattern");
+        }
+        auto repeatOptions=options.clone();set(repeatOptions,"variationCount",0);set(repeatOptions,"phraseBars",64);set(repeatOptions,"cpu",true);
+        check(juce::JSON::toString(automatic,true)==juce::JSON::toString(resolveNeuralPatch(catalog,index,base,repeatOptions),true),"Auto seed is not deterministic across manual settings or CPU/Metal");
+        if(count==0)originalAuto=automatic;
+        if(!lastAuto.isVoid()){
+            const auto rerolled=resolveNeuralPatch(catalog,index,lastAuto,options);
+            check(juce::JSON::toString(get(rerolled,"clips"),true)==juce::JSON::toString(get(automatic,"clips"),true),"Auto rerolls accumulate abandoned pattern pools");
+        }
+        lastAuto=automatic;
+    }
+    const auto alternative=resolveNeuralPatch(catalog,index,base,object({{"query","Heavy Rock"},{"indexId",oldId},{"autoMode",true},{"seed",alternateOriginal}}));
+    check(juce::JSON::toString(get(alternative,"keys"),true)!=juce::JSON::toString(get(originalAuto,"keys"),true),"Original-only seeds do not change actual assignments");
+    auto performance=[](const juce::var& document){
+        Configuration config;std::map<juce::String,int> clips;
+        for(const auto& clip:*get(document,"clips").getArray()){
+            clips[get(clip,"id").toString()]=(int)config.clips.size();Clip runtime;
+            runtime.id=(uint64_t)juce::SHA256(juce::JSON::toString(get(clip,"notes")).toUTF8()).toHexString().substring(0,16).getHexValue64();
+            config.clips.push_back(runtime);
+        }
+        for(const auto& binding:*get(document,"keys").getArray()){
+            auto& key=config.keys[(size_t)(int)get(binding,"note")];key.enabled=true;key.intentEnabled=true;
+            const auto zones=get(binding,"zones");key.zoneCount=zones.getArray()->size();
+            for(int i=0;i<key.zoneCount;++i){
+                const auto& source=(*zones.getArray())[i];auto& zone=key.zones[(size_t)i];zone.upper=(float)(double)get(source,"upper");
+                const auto primary=get(source,"clipId").toString();zone.clip=primary.isEmpty()?-1:clips.at(primary);
+                const auto choices=get(source,"candidates");if(!choices.isArray())continue;
+                PatternGroup group;
+                for(const auto& choice:*choices.getArray()){
+                    auto& candidate=group.candidates[(size_t)group.count++];candidate.clip=clips.at(get(choice,"clipId").toString());
+                    const auto position=get(choice,"position");for(int d=0;d<intentDimensions;++d)candidate.position[(size_t)d]=(float)(double)(*position.getArray())[d];
+                }
+                zone.group=(int)config.groups.size();config.groups.push_back(group);
+            }
+        }
+        return config;
+    };
+    const auto originalRuntime=performance(originalAuto),alternativeRuntime=performance(alternative);
+    auto selectedContent=[](const Configuration& config,int key,int slide,int press,int glide){
+        Scheduler scheduler;const Midi messages[]={{0,0xb1,74,(uint8_t)slide},{0,0xd1,(uint8_t)press,0},{0,0xe1,(uint8_t)(glide&127),(uint8_t)(glide>>7)},{0,0x91,(uint8_t)key,100}};
+        scheduler.process(config,{},1,messages,4,[](void*,const Event&){},nullptr);
+        const int clip=scheduler.contacts()[1].clip;return clip<0?uint64_t(0):config.clips[(size_t)clip].id;
+    };
+    bool differentPerformance=false;
+    for(int note:{48,50,52,55,56})for(int slide:{0,64,127})for(int press:{0,64,127})for(int glide:{0,8192,16383})
+        differentPerformance|=selectedContent(originalRuntime,note,slide,press,glide)!=selectedContent(alternativeRuntime,note,slide,press,glide);
+    check(differentPerformance,"Original-only seed changes never reach the scheduler's gesture-selected notes");
+    auto preservedTemplate=lastAuto.clone();const auto kept=get((*get(lastAuto,"clips").getArray())[0],"id");
+    set(preservedTemplate,"templateZones",juce::Array<juce::var>{object({{"upper",1.0},{"clipId",kept}})});
+    const auto pruned=resolveNeuralPatch(catalog,index,preservedTemplate,object({{"query","Heavy Rock"},{"indexId",oldId},{"autoMode",true},{"seed",autoSeeds.at(0)}}));
+    bool keptTemplate=false;for(const auto& clip:*get(pruned,"clips").getArray())keptTemplate|=get(clip,"id")==kept;
+    check(keptTemplate,"Auto pruning removed a clip still used by template zones");
     fixture.midi(source, "Disco/Groove.mid", 100);
     catalog.importSource(source);
     check((bool) get(index.status(), "stale"), "New imports do not mark the searchable index stale");

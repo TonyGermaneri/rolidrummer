@@ -40,6 +40,11 @@ SharedStore::SharedStore(const juce::File& file){
 }
 SharedStore::~SharedStore(){sqlite3_close(db);}
 juce::var SharedStore::snapshot(int64_t after){std::lock_guard lock(mutex);return fields(db,after);}
+juce::var SharedStore::statistics(){
+ std::lock_guard lock(mutex);
+ Statement count(db,"SELECT COUNT(*),COALESCE(SUM(CASE WHEN key LIKE 'patch/%' AND value!='null' THEN 1 ELSE 0 END),0) FROM fields");count.row();
+ return json::object({{"fields",sqlite3_column_int(count.p,0)},{"patches",sqlite3_column_int(count.p,1)}});
+}
 bool SharedStore::lease(const juce::String& resource,const juce::String& owner,bool release){std::lock_guard lock(mutex);
  if(release){Statement q(db,"DELETE FROM leases WHERE resource=? AND owner=?");q.text(1,resource);q.text(2,owner);q.done();return true;}
  Statement q(db,"INSERT INTO leases VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE leases.owner=excluded.owner OR leases.expires<?");q.text(1,resource);q.text(2,owner);auto now=juce::Time::currentTimeMillis();q.integer(3,now+5000);q.integer(4,now);q.done();return sqlite3_changes(db)>0;
