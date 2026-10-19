@@ -10,12 +10,12 @@ import tempfile
 import zipfile
 
 TOOLS = Path(__file__).resolve().parent
-FORMATS = [('AU', 'Roli Drummer.component', 'BNDL'),
-           ('VST3', 'Roli Drummer.vst3', 'BNDL'),
-           ('Standalone', 'Roli Drummer.app', 'APPL')]
+FORMATS = [('AU', 'RoliDrummer.component', 'BNDL'),
+           ('VST3', 'RoliDrummer.vst3', 'BNDL'),
+           ('Standalone', 'RoliDrummer.app', 'APPL')]
 
 
-def verify(directory):
+def verify(directory, require_notarized=False):
     archives = sorted(directory.glob('*.zip'))
     if len(archives) != len(FORMATS):
         raise RuntimeError('Expected exactly three release ZIPs in a clean output directory')
@@ -24,7 +24,7 @@ def verify(directory):
     with tempfile.TemporaryDirectory(prefix='rolidrummer-archive-check-') as temporary:
         bundles = []
         for kind, name, package_type in FORMATS:
-            matches = [p for p in archives if p.name.startswith(name.replace(' ', '.') + '-')]
+            matches = [p for p in archives if p.name.startswith(name + '-v')]
             if len(matches) != 1:
                 raise RuntimeError(f'{kind}: missing or ambiguous release archive')
             archive = matches[0]
@@ -39,6 +39,11 @@ def verify(directory):
             subprocess.run(['ditto', '-x', '-k', str(archive), str(extracted)], check=True)
             bundle = extracted / name
             meta = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+            if meta.get('CFBundleIdentifier') != 'com.wavecontour.rolidrummer' or meta.get('CFBundleExecutable') != 'Roli Drummer':
+                raise RuntimeError(f'{kind}: distribution changed the plug-in identity or executable name')
+            if kind == 'AU' and [(c.get('type'), c.get('subtype'), c.get('manufacturer'))
+                                  for c in meta.get('AudioComponents', [])] != [('aumu', 'Rld1', 'WvCt')]:
+                raise RuntimeError('AU: distribution changed its component codes')
             if meta.get('CFBundlePackageType') != package_type:
                 raise RuntimeError(f'{kind}: wrong bundle package type')
             if (bundle / 'Contents/PkgInfo').read_bytes()[:4] != package_type.encode():
@@ -46,13 +51,16 @@ def verify(directory):
             executable = bundle / 'Contents/MacOS' / meta['CFBundleExecutable']
             if not executable.is_file() or not executable.stat().st_mode & stat.S_IXUSR:
                 raise RuntimeError(f'{kind}: executable or its permissions were lost in extraction')
-            expected = name.replace(' ', '.') + '-' + meta['CFBundleShortVersionString'] + '-macOS-universal.zip'
+            expected = name + '-v' + meta['CFBundleShortVersionString'] + '.zip'
             if archive.name != expected:
                 raise RuntimeError(f'{kind}: archive and bundle versions do not match')
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(bundle)], check=True)
+            if require_notarized:
+                subprocess.run(['xcrun', 'stapler', 'validate', str(bundle)], check=True)
             bundles.append(bundle)
             report.append({'format': kind, 'archive': archive.name, 'version': meta['CFBundleShortVersionString'],
-                           'singleBundleRoot': True, 'extractedSignature': True, 'finderPackage': True})
+                           'singleBundleRoot': True, 'extractedSignature': True, 'finderPackage': True,
+                           'extractedNotarization': require_notarized})
         subprocess.run(['xcrun', 'swift', str(TOOLS / 'verify-macos-packages.swift'), *map(str, bundles)], check=True)
     return report
 
@@ -60,5 +68,6 @@ def verify(directory):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
+    parser.add_argument('--require-notarized', action='store_true')
     arguments = parser.parse_args()
-    print(json.dumps({'archives': verify(arguments.directory.resolve())}, indent=2))
+    print(json.dumps({'archives': verify(arguments.directory.resolve(), arguments.require_notarized)}, indent=2))

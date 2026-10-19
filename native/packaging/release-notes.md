@@ -1,21 +1,18 @@
-# Roli Drummer 0.2.1
+# Roli Drummer 0.2.2
 
-Every keyboard mode now enforces one active pattern zone per key.
+macOS release packaging now follows SSB's stable naming and direct publication of notarized archives. The AU download is **RoliDrummer.component-v0.2.2.zip**, containing **RoliDrummer.component**. The bundle and archive use the same basename, without space-to-dot substitutions. VST3 and standalone downloads use the same convention.
+
+CI publishes those original archives byte for byte and checks clean extraction, code signatures and stapled notarization tickets. The instrument's display name, AU component codes, bundle identifier, patches and sound engine are unchanged.
+
+Every keyboard mode retains one active pattern zone per key:
 
 - **Normal** and **Hold** replace that key's previous owner on each new press, including when the Seaboard assigns a different MPE channel. Repeated presses retrigger the part; they do not toggle it off.
 - **Toggle** retains its existing rules: the same zone stops the key, while a different zone replaces it.
 - Replaced fingers cannot change the active zone, release its new owner or restart through a patch edit. Other keys, pedal behavior, musical quantization and drum-note filters retain their existing rules.
-- Release packaging now verifies a fresh extraction of every archive: one correctly named bundle, matching metadata/version, executable permissions, valid code signatures and Finder package recognition. The AU is a `.component` bundle directory, installed as a complete item.
 
 This patch retains Hold/Toggle selection recall, purple toggle indicators, neural library matching and the SSB 0.6.2 sound engine.
 
-## Install the AU on another Mac
-
-1. Download and unzip the **AU archive** (its filename contains **.component**) from the release assets. The extracted item is **Roli Drummer.component**, a complete macOS bundle; Finder should offer **Show Package Contents**.
-2. Move the complete **Roli Drummer.component** bundle (not its inner **Contents** folder) into **~/Library/Audio/Plug-Ins/Components/**. Create that folder if necessary.
-3. Restart Ableton Live or rescan Audio Units in its plug-in settings. Load **Roli Drummer** from the Audio Units list and enable MPE for your Seaboard.
-
-The VST3 archive installs into **~/Library/Audio/Plug-Ins/VST3/**. The standalone app can run from a local Applications folder. All three builds support Apple Silicon and Intel. Neural indexing/search requires macOS 13.4 or later because of the bundled inference runtime.
+All three builds support Apple Silicon and Intel. Neural indexing/search requires macOS 13.4 or later because of the bundled inference runtime.
 
 Your personal MIDI library is not included in these downloads. Use a portable **.rolidrummer** export to transfer a prepared patch with its patterns, mappings and sounds, or import the library on the other Mac.
 

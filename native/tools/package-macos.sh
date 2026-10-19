@@ -3,10 +3,15 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 build="${1:-$root/native/build-universal}"
 out="${2:-$root/release}"
+notarized="${3:-}"
 artifacts="$build/plugin/RoliDrummer_artefacts/Release"
 python3 "$root/native/tools/verify-neural-bundles.py" "$artifacts"
 version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$artifacts/AU/Roli Drummer.component/Contents/Info.plist")"
 mkdir -p "$out"
+if [ "${NOTARIZED:-false}" = true ] && [ ! -d "$notarized" ]; then
+ echo 'Notarized releases must publish the archives produced by macos-notarize.sh' >&2
+ exit 1
+fi
 for item in 'AU/Roli Drummer.component' 'VST3/Roli Drummer.vst3' 'Standalone/Roli Drummer.app'; do
  bundle="$artifacts/$item"
  codesign --verify --strict "$bundle"
@@ -26,13 +31,22 @@ for item in 'AU/Roli Drummer.component' 'VST3/Roli Drummer.vst3' 'Standalone/Rol
  done
  done
  name="${bundle##*/}"
- # GitHub normalizes spaces in asset names; make checksums use the published names.
- archive_name="${name// /.}"
- ditto -c -k --keepParent --sequesterRsrc "$bundle" "$out/$archive_name-$version-macOS-universal.zip"
+ archive_name="${name// /}-v$version.zip"
+ if [ -n "$notarized" ]; then
+  # Match SSB: publish the original notarized ZIP, without another archive pass.
+  cp "$notarized/$archive_name" "$out/$archive_name"
+  cmp "$notarized/$archive_name" "$out/$archive_name"
+ else
+  python3 "$root/native/tools/archive-macos-bundle.py" "$bundle" "$out"
+ fi
 done
 cp "$root/native/packaging/release-notes.md" "$out/README.md"
 cp "$root/LICENSE" "$root/THIRD_PARTY.md" "$root/native/packaging/SIGNING.md" "$out/"
 (cd "$out" && shasum -a 256 ./*.zip > SHA256SUMS)
 
 # Validate a fresh extraction, not only the build directory.
-python3 "$root/native/tools/verify-macos-archives.py" "$out"
+if [ "${NOTARIZED:-false}" = true ]; then
+ python3 "$root/native/tools/verify-macos-archives.py" "$out" --require-notarized
+else
+ python3 "$root/native/tools/verify-macos-archives.py" "$out"
+fi

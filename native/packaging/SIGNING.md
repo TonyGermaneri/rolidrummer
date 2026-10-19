@@ -44,4 +44,6 @@ Pushes to `main` build and validate universal macOS AU, VST3 and standalone arti
 
 The **Plugins** workflow can also be dispatched manually with **notarize** enabled to produce notarized artifacts without creating a release. Development artifacts report their actual signing/notarization status in `BUILD.txt`. Windows publishing is not configured.
 
+The notarization script creates the final `RoliDrummer.<format>-v<version>.zip` files. It stages each signed, stapled product under its distribution filename, verifies the preserved signature, and archives that item with `ditto`. The release packaging step copies these exact ZIPs, compares their bytes, and validates extracted signatures and tickets. Local builds without notarization use the same archive helper and names.
+
 **Deploy to GitHub Pages** tests and builds the editor preview on `main`, then deploys `dist` using the `github-pages` environment. Filesystem access, MIDI and audio still require the native instrument. GitHub Pages must allow the GitHub Actions source, as in SSB; the workflow includes Pages configuration with enablement.

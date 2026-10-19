@@ -34,7 +34,7 @@ native/tools/package-macos.sh
 
 The packaging script verifies signatures and both CPU slices before creating archives under `release`, then checks clean ZIP extraction, bundle metadata, executable permissions and macOS/Finder package recognition. GitHub Actions builds native artifacts on `main` and publishes signed, notarized macOS releases on matching `v*` version tags. The editor preview deploys separately to GitHub Pages. Credentials and manual signing/notarization are described in [SIGNING.md](native/packaging/SIGNING.md).
 
-An AU `.component` is a macOS bundle directory, presented by Finder as one package. Install the complete **Roli Drummer.component** item in **~/Library/Audio/Plug-Ins/Components/**; do not copy its inner **Contents** directory separately. The release ZIP contains that component directly, without a version-named wrapper folder. Finder's context menu should offer **Show Package Contents**.
+Release bundles use the stable distribution names `RoliDrummer.component`, `RoliDrummer.vst3` and `RoliDrummer.app`; archive names append `-v<version>.zip`, matching SSB's convention. Tagged releases publish the ZIPs produced after notarization without re-archiving them. Their internal executable names and plug-in identities stay unchanged.
 
 ## Play and edit
 

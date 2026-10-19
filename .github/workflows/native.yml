@@ -218,7 +218,11 @@ jobs:
           SIGNED: ${{ steps.creds.outputs.sign || 'false' }}
           NOTARIZED: ${{ steps.notary.outputs.done || 'false' }}
         run: |
-          native/tools/package-macos.sh native/build release
+          if [ "$NOTARIZED" = true ]; then
+            native/tools/package-macos.sh native/build release "$RUNNER_TEMP/notarized"
+          else
+            native/tools/package-macos.sh native/build release
+          fi
           printf 'Commit: %s\nSigned: %s\nNotarized: %s\n' "$GITHUB_SHA" "$SIGNED" "$NOTARIZED" > release/BUILD.txt
           cat release/BUILD.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4

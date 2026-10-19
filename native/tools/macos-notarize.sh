@@ -21,6 +21,7 @@
 # Written for bash 3.2 — see the note in macos-sign.sh.
 
 set -euo pipefail
+tools="$(cd "$(dirname "$0")" && pwd)"
 
 plugins="${1:-}"
 outdir="${2:-dist}"
@@ -140,11 +141,8 @@ done
 
 # --------------------------------------------------------------------------------- package
 mkdir -p "$outdir"
-version="${VERSION:-dev}"
-
 for bundle in "${bundles[@]}"; do
-    name="$(basename "$bundle")"
-    ditto -c -k --keepParent --sequesterRsrc "$bundle" "$outdir/${name}-${version}.zip"
+    python3 "$tools/archive-macos-bundle.py" "$bundle" "$outdir"
 done
 
 echo

@@ -3,13 +3,15 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import tempfile
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 MOCK = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, shutil, sys, zipfile
 from pathlib import Path
 path=Path(os.environ["RD_NOTARY_TEST_STATE"])
 state=json.loads(path.read_text())
@@ -19,7 +21,12 @@ state["calls"].append([tool,*args])
 status=0
 if tool=="ditto":
     if len(args)>6: status=1
-    else: Path(args[-1]).write_bytes(b"synthetic archive")
+    elif len(args)==2: shutil.copytree(args[0],args[1],dirs_exist_ok=True)
+    else:
+        source=Path(args[-2])
+        with zipfile.ZipFile(args[-1],"w") as output:
+            for item in [source,*source.rglob("*")]:
+                output.write(item,item.relative_to(source.parent))
 elif tool=="xcrun" and args[:2]==["notarytool","submit"]:
     status=int(os.environ.get("FAIL_SUBMIT","0"))
 elif tool=="xcrun" and args[:2]==["stapler","staple"]:
@@ -45,7 +52,7 @@ class NotarizationTest(unittest.TestCase):
         self.state_path.write_text(json.dumps({"calls": [], "staples": {}, "delays": []}))
         commands = self.folder / "commands"
         commands.mkdir()
-        for tool in ("xcrun", "sleep", "ditto", "spctl"):
+        for tool in ("xcrun", "sleep", "ditto", "spctl", "codesign"):
             path = commands / tool
             path.write_text(MOCK)
             path.chmod(0o755)
@@ -54,7 +61,13 @@ class NotarizationTest(unittest.TestCase):
         for kind, name in (("AU", "Roli Drummer.component"), ("VST3", "Roli Drummer.vst3"),
                            ("Standalone", "Roli Drummer.app")):
             bundle = self.plugins / "RoliDrummer_artefacts/Release" / kind / name
-            bundle.mkdir(parents=True)
+            (bundle / "Contents/MacOS").mkdir(parents=True)
+            (bundle / "Contents/MacOS/Roli Drummer").write_bytes(b"synthetic original executable")
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleShortVersionString": "0.2.2", "CFBundleExecutable": "Roli Drummer",
+                "CFBundleIdentifier": "com.wavecontour.rolidrummer",
+                "AudioComponents": [{"type": "aumu", "subtype": "Rld1", "manufacturer": "WvCt"}],
+            }))
             self.bundles.append(str(bundle))
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("NOTARY_")}
         self.env.update(PATH=str(commands) + os.pathsep + self.env["PATH"],
@@ -79,6 +92,22 @@ class NotarizationTest(unittest.TestCase):
         self.assertEqual(self.state()["delays"], [15, 30] * 3)
         self.assertEqual(len(list(self.out.glob("*.zip"))), 3)
         self.assertFalse(list(self.folder.glob("rolidrummer-notarize-*")))
+
+    def test_release_names_match_bundle_roots_and_preserve_plugin_identity(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({p.name for p in self.out.glob("*.zip")}, {
+            "RoliDrummer.component-v0.2.2.zip", "RoliDrummer.vst3-v0.2.2.zip", "RoliDrummer.app-v0.2.2.zip",
+        })
+        for path in self.out.glob("*.zip"):
+            name = path.name.removesuffix("-v0.2.2.zip")
+            with zipfile.ZipFile(path) as archive:
+                self.assertEqual({p.split('/')[0] for p in archive.namelist()}, {name})
+                metadata = plistlib.loads(archive.read(name + "/Contents/Info.plist"))
+                self.assertEqual(metadata["CFBundleExecutable"], "Roli Drummer")
+                self.assertEqual(metadata["CFBundleIdentifier"], "com.wavecontour.rolidrummer")
+                self.assertEqual(metadata["AudioComponents"], [{"type": "aumu", "subtype": "Rld1", "manufacturer": "WvCt"}])
+                self.assertEqual(archive.read(name + "/Contents/MacOS/Roli Drummer"), b"synthetic original executable")
 
     def test_unavailable_ticket_fails_with_diagnostic_and_no_packages(self):
         self.env["FAIL_STAPLES"] = "99"
