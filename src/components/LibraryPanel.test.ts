@@ -105,7 +105,7 @@ it('resolves optional generated variations with the chosen seed and phrase cycle
  fake.request.mockImplementation(async(method,payload)=>method==='libraryResolve'?clone(payload.document):original(method,payload))
  const {root}=await render()
  find(root,n=>n.props['aria-label']==='Filter indexed patterns').props['onUpdate:modelValue']('Heavy Rock')
- find(root,n=>n.props['aria-label']==='Generated variations per region').props['onUpdate:modelValue'](2)
+ find(root,n=>n.props['aria-label']==='Pattern generation').props['onUpdate:modelValue'](2)
  find(root,n=>n.props['aria-label']==='Pattern variation seed').props['onUpdate:modelValue']('my-session-12')
  find(root,n=>n.props['aria-label']==='Phrase cycle bars').props['onUpdate:modelValue'](4)
  await event(find(root,n=>n.tag==='button'&&n.textContent==='RESOLVE PATCH'),'click')
@@ -134,7 +134,7 @@ function autoResults(){
  const original=fake.request.getMockImplementation()!
  fake.request.mockImplementation(async(method,payload)=>method==='libraryResolve'?resolved(payload):original(method,payload))
 }
-function resolved(payload:any){return {...clone(payload.document),name:payload.query,neural:{version:1,query:payload.query,seed:payload.seed,autoMode:payload.autoMode,numerator:4,denominator:4,feel:'straight',keys:[],warnings:[]}}}
+function resolved(payload:any){return {...clone(payload.document),name:payload.query,neural:{version:1,query:payload.query,seed:payload.seed,autoMode:payload.autoMode,variationCount:payload.variationCount??0,phraseBars:payload.phraseBars??8,numerator:4,denominator:4,feel:'straight',keys:[],warnings:[]}}}
 function input(root:any,label:string,value:string){find(root,n=>n.props['aria-label']===label).props['onUpdate:modelValue'](value)}
 
 it('defaults to Auto and resolves only semantic intent without exposing manual or maintenance controls',async()=>{
@@ -146,12 +146,12 @@ it('defaults to Auto and resolves only semantic intent without exposing manual o
  expect(root.textContent).not.toContain('IMPORT ZIP')
  input(root,'Filter indexed patterns','Heavy Rock')
  await vi.advanceTimersByTimeAsync(350);await settle()
- expect(fake.request).toHaveBeenCalledWith('libraryResolve',expect.objectContaining({query:'Heavy Rock',seed:'0',autoMode:true,indexId:'index-7'}))
+ expect(fake.request).toHaveBeenCalledWith('libraryResolve',expect.objectContaining({query:'Heavy Rock',seed:'0',autoMode:true,variationCount:0,indexId:'index-7'}))
  expect(fake.request.mock.calls.some(call=>['librarySearch','libraryBrowse'].includes(call[0]))).toBe(false)
  expect(fake.state.patch.name).toBe('Heavy Rock')
  await event(find(root,n=>n.props['aria-label']==='Auto mode'),'click')
  expect(find(root,n=>n.props['aria-label']==='Assignment zone')).toBeTruthy()
- expect(find(root,n=>n.props['aria-label']==='Generated variations per region')).toBeTruthy()
+ expect(find(root,n=>n.props['aria-label']==='Pattern generation')).toBeTruthy()
 })
 
 it('rerolls immediately and coalesces rapid seed changes to the latest audible result',async()=>{
@@ -215,4 +215,47 @@ it('does not save a recalled host patch under an earlier search name',async()=>{
  fake.flush.mockImplementationOnce(async()=>{fake.state.patch={...factory(),id:'recalled',name:'Host recalled'}})
  await event(find(root,n=>n.props['aria-label']==='Save search as patch'),'click')
  expect(fake.save).not.toHaveBeenCalled();expect(fake.state.error).toContain('search changed before saving')
+})
+
+it('defaults to Patterns Only and keeps the generation budget explicit across seed rerolls',async()=>{
+ ready();autoResults();vi.stubGlobal('crypto',{getRandomValues:(values:Uint32Array)=>{values[0]=2468;return values}})
+ const {root}=await render(true),selector=find(root,n=>n.props['aria-label']==='Pattern generation')
+ expect(matcher.variationCount).toBe(0)
+ expect(root.textContent).toContain('Patterns Only')
+ expect(root.textContent).toContain('4 Generative')
+ input(root,'Filter indexed patterns','Heavy Rock')
+ await event(find(root,n=>n.props['aria-label']==='Reroll seed'),'click')
+ expect(fake.request).toHaveBeenLastCalledWith('libraryResolve',expect.objectContaining({variationCount:0,seed:'2468'}))
+ selector.props['onUpdate:modelValue'](3);await vi.advanceTimersByTimeAsync(350)
+ expect(fake.request).toHaveBeenLastCalledWith('libraryResolve',expect.objectContaining({variationCount:3,seed:'2468'}))
+ await event(find(root,n=>n.props['aria-label']==='Reroll seed'),'click')
+ expect(fake.request).toHaveBeenLastCalledWith('libraryResolve',expect.objectContaining({variationCount:3,seed:'2469'}))
+ selector.props['onUpdate:modelValue'](0);await vi.advanceTimersByTimeAsync(350)
+ expect(fake.state.patch.neural.variationCount).toBe(0)
+ expect(fake.request).toHaveBeenLastCalledWith('libraryResolve',expect.objectContaining({variationCount:0}))
+})
+
+it('recalls a saved generation count and saves a change back to Patterns Only',async()=>{
+ ready();autoResults();fake.state.patch={...factory(),id:'generated-groove',neural:{version:1,autoMode:true,query:'Heavy Rock',seed:'72',variationCount:4,numerator:4,denominator:4,feel:'straight',keys:[],warnings:[]}}
+ const {root}=await render(true),selector=find(root,n=>n.props['aria-label']==='Pattern generation')
+ expect(matcher.variationCount).toBe(4)
+ expect(fake.request.mock.calls.some(call=>call[0]==='libraryResolve')).toBe(false)
+ selector.props['onUpdate:modelValue'](0)
+ await event(find(root,n=>n.props['aria-label']==='Save search as patch'),'click')
+ expect(fake.state.patch.neural.variationCount).toBe(0)
+ expect(fake.save).toHaveBeenCalledWith(false,{newPatch:true,name:'Heavy Rock'})
+})
+
+it('discards a late generated result after Patterns Only is selected',async()=>{
+ ready();const original=fake.request.getMockImplementation()!,pending:{payload:any;finish:(p:any)=>void}[]=[]
+ fake.request.mockImplementation((method,payload)=>method==='libraryResolve'?new Promise(finish=>pending.push({payload:clone(payload),finish})):original(method,payload))
+ const {root}=await render(true),selector=find(root,n=>n.props['aria-label']==='Pattern generation')
+ input(root,'Filter indexed patterns','Heavy Rock');selector.props['onUpdate:modelValue'](3)
+ await event(find(root,n=>n.props['aria-label']==='Filter indexed patterns'),'keydown',{key:'Enter'})
+ selector.props['onUpdate:modelValue'](0);await vi.advanceTimersByTimeAsync(350)
+ pending[0]!.finish(resolved(pending[0]!.payload));await settle()
+ expect(fake.replace).not.toHaveBeenCalled()
+ expect(pending[1]!.payload.variationCount).toBe(0)
+ pending[1]!.finish(resolved(pending[1]!.payload));await settle()
+ expect(fake.state.patch.neural.variationCount).toBe(0)
 })

@@ -75,7 +75,7 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
     const bool autoMode=(bool)get(options,"autoMode",false);
     const auto seed=get(options,"seed","0").toString().substring(0,128);
     const int phraseBars=autoMode?8:std::clamp((int)number(options,"phraseBars",8),1,64);
-    const int variationCount=autoMode?(int)(static_cast<juce::uint32>(hash("auto-generation:"+seed).substring(0,8).getHexValue32())%5):std::clamp((int)number(options,"variationCount",0),0,4);
+    const int variationCount=std::clamp((int)number(options,"variationCount",0),0,4);
     PatternFamilies families(library.file());
     juce::var found,indexId,familySelection;
     int numerator=0,denominator=0,selectedFeel=0;double threshold=0;bool familyBound=false;

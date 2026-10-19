@@ -198,22 +198,17 @@ int main(int argc, char** argv) { try {
         }
     }
     check(juce::JSON::toString(generated,true)==juce::JSON::toString(resolveNeuralPatch(catalog,index,base,generatedOptions),true),"Seeded patch resolution was not deterministic");
-    // Auto has one repeatable musical decision surface: query + seed.
-    std::map<int,juce::String> autoSeeds;juce::String alternateOriginal;
-    for(int candidate=0;autoSeeds.size()<5||alternateOriginal.isEmpty();++candidate){
-        const auto text=juce::String(candidate);
-        const int count=(int)(static_cast<juce::uint32>(juce::SHA256(("auto-generation:"+text).toUTF8()).toHexString().substring(0,8).getHexValue32())%5);
-        if(count==0&&autoSeeds.contains(0))alternateOriginal=text;
-        autoSeeds.try_emplace(count,text);
-    }
+    // Auto uses an explicit generation budget; seeds never enable it.
+    const std::map<int,juce::String> autoSeeds{{0,"0"},{1,"1"},{2,"2"},{3,"3"},{4,"4"}};
+    const juce::String alternateOriginal="patterns-only-alternative";
     juce::var originalAuto,lastAuto;
     for(const auto& [count,autoSeed]:autoSeeds){
-        const auto options=object({{"query","Heavy Rock"},{"indexId",oldId},{"autoMode",true},{"seed",autoSeed},{"variationCount",99},{"phraseBars",1}});
+        const auto options=object({{"query","Heavy Rock"},{"indexId",oldId},{"autoMode",true},{"seed",autoSeed},{"variationCount",count},{"phraseBars",1}});
         const auto automatic=resolveNeuralPatch(catalog,index,base,options),intent=get(automatic,"neural");
-        check((bool)get(intent,"autoMode")&&(int)get(intent,"phraseBars")==8&&(int)get(intent,"variationCount")==count,"Auto exposed manual generation or phrase choices");
+        check((bool)get(intent,"autoMode")&&(int)get(intent,"phraseBars")==8&&(int)get(intent,"variationCount")==count,"Auto ignored the explicit generation count or exposed manual phrase choices");
         check(get(intent,"keys").getArray()->size()==5,"Auto did not assign a previously locked compatible key");
         check(number(get(automatic,"fx"),"delayMix",0)==.37,"Auto changed sound settings");
-        check((count==0)==(number(intent,"generatedCount",0)==0),"Auto seed did not choose originals versus generated material");
+        check((count==0)==(number(intent,"generatedCount",0)==0),"Auto ignored the requested originals versus generated material");
         check(number(intent,"generatedCount",0)<=count,"Auto exceeded its kit-wide limit of 1–4 generated tracks");
         for(const auto& key:*get(automatic,"keys").getArray())for(const auto& zone:*get(key,"zones").getArray()){
             const auto choices=get(zone,"candidates");if(!choices.isArray())continue;
@@ -226,10 +221,10 @@ int main(int argc, char** argv) { try {
                     }
                 }check(found,"Auto zone contains a dangling clip reference");
             }
-            check(generatedChoices<=count,"Auto exceeded the seed-selected generation count");
+            check(generatedChoices<=count,"Auto exceeded the explicitly selected generation count");
             check(!generatedChoices||generatedPrimary,"Generated Auto seed still starts an original pattern");
         }
-        auto repeatOptions=options.clone();set(repeatOptions,"variationCount",0);set(repeatOptions,"phraseBars",64);set(repeatOptions,"cpu",true);
+        auto repeatOptions=options.clone();set(repeatOptions,"phraseBars",64);set(repeatOptions,"cpu",true);
         check(juce::JSON::toString(automatic,true)==juce::JSON::toString(resolveNeuralPatch(catalog,index,base,repeatOptions),true),"Auto seed is not deterministic across manual settings or CPU/Metal");
         if(count==0)originalAuto=automatic;
         if(!lastAuto.isVoid()){
@@ -238,6 +233,11 @@ int main(int argc, char** argv) { try {
         }
         lastAuto=automatic;
     }
+    const auto defaultAuto=resolveNeuralPatch(catalog,index,base,object({{"query","Heavy Rock"},{"indexId",oldId},{"autoMode",true},{"seed",autoSeeds.at(0)}}));
+    check(juce::JSON::toString(defaultAuto,true)==juce::JSON::toString(originalAuto,true),"Auto defaults can enable generation without an explicit choice");
+    const auto originalsAgain=resolveNeuralPatch(catalog,index,lastAuto,object({{"query","Heavy Rock"},{"indexId",oldId},{"autoMode",true},{"seed",autoSeeds.at(0)},{"variationCount",0}}));
+    check(juce::JSON::toString(get(originalsAgain,"clips"),true)==juce::JSON::toString(get(originalAuto,"clips"),true),"Patterns Only retained generated tracks from a previous resolve");
+    for(const auto& clip:*get(originalsAgain,"clips").getArray())check(!get(clip,"generation").isObject(),"Patterns Only leaked a generated clip into the active pool");
     const auto alternative=resolveNeuralPatch(catalog,index,base,object({{"query","Heavy Rock"},{"indexId",oldId},{"autoMode",true},{"seed",alternateOriginal}}));
     check(juce::JSON::toString(get(alternative,"keys"),true)!=juce::JSON::toString(get(originalAuto,"keys"),true),"Original-only seeds do not change actual assignments");
     auto performance=[](const juce::var& document){

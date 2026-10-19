@@ -2,7 +2,7 @@
 #include "NeuralIndex.h"
 
 namespace drummer {
-constexpr int patchResolverVersion = 11;
+constexpr int patchResolverVersion = 12;
 // Worker diagnostics are returned separately from the reproducible patch.
 struct PatchResolveMetrics {
     double intentMilliseconds=0,partCandidateMilliseconds=0,clipLoadMilliseconds=0;
