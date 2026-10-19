@@ -32,10 +32,27 @@ bool DrummerProcessor::apply(std::unique_ptr<drummer::Runtime> r, std::optional<
  return true;
 }
 juce::String DrummerProcessor::document(){std::lock_guard guard(stateMutex);return saved;}
-void DrummerProcessor::prepareToPlay(double sr,int max){rate=sr;previewRate=sr;previewBlock=max;stopPreview();engine.prepare(sr,max);rightScratch.resize((size_t)std::max(max,1));scheduler.reset();publishFingers();standalonePpq=0;wasHostPlaying=false;freePlaying=false;activationScheduled=activationClockKnown=false;}
+void DrummerProcessor::prepareToPlay(double sr,int max){rate=sr;previewRate=sr;previewBlock=max;stopPreview();engine.prepare(sr,max);rightScratch.resize((size_t)std::max(max,1));scheduler.reset();standalonePpq=0;monitorBeat=monitorSegment=0;++monitorEpoch;lastPatterns={};publishFingers();wasHostPlaying=false;freePlaying=false;activationScheduled=activationClockKnown=false;}
 bool DrummerProcessor::isBusesLayoutSupported(const BusesLayout&l)const{return l.getMainOutputChannelSet()==juce::AudioChannelSet::stereo()||l.getMainOutputChannelSet()==juce::AudioChannelSet::mono();}
 void DrummerProcessor::renderTo(int end){if(end<=rendered)return;engine.process(outputL+rendered,outputR+rendered,end-rendered,nullptr,0,{clock.bpm,clock.ppq+(rendered-eventBase)*clock.bpm/(60*rate),clock.playing});rendered=end;}
-void DrummerProcessor::emit(void*ctx,const drummer::Event&e){auto&p=*static_cast<DrummerProcessor*>(ctx);p.renderTo(e.offset+p.eventBase);switch(e.type){
+void DrummerProcessor::emit(void*ctx,const drummer::Event&e){auto&p=*static_cast<DrummerProcessor*>(ctx);p.renderTo(e.offset+p.eventBase);
+ drummer::PlayedEvent view;view.epoch=p.monitorEpoch;view.beat=p.monitorSegment+e.offset*p.clock.bpm/(60*p.rate);view.owner=e.owner;view.token=e.token;view.key=e.key;view.note=e.drumNote;view.duration=e.duration;view.velocity=e.velocity;
+ bool record=true;
+ switch(e.type){
+  case drummer::Event::hit:view.type=drummer::PlayedEvent::on;break;
+  case drummer::Event::endHit:view.type=drummer::PlayedEvent::off;break;
+  case drummer::Event::killContact:view.type=drummer::PlayedEvent::ownerOff;break;
+  case drummer::Event::releaseContact:record=p.active&&p.active->config.hardRelease;view.type=drummer::PlayedEvent::ownerOff;break;
+  case drummer::Event::panic:view.type=drummer::PlayedEvent::allOff;break;
+  default:record=false;break;
+ }
+ if(record)p.performanceMonitor.push(view);
+ if(e.type==drummer::Event::releaseContact||e.type==drummer::Event::killContact){
+  auto remember=[&](const drummer::Contact& f){if(f.owner==e.owner&&f.held)p.rememberPattern(f,p.clock.ppq+e.offset*p.clock.bpm/(60*p.rate),false);};
+  for(const auto& f:p.scheduler.contacts())remember(f);
+  for(const auto& f:p.scheduler.sustainedContacts())remember(f);
+ }
+ switch(e.type){
  case drummer::Event::hit:if(p.active)p.engine.drumHit(p.active->sounds[(size_t)e.key],e.owner,e.token,e.velocity,values(e.values));break;
  case drummer::Event::endHit:p.engine.drumEnd(e.token);break;
  case drummer::Event::expression:p.engine.drumExpression(e.owner,values(e.values));break;
@@ -50,7 +67,7 @@ void DrummerProcessor::stopPreview(){++previewRequest;previewStop=true;if(auto*o
 void DrummerProcessor::processBlock(juce::AudioBuffer<float>&buffer,juce::MidiBuffer&midi){
  juce::ScopedNoDenormals denormals;const int n=buffer.getNumSamples();if(n<=0||buffer.getNumChannels()==0)return;
  if(buffer.getNumChannels()==1 && n>(int)rightScratch.size()){buffer.clear();return;}
- outputL=buffer.getWritePointer(0);outputR=buffer.getNumChannels()>1?buffer.getWritePointer(1):rightScratch.data();rendered=eventBase=0;
+ outputL=buffer.getWritePointer(0);outputR=buffer.getNumChannels()>1?buffer.getWritePointer(1):rightScratch.data();rendered=eventBase=0;monitorSegment=monitorBeat;
  engine.process(outputL,outputR,0,nullptr,0,{});
  unsigned write=retiredWrite.load(std::memory_order_relaxed);
  auto room=[&](unsigned needed){return write-retiredRead.load(std::memory_order_acquire)+needed<=retired.size();};
@@ -61,7 +78,7 @@ void DrummerProcessor::processBlock(juce::AudioBuffer<float>&buffer,juce::MidiBu
   auto* previous=active;active=pendingRuntime;pendingRuntime=nullptr;activationScheduled=false;
   engine.activatePerformance(active->performance);
   // Keep the previous runtime owned until contact remapping has finished.
-  if(previous&&previous->patternHash!=active->patternHash)scheduler.reconfigure(previous->config,active->config,beat,emit,this);
+  if(previous&&previous->patternHash!=active->patternHash){scheduler.reconfigure(previous->config,active->config,beat,emit,this);lastPatterns={};}
   retire(previous);activeRevision.store(active->revision,std::memory_order_release);return true;
  };
  const bool immediate=pendingRuntime&&(!active||pendingRuntime->activationGrid<=0||!scheduler.hasHeldNotes());
@@ -110,9 +127,11 @@ void DrummerProcessor::processBlock(juce::AudioBuffer<float>&buffer,juce::MidiBu
  uint32_t evaluations=0;bool scheduleOverflow=false;
  auto schedule=[&](int frames,const drummer::Midi* messages,int size){
   scheduler.process(active->config,clock,frames,messages,size,emit,this);
-  evaluations+=scheduler.evaluations;scheduleOverflow=scheduleOverflow||scheduler.overflow;
+  monitorSegment+=frames*clock.bpm/(60*rate);evaluations+=scheduler.evaluations;scheduleOverflow=scheduleOverflow||scheduler.overflow;
  };
- if(full){engine.drumPanic();scheduler.reset();activationScheduled=false;}
+ if(full){engine.drumPanic();scheduler.reset();activationScheduled=false;
+  drummer::PlayedEvent end;end.type=drummer::PlayedEvent::allOff;end.epoch=monitorEpoch;end.beat=monitorBeat;performanceMonitor.push(end);monitorSegment+=n*clock.bpm/(60*rate);
+ }
  else if(switchAt<n){
   int before=0;while(before<count&&input[(size_t)before].offset<switchAt)++before;
   schedule(switchAt,input.data(),before);renderTo(switchAt);
@@ -125,7 +144,7 @@ void DrummerProcessor::processBlock(juce::AudioBuffer<float>&buffer,juce::MidiBu
   schedule(n-switchAt,input.data()+before,count-before);
  }else schedule(n,input.data(),count);
  renderTo(n);
- standalonePpq=clock.ppq+(n-eventBase)*clock.bpm/(60*rate);activationExpected=standalonePpq;activationClockKnown=true;hostBpm=clock.bpm;
+ monitorBeat=monitorSegment;standalonePpq=clock.ppq+(n-eventBase)*clock.bpm/(60*rate);activationExpected=standalonePpq;activationClockKnown=true;hostBpm=clock.bpm;
  unsigned pw=previewWrite.load(std::memory_order_relaxed);
  if(pw-previewRead.load(std::memory_order_acquire)+2<=previewRetired.size()){
   auto retirePreview=[&](drummer::Preview* old){if(old){previewRetired[pw%previewRetired.size()]=old;previewWrite.store(++pw,std::memory_order_release);}};
@@ -146,14 +165,26 @@ bool DrummerProcessor::readFingers(FingerSnapshot& out) noexcept {
  out=fingerSnapshot;
  fingerBusy.clear(std::memory_order_release);return true;
 }
+void DrummerProcessor::rememberPattern(const drummer::Contact& f,double beat,bool playing) noexcept {
+ if(!active||f.key<0||f.key>=128)return;
+ auto& pattern=lastPatterns[(size_t)f.key];pattern={f.clip,f.zone,-1,0,true,playing};
+ const auto& key=active->config.keys[(size_t)f.key];const int group=key.zones[(size_t)std::clamp(f.zone,0,key.zoneCount-1)].group;
+ if(key.intentEnabled&&group>=0&&group<(int)active->config.groups.size()){const auto& choices=active->config.groups[(size_t)group];for(int i=0;i<choices.count;++i)if(choices.candidates[(size_t)i].clip==f.clip){pattern.candidate=i;break;}}
+ if(f.clip>=0&&f.clip<(int)active->config.clips.size()){const auto& clip=active->config.clips[(size_t)f.clip];pattern.phase=std::fmod(beat-clip.origin,clip.length);if(pattern.phase<0)pattern.phase+=clip.length;}
+}
 void DrummerProcessor::publishFingers() noexcept {
+ for(auto& pattern:lastPatterns)pattern.playing=false;
+ for(const auto& f:scheduler.contacts())if(f.held&&!f.suppressed)rememberPattern(f,standalonePpq,true);
+ for(const auto& f:scheduler.sustainedContacts())if(f.held)rememberPattern(f,standalonePpq,true);
  if(fingerBusy.test_and_set(std::memory_order_acquire))return;
  fingerSnapshot.count=0;
+ fingerSnapshot.patterns=lastPatterns;
+ fingerSnapshot.runtime=active;if(active)fingerSnapshot.patternHash=active->patternHash;
+ fingerSnapshot.beat=monitorBeat;fingerSnapshot.bpm=hostBpm.load();fingerSnapshot.epoch=monitorEpoch;
+
  auto append=[&](const drummer::Contact& f,bool sustained){
   auto& view=fingerSnapshot.fingers[(size_t)fingerSnapshot.count++];view={f.owner,f.channel,f.key,f.zone,f.values.slide,f.values.glide,f.values.press,sustained,f.toggled,f.held};
-  if(active&&f.key>=0&&f.key<128){const auto& key=active->config.keys[(size_t)f.key];const int group=key.zones[(size_t)std::clamp(f.zone,0,key.zoneCount-1)].group;
-   if(key.intentEnabled&&group>=0&&group<(int)active->config.groups.size()){const auto& choices=active->config.groups[(size_t)group];for(int i=0;i<choices.count;++i)if(choices.candidates[(size_t)i].clip==f.clip){view.candidate=i;break;}}
-  }
+  if(f.key>=0&&f.key<128)view.candidate=lastPatterns[(size_t)f.key].candidate;
  };
  for(const auto& f:scheduler.contacts())if(f.down&&!f.suppressed)append(f,false);
  for(const auto& f:scheduler.sustainedContacts())if(f.held)append(f,true);
@@ -183,7 +214,12 @@ void DrummerProcessor::timerCallback(){
    }catch(const std::exception& e){programFailed=true;juce::Logger::writeToLog("MIDI patch: "+juce::String(e.what()));}
   });
  }
- engine.collectGarbage();unsigned pr=previewRead.load();while(pr!=previewWrite.load(std::memory_order_acquire)){delete previewRetired[pr%previewRetired.size()];++pr;}previewRead.store(pr,std::memory_order_release);unsigned r=retiredRead.load();while(r!=retiredWrite.load(std::memory_order_acquire)){delete retired[r%retired.size()];++r;}retiredRead.store(r,std::memory_order_release);}
+ engine.collectGarbage();unsigned pr=previewRead.load();while(pr!=previewWrite.load(std::memory_order_acquire)){delete previewRetired[pr%previewRetired.size()];++pr;}previewRead.store(pr,std::memory_order_release);
+ // Capture the retired cohort before reading its protected runtime. Audio can
+ // publish a newer snapshot, but cannot publish a runtime already retired here.
+ const auto end=retiredWrite.load(std::memory_order_acquire);FingerSnapshot protectedView;
+ if(readFingers(protectedView)){unsigned r=retiredRead.load();while(r!=end){auto* old=retired[r%retired.size()];if(old==protectedView.runtime)break;delete old;++r;}retiredRead.store(r,std::memory_order_release);}
+}
 void DrummerProcessor::getStateInformation(juce::MemoryBlock&out){juce::ValueTree tree("RoliDrummer");const auto doc=document();tree.setProperty("document",doc,nullptr);drummer::appendSessionAssets(tree,juce::JSON::parse(doc));tree.setProperty("width",editorWidth,nullptr);tree.setProperty("height",editorHeight,nullptr);// MIDI CC writes the parameter's lock-free value directly. The APVTS listener
  // cache is only notified by host/editor automation, so serialize the actual
  // controller values explicitly without calling host listeners on audio.

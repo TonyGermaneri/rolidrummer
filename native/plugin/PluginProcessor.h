@@ -4,6 +4,7 @@
 #include <drummer/SharedStore.h>
 #include <drummer/Preview.h>
 #include <drummer/PatternLibrary.h>
+#include <drummer/PerformanceMonitor.h>
 #include <ssb/Engine.h>
 #include <ssb/MidiQueue.h>
 #include <mutex>
@@ -36,8 +37,18 @@ public:
  std::array<std::atomic<int>,16> contacts{};
  std::array<std::atomic<float>,16> contactSlide{},contactGlide{},contactPressure{};
  struct FingerView { uint64_t owner=0;int channel=0,note=0,zone=0;float slide=0,glide=.5f,pressure=0;bool sustained=false,toggled=false,playing=false;int candidate=-1; };
- struct FingerSnapshot { std::array<FingerView,drummer::maxContacts+drummer::Scheduler::maxSustained> fingers{};int count=0; };
+ struct KeyPattern { int clip=-1,zone=0,candidate=-1;double phase=0;bool known=false,playing=false; };
+ struct FingerSnapshot {
+  std::array<FingerView,drummer::maxContacts+drummer::Scheduler::maxSustained> fingers{};int count=0;
+  std::array<KeyPattern,128> patterns{};
+  const drummer::Runtime* runtime=nullptr;
+  std::array<uint8_t,32> patternHash{};
+  double beat=0,bpm=120;uint64_t epoch=0;
+ };
+ // Runtime is immutable and protected from message-thread GC by this snapshot.
+ // Dereference it only synchronously on the message thread.
  bool readFingers(FingerSnapshot&) noexcept;
+ drummer::PerformanceMonitor performanceMonitor;
  std::atomic<int> lastSlideChannel{-1},lastSlideValue{0};
  std::atomic<uint64_t> stateRevision{0};
  // Program requests cross to the worker without loading samples on the audio thread.
@@ -57,6 +68,8 @@ private:
  // data under the flag, then build JS objects after releasing it.
  std::atomic_flag fingerBusy=ATOMIC_FLAG_INIT;
  FingerSnapshot fingerSnapshot;
+ std::array<KeyPattern,128> lastPatterns{};
+ void rememberPattern(const drummer::Contact&,double,bool) noexcept;
  void publishFingers() noexcept;
  void timerCallback()override;
  std::atomic<uint64_t> programRequest{0};
@@ -75,6 +88,7 @@ private:
  std::vector<float> rightScratch;
  float* outputL=nullptr;float* outputR=nullptr;int rendered=0,eventBase=0;double rate=48000,standalonePpq=0;
  drummer::Clock clock;
+ double monitorBeat=0,monitorSegment=0;uint64_t monitorEpoch=0;
  bool wasHostPlaying=false;
  std::array<juce::RangedAudioParameter*,5> macroParameters {};
  std::atomic<float>* outputVolume=nullptr;

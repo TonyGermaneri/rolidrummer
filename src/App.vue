@@ -20,6 +20,7 @@ import PatchPanel from './components/PatchPanel.vue'
 import PatchSelector from './components/PatchSelector.vue'
 import PatternBrowser from './components/PatternBrowser.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+import PianoRollPanel from './components/PianoRollPanel.vue'
 const selected=computed(()=>state.patch.keys.find(k=>k.note===state.selected))
 const base=ref(36),patchLoading=ref(false),patchSaving=ref(false)
 watch(()=>shared['ui/theme']?.revision,()=>{const value=shared['ui/theme']?.value;if(value)themeId.value=themeById(String(value)).id},{immediate:true})
@@ -51,13 +52,14 @@ async function openPatch(){const p=await request('openPatch');if(p)await replace
 function keydown(e:KeyboardEvent){if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo(e.shiftKey)}}
 onMounted(()=>{void attempt(init);window.addEventListener('keydown',keydown)});onBeforeUnmount(()=>{window.removeEventListener('keydown',keydown)})
 </script>
-<template><v-app><div class="instrument" :class="{'workspace-open':state.tab==='Patterns'||state.tab==='Settings'}">
+<template><v-app><div class="instrument" :class="{'workspace-open':['Patterns','Piano Roll','Settings'].includes(state.tab)}">
 <header class="masthead"><button class="project-tile" aria-label="Project settings" :title="`Roli Drummer · ${themeById(themeId).name}`" @click="state.settingsSection='appearance';state.tab='Settings'"><span class="project-logo">ROLI DRUMMER</span><span class="project-theme"><i :style="{background:themeById(themeId).primary}"/><i :style="{background:themeById(themeId).secondary}"/>{{themeById(themeId).name}}</span></button><PatchSelector :name="state.patch.name" :choices="patchChoices" :current-id="currentPatchId" :slot="currentProgram" :program="state.telemetry.program" :unassigned="state.telemetry.programUnassigned" :busy="patchLoading||patchSaving||state.saving" @select="id=>attempt(()=>selectPatch(id))"/><MasterEffects/><div class="transport"><button v-if="state.standalone" @click="attempt(()=>request('transport',!state.telemetry.playing))">{{state.telemetry.playing?'■ Stop':'▶ Play'}}</button><span :class="{lit:state.telemetry.playing||state.telemetry.freePlaying}">●</span><b class="tempo-readout">{{state.telemetry.bpm.toFixed(1)}}</b><small>BPM · {{state.telemetry.freePlaying?'KEYS':state.standalone?'INTERNAL':'HOST'}}</small><span class="position lcd-readout">{{Math.floor(state.telemetry.ppq/4)+1}} : {{(state.telemetry.ppq%4+1).toFixed(1)}}</span><div class="meter"><i :style="{width:`${Math.min(1,state.telemetry.peak)*100}%`}"/></div><Knob label="OUT" :model-value="state.telemetry.output" :max="1.5" :default=".8" :size="28" :format="v=>`${Math.round(v*100)}%`" @update:model-value="output"/><button class="ssb-button panic-button" @click="panic">PANIC</button></div></header>
-<nav class="tabs"><button v-for="tab in ['Key','Patterns','Patches','Settings']" :key="tab" :class="{active:state.tab===tab}" @click="state.tab=tab">{{tab}}</button><span class="tab-spacer"/><button :disabled="!state.history.length" @click="undo()">↶ Undo</button><button :disabled="!state.future.length" @click="undo(true)">↷ Redo</button></nav>
+<nav class="tabs"><button v-for="tab in ['Key','Patterns','Piano Roll','Patches','Settings']" :key="tab" :class="{active:state.tab===tab}" @click="state.tab=tab">{{tab}}</button><span class="tab-spacer"/><button :disabled="!state.history.length" @click="undo()">↶ Undo</button><button :disabled="!state.future.length" @click="undo(true)">↷ Redo</button></nav>
 <section class="upper">
 <div v-if="state.tab==='Key'&&selected" class="key-editor"><div class="key-editor-body"><SoundPanel :sound="selected.sound" :note="selected.note" @bind="bind"><template #key-controls><KeyControls :binding="selected"/></template><ExpressionPanel :binding="selected"/></SoundPanel></div></div>
 <div v-else-if="state.tab==='Key'" class="empty">Drop a sound on this key to assign it.</div>
 <PatternBrowser v-else-if="state.tab==='Patterns'"/>
+<PianoRollPanel v-else-if="state.tab==='Piano Roll'"/>
 <PatchPanel v-else-if="state.tab==='Patches'" :choices="patchChoices" :busy="patchLoading||patchSaving" @load="id=>attempt(()=>selectPatch(id))" @save="attempt(()=>savePatch())" @copy="attempt(()=>savePatch(true))" @open="attempt(openPatch)" @export="attempt(exportPatch)"/>
 <SettingsPanel v-else/>
 </section>

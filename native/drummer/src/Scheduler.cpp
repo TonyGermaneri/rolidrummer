@@ -285,7 +285,7 @@ void Scheduler::process(const Configuration& cfg,Clock clock,int frames,const Mi
             while(pendingOffCount && offOffset()<=hit.offset)sendOff(offOffset());
             const auto& clip=cfg.clips[(size_t)hit.clip];const auto& note=clip.notes[(size_t)hit.note];
             const double beat=clock.ppq+hit.offset*step;
-            Event e;e.type=Event::hit;e.offset=hit.offset;e.drumNote=note.note;e.velocity=note.velocity;
+            Event e;e.type=Event::hit;e.offset=hit.offset;e.drumNote=note.note;e.velocity=note.velocity;e.duration=note.duration;
             bool fired=false;
             for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if(!f.held || beat+step*.51<f.opens)continue;
                 const auto& key=cfg.keys[(size_t)f.key];

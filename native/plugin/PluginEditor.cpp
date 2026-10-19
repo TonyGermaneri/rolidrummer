@@ -38,6 +38,7 @@ void DrummerEditor::request(const juce::Array<juce::var>&args,Complete complete)
   background=juce::Colour::fromString("ff"+colour.substring(1));resizeCorner.setColour(juce::ResizableWindow::backgroundColourId,background);repaint();resizeCorner.repaint();complete(answer(true));return;
  }
  if(method=="ready"){pageReady=true;auto* o=new juce::DynamicObject;o->setProperty("document",juce::JSON::parse(plugin.document()));o->setProperty("standalone",plugin.wrapperType==juce::AudioProcessor::wrapperType_Standalone);o->setProperty("revision",(juce::int64)plugin.stateRevision.load());o->setProperty("activationPending",plugin.activationPending());complete(answer(o));return;}
+ if(method=="monitorKey"){monitoredKey=std::clamp((int)payload,0,127);sentPattern.clear();complete(answer(true));return;}
  if(method=="midi"){if(auto* bytes=payload.getArray();bytes&&bytes->size()>=3)plugin.screenMidi.push({(uint8_t)(int)(*bytes)[0],(uint8_t)(int)(*bytes)[1],(uint8_t)(int)(*bytes)[2],3});complete(answer(true));return;}
  if(method=="transport"){plugin.standalonePlaying=(bool)payload;complete(answer(true));return;}
  if(method=="parameter"){auto id=payload.getProperty("id",{}).toString();if(auto*param=plugin.parameters.getParameter(id)){param->beginChangeGesture();param->setValueNotifyingHost(param->convertTo0to1((float)(double)payload.getProperty("value",0)));param->endChangeGesture();}complete(answer(true));return;}
@@ -150,6 +151,33 @@ void DrummerEditor::timerCallback(){
    f->setProperty("slide",view.slide);f->setProperty("glide",view.glide);f->setProperty("pressure",view.pressure);fingers.add(juce::var(f));
   }
   o->setProperty("fingers",fingers);
+  auto* performance=new juce::DynamicObject;performance->setProperty("beat",snapshot.beat);performance->setProperty("bpm",snapshot.bpm);performance->setProperty("epoch",(double)snapshot.epoch);
+  performance->setProperty("dropped",(double)plugin.performanceMonitor.dropped.load());
+  juce::Array<juce::var> events;drummer::PlayedEvent event;
+  while(plugin.performanceMonitor.pop(event)){
+   auto* item=new juce::DynamicObject;item->setProperty("type",(int)event.type);item->setProperty("epoch",(double)event.epoch);item->setProperty("beat",event.beat);item->setProperty("duration",event.duration);
+   item->setProperty("owner",juce::String((juce::int64)event.owner));item->setProperty("token",juce::String((juce::int64)event.token));item->setProperty("key",event.key);item->setProperty("note",event.note);item->setProperty("velocity",event.velocity);events.add(item);
+  }
+  performance->setProperty("events",events);o->setProperty("performance",performance);
+  const auto& pattern=snapshot.patterns[(size_t)monitoredKey];
+  const auto* runtime=snapshot.runtime;
+  auto version=juce::String::toHexString(snapshot.patternHash.data(),(int)snapshot.patternHash.size(),0);
+  auto identity=version+":"+juce::String((juce::int64)snapshot.epoch)+":"+juce::String(monitoredKey)+":"+juce::String(pattern.clip)+":"+juce::String(pattern.known?1:0);
+  auto* position=new juce::DynamicObject;position->setProperty("key",monitoredKey);position->setProperty("phase",pattern.phase);position->setProperty("playing",pattern.playing);position->setProperty("zone",pattern.zone);position->setProperty("candidate",pattern.candidate);position->setProperty("identity",identity);
+  o->setProperty("patternPosition",position);
+  if(identity!=sentPattern){
+   sentPattern=identity;auto* data=new juce::DynamicObject;data->setProperty("identity",identity);data->setProperty("key",monitoredKey);data->setProperty("known",pattern.known);data->setProperty("name","Silent zone");data->setProperty("length",4.0);
+   juce::Array<juce::var> notes;
+   if(runtime&&pattern.known&&pattern.clip>=0&&pattern.clip<(int)runtime->config.clips.size()){
+    const auto& clip=runtime->config.clips[(size_t)pattern.clip];data->setProperty("name",runtime->clipNames[(size_t)pattern.clip]);data->setProperty("length",clip.length);
+    int count=0;for(const auto& note:clip.notes)if(runtime->config.keys[(size_t)monitoredKey].parts[(size_t)note.note]){
+     ++count;if(notes.size()>=8192)continue;
+     auto* n=new juce::DynamicObject;n->setProperty("beat",note.beat);n->setProperty("duration",note.duration);n->setProperty("note",note.note);n->setProperty("velocity",note.velocity);notes.add(n);
+    }
+    data->setProperty("totalNotes",count);
+   }
+   data->setProperty("notes",notes);o->setProperty("pattern",data);
+  }
  }
  o->setProperty("slideChannel",plugin.lastSlideChannel.load());o->setProperty("slideValue",plugin.lastSlideValue.load());
  std::vector<ssb::VoiceView> voices;double time=0;

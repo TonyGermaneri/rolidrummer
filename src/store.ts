@@ -1,10 +1,11 @@
 import { reactive, watch } from 'vue'
 import { factory, normalize, clone, type Patch } from './model'
 import { request, native, onNative } from './native/bridge'
+import { acceptPerformance } from './performance'
 export interface Finger {owner?:string;sustained?:boolean;toggled?:boolean;playing?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
 export interface Playhead {id:number;note:number;pos:number;dur:number;velocity:number;grains:boolean}
 export interface GrainMark {voice:number;when:number;pos:number;len:number;dur:number;pan:number;gain:number;reverse:boolean}
-export const state = reactive({ patch: factory(), selected: 48, tab: 'Key', settingsSection: 'libraries', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })
+export const state = reactive({ patch: factory(), selected: 48, trackKeywave: false, lastTouchedKey: -1, tab: 'Key', settingsSection: 'libraries', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })
 let applying = false, lastSaved = '', lastCheckpoint = '', inFlight = '', generation = 0, nativeRevision = 0, loading = false, legacyIdentityName = ''
 let timer: ReturnType<typeof setTimeout> | undefined, draining: Promise<void> | undefined
 type Pending = { document: Patch; generation: number; activationGrid: number; preserveActivation: boolean }
@@ -100,11 +101,20 @@ export function undo(redo = false) {
  try { state.patch = normalize(JSON.parse(json));legacyIdentityName=state.patch.id?'':state.patch.name;lastCheckpoint = json; ++generation } finally { applying = false }
  void attempt(() => flushEdits(false,0))
 }
+export function observeKeyTouch(bytes:number[]){
+ if((bytes[0]&240)!==144||!(bytes[2]>0)||!state.patch.keys.some(key=>key.note===bytes[1]))return
+ state.lastTouchedKey=bytes[1]
+ if(state.trackKeywave)state.selected=bytes[1]
+}
+watch(()=>state.trackKeywave,enabled=>{if(enabled&&state.lastTouchedKey>=0&&state.patch.keys.some(key=>key.note===state.lastTouchedKey))state.selected=state.lastTouchedKey},{flush:'sync'})
 onNative('rdTelemetry', data => {
+ const {performance,pattern,patternPosition,...telemetry}=data
+ acceptPerformance({performance,pattern,patternPosition})
+ for(const bytes of data.midi??[])observeKeyTouch(bytes)
  const grains=state.telemetry.grainMarks
  if(data.programFailed&&!state.telemetry.programFailed)state.error='Could not load the MIDI-selected patch. Check the saved patch or select it again.'
  if(data.programUnassigned&&!state.telemetry.programUnassigned)state.status=`MIDI program ${data.program} is unassigned; the current patch is still playing.`
- Object.assign(state.telemetry, data)
+ Object.assign(state.telemetry, telemetry)
  state.telemetry.grainMarks=[...grains,...(data.grainMarks??[])].filter(g=>state.telemetry.audioTime<=g.when+g.dur+.35).slice(-800)
  for (const m of data.midi ?? []) if (state.learn >= 0 && (m[0] & 240) === 176 && m[1] !== 74 && m[1] < 120) {
   if(state.learn===5)state.patch.sustainCC=m[1]
@@ -123,7 +133,7 @@ onNative('rdTelemetry', data => {
   })
  }
 })
-export function sendMidi(bytes: number[]) { if (native()) void request('midi', bytes).catch(report) }
+export function sendMidi(bytes: number[]) { observeKeyTouch(bytes); if (native()) void request('midi', bytes).catch(report) }
 export interface SharedField{key:string;value:any;revision:number}
 export const shared=reactive<Record<string,SharedField>>({})
 let revision=0,refreshing:Promise<void>|undefined

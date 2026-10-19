@@ -7,6 +7,7 @@ import {request,native} from '../native/bridge'
 import { DENSITY_MAX, DENSITY_MIN, DETUNE_MAX, GRAIN_MODES, NOTE_RND_MAX, VAR_PITCH_MAX, VAR_POS_MAX, VAR_SIZE_MAX, VAR_VOL_MAX, FM_AMOUNT_MAX, FM_FREQ_MAX, FM_FREQ_MIN, GRAIN_FREQ_MAX, grainFreqMin, SCAN_DIST_MIN, SCAN_TIME_MAX, SCAN_TIME_MIN, SPRAY_MAX, SPRAY_SIGNS, SYMMETRIES } from '../audio/grainMath'
 import Knob from './Knob.vue'
 import Waveform from './Waveform.vue'
+import SelectedPattern from './SelectedPattern.vue'
 import {
   fmtCents, fmtChoke, fmtDb, fmtFinePct, fmtFix1, fmtFix2, fmtGrainHz, fmtMs, fmtSignedPct, fmtWholePct, fmtHz, fmtNum, fmtOct, fmtPan, fmtPct, fmtQ,
   fmtRatio, fmtRepeat, fmtSec, fmtSemis, midiNoteName,
@@ -45,7 +46,7 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
 </script>
 <template>
  <div class="panel wide" @click.capture="clicked">
- <div class="top"><div class="scope"><Waveform :peaks="peaks" :duration="duration" :note="note" :clip-in="s.clipIn" :clip-out="s.clipOut"/><span>{{sound.path.split('/').pop()}}</span></div><slot name="key-controls"/><label class="sound-title"><span class="sound-caption">SOUND</span><input v-model="s.name"/><button type="button" class="sampler-preview" :aria-label="isPreviewing?'Stop sound preview':'Preview sound'" :aria-pressed="isPreviewing" :aria-busy="isPreviewing&&preview.loading" @click.stop="attempt(playSound)">{{isPreviewing?'■ Stop':'▶ Play sound'}}</button><button :class="{on:s.reverse}" data-param="reverse" @click="s.reverse=!s.reverse">Reverse</button></label></div>
+ <div class="top"><div class="scope-pair"><div class="scope"><Waveform :peaks="peaks" :duration="duration" :note="note" :clip-in="s.clipIn" :clip-out="s.clipOut"/><span>{{sound.path.split('/').pop()}}</span></div><SelectedPattern v-if="note!==undefined" :note="note"/></div><slot name="key-controls"/><label class="sound-title"><span class="sound-caption">SOUND</span><input v-model="s.name"/><button type="button" class="sampler-preview" :aria-label="isPreviewing?'Stop sound preview':'Preview sound'" :aria-pressed="isPreviewing" :aria-busy="isPreviewing&&preview.loading" @click.stop="attempt(playSound)">{{isPreviewing?'■ Stop':'▶ Play sound'}}</button><button :class="{on:s.reverse}" data-param="reverse" @click="s.reverse=!s.reverse">Reverse</button></label></div>
     <div v-if="sound.missing" class="missing-sound"><span>{{sound.missing}}</span><button @click="attempt(relink)">Locate sound…</button></div>
     <div class="modules">
       <section class="module" :class="{ folded: isFolded('play') }">
@@ -307,6 +308,7 @@ function clicked(e:MouseEvent){const target=(e.target as HTMLElement).closest('[
   align-items: flex-start;
   margin-bottom: 8px;
 }
+.scope-pair{flex:1;min-width:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .panel.wide .scope {
   flex: 1;
 }

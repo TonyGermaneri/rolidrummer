@@ -22,11 +22,15 @@ import SoundPanel from './SoundPanel.vue'
 import Waveform from './Waveform.vue'
 import ExpressionCurve from './ExpressionCurve.vue'
 import ExpressionPanel from './ExpressionPanel.vue'
+import KeyControls from './KeyControls.vue'
+import PianoRollPanel from './PianoRollPanel.vue'
+import {acceptPerformance,performanceView} from '../performance'
 import { importPattern, midiImport, finishMidiImport } from '../midiImport'
 
 let cleanup: (() => void)[] = []
 beforeEach(() => {
   backend.state.patch = factory(); backend.state.selected = 48; backend.state.error = ''
+  backend.state.ready=false;backend.state.trackKeywave=false;performanceView.patterns={};performanceView.notes=[];performanceView.epoch=-1
   backend.state.telemetry.contacts = []; backend.state.telemetry.fingers = []; backend.state.telemetry.macros = [0, 0, 0, 0, 0]
   backend.request.mockReset().mockImplementation(async (method:string)=>method==='waveform'?{peaks:[],duration:.5}:true); backend.midi.mockReset()
   vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
@@ -35,6 +39,46 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup.forEach(fn => fn()); cleanup = []; finishMidiImport(false); vi.unstubAllGlobals() })
 async function render(component: any, props = {}) { const view = await mount(component, props); cleanup.push(view.unmount); return view.root }
+
+describe('keywave piano roll contracts',()=>{
+ it('splits waveform and pattern preview, showing the actual filtered variation and frozen last marker',async()=>{
+  backend.state.ready=true
+  const key=backend.state.patch.keys.find((k:any)=>k.note===48)
+  const root=await render(SoundPanel,{sound:key.sound,note:48})
+  expect(find(root,n=>n.props.class==='scope-pair')).toBeDefined()
+  expect(backend.request).toHaveBeenCalledWith('monitorKey',48)
+  const position={identity:'test:1:48:2',key:48,zone:1,candidate:2,phase:2,playing:true}
+  acceptPerformance({pattern:{identity:position.identity,key:48,known:true,name:'Live variation',length:4,notes:[{beat:1,duration:.25,note:36,velocity:1}]},patternPosition:position})
+  await settle()
+  expect(root.textContent).toContain('PLAYINGLive variation')
+  expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(500)
+  acceptPerformance({patternPosition:{...position,phase:2.5,playing:false}});await settle()
+  expect(root.textContent).toContain('LASTLive variation')
+  expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(625)
+ })
+ it('shows a filtered mini preview on each key zone and exposes the Track toggle',async()=>{
+  const key=backend.state.patch.keys.find((k:any)=>k.note===48)
+  key.parts=[36];const clip=backend.state.patch.clips.find((c:any)=>c.id===key.zones[0].clipId)
+  clip.notes=[{beat:0,duration:.25,note:36,velocity:1},{beat:1,duration:.25,note:38,velocity:1}]
+  const root=await render(ZoneEditor,{zones:key.zones,scope:'48'})
+  const previews=nodes(root,n=>n.props.role==='img')
+  expect(previews).toHaveLength(key.zones.length)
+  expect(previews.some(n=>n.props['aria-label']==='1 drum notes')).toBe(true)
+  const controls=await render(KeyControls,{binding:key}),track=find(controls,n=>n.props['aria-label']==='Track last touched keywave')
+  expect(track.props['aria-pressed']).toBe(false)
+  await event(track,'click');expect(backend.state.trackKeywave).toBe(true);expect(track.props['aria-pressed']).toBe(true)
+ })
+ it('draws a live keyboard and growing note history and clears only the display',async()=>{
+  performanceView.epoch=1;performanceView.beat=2
+  const root=await render(PianoRollPanel)
+  acceptPerformance({performance:{epoch:1,beat:3,bpm:120,dropped:0,events:[{type:0,epoch:1,beat:2,duration:2,key:48,note:36,velocity:1,owner:'a',token:'t'}]}});await settle()
+  expect(find(root,n=>n.props['aria-label']==='MIDI note keyboard')).toBeDefined()
+  expect(nodes(root,n=>String(n.props.class).includes('played-notes'))).toHaveLength(1)
+  expect(nodes(root,n=>n.tag==='clipPath')).toHaveLength(1)
+  await event(find(root,n=>n.tag==='button'&&n.textContent==='Clear'),'click')
+  expect(performanceView.notes).toHaveLength(0);expect(backend.midi).not.toHaveBeenCalled()
+ })
+})
 
 describe('zone component interaction contracts', () => {
   it('resizes the selected boundary with pointer and keyboard input, then splits and removes zones', async () => {

@@ -1,20 +1,23 @@
-# Roli Drummer 0.3.1
+# Roli Drummer 0.4.0
 
-Generation is now an explicit choice in the pattern matcher. The dropdown beside the search offers **Patterns Only** (the default), **1 Generative**, **2 Generative**, **3 Generative** and **4 Generative**.
+Watch the patterns each keywave plays and follow your performance with the new piano rolls.
 
-- New searches and native resolver calls default to zero generated tracks. Seed rerolls change pattern selection without turning generation on.
-- Generation remains available through the 1–4 choices. Auto uses that count across the whole kit; manual mode keeps its existing per-region generation behavior.
-- Choosing Patterns Only in Auto reruns matching and replaces the previous generated pool with library patterns. A late generated search result cannot overwrite the newer choice.
-- Saving and recalling a patch retains its selected generation count and actual notes. Existing saved patches keep their notes until explicitly changed.
+- The Key panel splits the waveform area equally between the sound waveform and the current or last pattern, with a moving playback marker. The preview follows the actual gesture-selected variation and applies that keywave’s MIDI drum-note filter.
+- Zone rows show miniature piano rolls, including the current or last variation’s transport position.
+- The new **Piano Roll** tab shows live drum output on a scrolling MIDI keyboard grid. Notes grow from a fixed playhead; colors follow the source keywave. Choose one, two, four or eight bars of history, scroll through pitches, or clear the display.
+- **TRACK** in the Key panel follows the last keywave touched. Turn it off to pin the selected keywave. It starts off and is separate from the saved patch.
+- Monitoring preserves note timing, duration and releases, including short taps. Its rolling clock stays continuous across host seeks and tempo changes. The bounded monitoring queue never makes the audio callback wait or allocate memory.
 
-This update retains the Auto/manual matcher, independent patch Save, compact Settings workspace, per-key Normal/Hold/Toggle behavior, drum-note filters and SSB 0.6.2 sound engine from 0.3.0.
+This release retains Patterns Only as the default, the optional 1–4 generation choices, Auto/manual matching, patch saving, Settings, per-key Normal/Hold/Toggle behavior and the SSB sound engine.
 
-The macOS downloads contain universal Apple Silicon and Intel AU, VST3 and standalone builds. The AU archive is **RoliDrummer.component-v0.3.1.zip**, containing the **RoliDrummer.component** bundle. The release publishes the original notarized archives and checks clean extraction, package recognition, signatures and stapled tickets.
+The macOS downloads contain universal Apple Silicon and Intel AU, VST3 and standalone builds. The AU archive is **RoliDrummer.component-v0.4.0.zip**, containing the **RoliDrummer.component** bundle. The original notarized archives are published directly, with checks for clean extraction, macOS package recognition, signatures and stapled tickets.
 
 Neural indexing and search require macOS 13.4 or later. Your personal MIDI library is not included. Use a portable **.rolidrummer** export to transfer a prepared patch with its patterns, mappings and sounds.
 
 ## Validation
 
-Regression coverage checks Patterns Only defaults, explicit generation counts, seed rerolls, generation-to-original transitions, saved-choice recall and rejection of stale generated results. Release CI runs frontend and native suites, Apple auval, VST3 pluginval at strictness 5, universal bundle checks, Developer ID signing and Apple notarization before publishing.
+Local validation passed 146 frontend tests, all 18 native suites and universal builds. Coverage includes filtered pattern previews, live note geometry, Track behavior, sample timing, note endings, short taps, queued activation, host seeks, tempo changes and audio restart. The real-time stress suite checks allocation-free callbacks and instance isolation.
+
+Release CI repeats the frontend and native suites, Apple auval, VST3 pluginval at strictness 5, universal bundle checks, Developer ID signing and Apple notarization before publishing.
 
 **BUILD.txt** records the release commit and signing/notarization status; **SHA256SUMS** contains archive checksums.

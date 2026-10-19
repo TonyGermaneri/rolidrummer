@@ -49,6 +49,7 @@ struct Event {
     int offset = 0, key = -1, channel = 0, drumNote = -1;
     uint64_t owner = 0, token = 0;
     float velocity = 1;
+    double duration = 0; // Pattern note length, in quarter-note beats.
     Expression values;
     int cc = 0;
     float value = 0;

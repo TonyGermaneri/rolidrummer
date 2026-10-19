@@ -9,6 +9,8 @@ public:
 private:
  DrummerProcessor& plugin;
  bool pageReady=false;
+ int monitoredKey=48;
+ juce::String sentPattern;
  juce::WebBrowserComponent browser;
  struct ResizeBorder:juce::ResizableBorderComponent {
   using juce::ResizableBorderComponent::ResizableBorderComponent;

@@ -15,6 +15,20 @@ async function setup() {
 }
 
 describe('editor document synchronization', () => {
+  it('tracks only the most recent note-on when enabled and leaves selection pinned otherwise',async()=>{
+    const {state,sendMidi}=await setup()
+    const notes=state.patch.keys.slice(0,4).map(k=>k.note)
+    const pinned=state.selected
+    backend.telemetry!({midi:[[0x91,notes[1],100],[0x92,notes[2],100]]})
+    expect(state.selected).toBe(pinned);expect(state.lastTouchedKey).toBe(notes[2])
+    state.trackKeywave=true;expect(state.selected).toBe(notes[2])
+    backend.telemetry!({midi:[[0x81,notes[1],100],[0x91,notes[1],0],[0xb1,74,127],[0xd1,127,0]]})
+    expect(state.selected).toBe(notes[2])
+    sendMidi([0x93,notes[3],100]);expect(state.selected).toBe(notes[3])
+    state.trackKeywave=false;backend.telemetry!({midi:[[0x91,notes[0],100]]})
+    expect(state.selected).toBe(notes[3]);expect(state.lastTouchedKey).toBe(notes[0])
+    expect(state.patch).not.toHaveProperty('trackKeywave')
+  })
   it('queues a resolved odd-meter patch for a bar and preserves it through ordinary edits',async()=>{
     const store=await setup(),patch=clone(factory());patch.name='Seven';patch.neural={version:1,numerator:7,denominator:8} as any
     backend.request.mockImplementation(async(_method,payload)=>({document:payload.document,revision:2,conflict:false,activationPending:true}))

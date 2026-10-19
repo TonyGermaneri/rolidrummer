@@ -119,7 +119,7 @@ std::unique_ptr<Runtime> compileDocument(const juce::var& input){
    clip.notes.push_back({number(n,"beat",0,0,clip.length),number(n,"duration",.1,.00001,100000),(int)number(n,"note",36,0,127),(float)number(n,"velocity",1,0,1)});
   }
   if(c.clips.size()>=maxRuntimeClips)throw std::runtime_error("The prepared performance exceeds the clip budget");
-  clipIndex[id]=(int)c.clips.size();contentIndex[identity]=(int)c.clips.size();prepareClip(clip);c.clips.push_back(std::move(clip));
+  clipIndex[id]=(int)c.clips.size();contentIndex[identity]=(int)c.clips.size();prepareClip(clip);c.clips.push_back(std::move(clip));r->clipNames.push_back(get(item,"name").toString());
  }
  std::map<std::string,std::shared_ptr<ssb::Sound>> sounds;std::map<juce::String,ssb::SamplePtr> samples;
  if(auto value=get(doc,"keys");auto* list=value.getArray())for(const auto& item:*list){

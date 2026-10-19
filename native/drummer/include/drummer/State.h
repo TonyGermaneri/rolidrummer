@@ -6,6 +6,7 @@
 namespace drummer {
 struct Runtime {
  Configuration config;
+ std::vector<juce::String> clipNames;
  ssb::PerformancePtr performance;
  std::array<ssb::SoundPtr,128> sounds;
  std::array<int,5> cc {{107,109,111,113,114}};

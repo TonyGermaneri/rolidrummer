@@ -42,6 +42,10 @@ The **Circuit kit** contains 16 synth drum voices on natural keys only, from MID
 
 The sampler’s **Play / Stop** button auditions the selected sound with its current tuning and effects, including while the DAW is stopped. EQ, delay and reverb start expanded. The Seaboard and its controls scale together to fit the available width and height.
 
+The Key panel splits its scope between the sound waveform and a piano roll of that keywave’s current or last pattern, with a playback marker. Zone rows show miniature versions. These previews apply the key’s MIDI drum-note filter and follow the actual gesture-selected variation. **TRACK** follows the last keywave touched on the controller; turn it off to keep the editor on its selected keywave. Track starts off and is an editor preference, separate from the patch.
+
+The **Piano Roll** tab monitors the drum notes triggered by all keywaves. Notes grow from the fixed playhead as the history scrolls left, with a MIDI keyboard on the left and colors based on the source keywave. Choose a one-, two-, four- or eight-bar view, scroll vertically to other pitches, or clear the display. Monitoring follows scheduled note durations and releases; it does not change playback or record into the patch.
+
 Choose **Settings → Defaults → Restore factory defaults** to load the complete kit into an existing instance (this replaces the current patch; Undo restores it). The **Settings → Sounds** browser's built-in library also offers all 16 tuned presets for preview and individual dragging. Pocket, Syncopated, and Fill & ghosts are two-bar variations of the same 4/4 backbeat. Extra percussion sounds only when its own key is held. The single JSON factory definition is shared by native initialization and the editor.
 
 1. Load the instrument on a MIDI track and enable the controller's MPE input. The DAW transport can be stopped: held keys play their parts using its current reported tempo, or the last valid tempo if the host omits it (120 BPM before any tempo is known). The standalone app uses the patch tempo.
