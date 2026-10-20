@@ -1,4 +1,4 @@
-# Roli Drummer 0.7.1
+# Roli Drummer 0.7.2
 
 Ribbon gestures now act on the individual keywave you touch. Multiple keywaves can stay independently toggled on, with one zone and pattern playing per keywave.
 
@@ -11,7 +11,7 @@ Ribbon gestures now act on the individual keywave you touch. Multiple keywaves c
 
 For hardware ribbon gestures, use absolute Slide with full Slide travel: CC74 values 0–15 address the bottom ribbon, 116–127 the top ribbon, and the body between them spans each key's zone matrix. Ribbon gestures preserve the saved patch and DAW session document.
 
-The macOS downloads contain universal Apple Silicon and Intel AU, VST3 and standalone builds. The AU archive is **RoliDrummer.component-v0.7.1.zip**, containing the **RoliDrummer.component** bundle. The original notarized archives are published directly, with checks for clean extraction, macOS package recognition, signatures and stapled tickets.
+The macOS downloads contain universal Apple Silicon and Intel AU, VST3 and standalone builds. The AU archive is **RoliDrummer.component-v0.7.2.zip**, containing the **RoliDrummer.component** bundle. The original notarized archives are published directly, with checks for clean extraction, macOS package recognition, signatures and stapled tickets.
 
 Neural indexing and search require macOS 13.4 or later. Your personal MIDI library is not included. Use a portable **.rolidrummer** export to transfer a prepared patch with its patterns, mappings and sounds.
 

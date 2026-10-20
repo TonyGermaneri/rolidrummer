@@ -218,10 +218,19 @@ jobs:
           SIGNED: ${{ steps.creds.outputs.sign || 'false' }}
           NOTARIZED: ${{ steps.notary.outputs.done || 'false' }}
         run: |
+          mkdir -p validation
+          package_args=(native/build release)
           if [ "$NOTARIZED" = true ]; then
-            native/tools/package-macos.sh native/build release "$RUNNER_TEMP/notarized"
-          else
-            native/tools/package-macos.sh native/build release
+            package_args+=("$RUNNER_TEMP/notarized")
+          fi
+          if ! native/tools/package-macos.sh "${package_args[@]}" 2>&1 | tee validation/packaging.log; then
+            python3 - <<'PY'
+          from pathlib import Path
+          detail = '\n'.join(Path('validation/packaging.log').read_text(errors='replace').splitlines()[-60:])
+          detail = detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print('::error title=macOS archive verification failed::' + detail)
+          PY
+            exit 1
           fi
           printf 'Commit: %s\nSigned: %s\nNotarized: %s\n' "$GITHUB_SHA" "$SIGNED" "$NOTARIZED" > release/BUILD.txt
           cat release/BUILD.txt >> "$GITHUB_STEP_SUMMARY"
