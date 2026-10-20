@@ -40,12 +40,13 @@ public:
  std::atomic<double> hostBpm{120},hostPpq{0};std::atomic<bool> hostPlaying{false},standalonePlaying{false},freePlaying{false};
  std::array<std::atomic<int>,16> contacts{};
  std::array<std::atomic<float>,16> contactSlide{},contactGlide{},contactPressure{};
- struct FingerView { uint64_t owner=0;int channel=0,note=0,zone=0;float slide=0,glide=.5f,pressure=0;bool sustained=false,toggled=false,playing=false;int candidate=-1;bool queued=false;int origin=-1; };
+ struct FingerView { uint64_t owner=0;int channel=0,note=0,zone=0;float slide=0,glide=.5f,pressure=0;bool sustained=false,toggled=false,playing=false;int candidate=-1;bool queued=false;int origin=-1;uint64_t touch=0; };
  struct KeyPattern { int clip=-1,zone=0,candidate=-1;double phase=0;bool known=false,playing=false;double beat=0; };
  struct FingerSnapshot {
-  struct PendingLatch {int action=0,note=-1;};
+  struct PendingLatch {int action=0,note=-1;uint64_t touch=0;};
   std::array<PendingLatch,128> latches{};
   std::array<FingerView,drummer::maxContacts+drummer::Scheduler::maxSustained> fingers{};int count=0;
+  std::array<drummer::PhysicalTouch,drummer::maxPhysicalTouches> touches{};int touchCount=0;
   std::array<KeyPattern,128> patterns{};
   const drummer::Runtime* runtime=nullptr;
   std::array<uint8_t,32> patternHash{};

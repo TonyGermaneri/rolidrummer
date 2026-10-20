@@ -60,6 +60,28 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;try{
  juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer midi;midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)110),0);player->processBlock(audio,midi);
  DrummerProcessor::FingerSnapshot view;check(player->readFingers(view)&&view.count==1&&view.fingers[0].note==64&&view.fingers[0].origin==48,"Physical parallel key or origin is absent from telemetry");
  check(audio.getMagnitude(0,256)>.0001f,"Parallel key did not reach the sound engine");PlayedEvent hit;bool found=false;while(player->performanceMonitor.pop(hit))if(hit.type==PlayedEvent::on){found=true;check(hit.key==48&&hit.inputNote==64,"Keywave flash did not retain both parallel and origin pitches");}check(found,"Parallel hit was not monitored");
+ // Raw fingers are not deduplicated by the origin that owns their commands.
+ auto physical=std::make_unique<DrummerProcessor>();physical->apply(compileDocument(doc));physical->prepareToPlay(48000,256);
+ midi.addEvent(juce::MidiMessage::controllerEvent(2,74,100),0);midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)100),1);
+ midi.addEvent(juce::MidiMessage::controllerEvent(3,74,100),2);midi.addEvent(juce::MidiMessage::noteOn(3,80,(juce::uint8)100),3);physical->processBlock(audio,midi);
+ check(physical->readFingers(view)&&view.touchCount==2&&view.count==1,"Two physical fingers were merged with their shared-origin command");
+ const auto firstTouch=view.touches[0].id;check(view.touches[0].note==64&&view.touches[1].note==80&&view.fingers[0].touch==view.touches[1].id,"Command did not retain the physical finger that created it");
+ midi.addEvent(juce::MidiMessage::noteOff(3,80),0);physical->processBlock(audio,midi);
+ check(physical->readFingers(view)&&view.touchCount==1&&view.touches[0].id==firstTouch,"Stopping a command hid the older finger still resting on its parallel key");
+ midi.addEvent(juce::MidiMessage::channelPressureChange(2,96),0);physical->processBlock(audio,midi);
+ check(physical->readFingers(view)&&view.touchCount==1&&view.touches[0].pressure==96/127.f&&view.count==0,"A suppressed finger disappeared or restarted the replaced command");
+ midi.addEvent(juce::MidiMessage::noteOff(2,64),0);physical->processBlock(audio,midi);check(physical->readFingers(view)&&view.touchCount==0,"Physical marker survived its genuine note-off");
+ // The fourth adjacent member must reach the real audio engine and telemetry.
+ auto nearbyDoc=doc.clone();nearbyDoc.getDynamicObject()->setProperty("clips",juce::JSON::parse(R"([{"id":"four","name":"Four nearby keys","length":1,"notes":[{"beat":0,"duration":0.25,"note":36,"velocity":0.9}]}])"));
+ auto nearbyKeys=nearbyDoc.getProperty("keys",{});for(auto& key:*nearbyKeys.getArray()){
+  key.getDynamicObject()->setProperty("parts",juce::Array<juce::var>{36});key.getDynamicObject()->setProperty("zones",juce::JSON::parse(R"([{"upper":1,"clipId":"four"}])"));
+  key.getProperty("sound",{}).getProperty("s",{}).getDynamicObject()->setProperty("choke",0);
+ }
+ auto nearbyPlayer=std::make_unique<DrummerProcessor>();nearbyPlayer->apply(compileDocument(nearbyDoc));nearbyPlayer->prepareToPlay(48000,256);
+ for(int i=0;i<4;++i){midi.addEvent(juce::MidiMessage::controllerEvent(i+2,74,100),0);midi.addEvent(juce::MidiMessage::noteOn(i+2,48+i,(juce::uint8)100),0);}nearbyPlayer->processBlock(audio,midi);
+ check(nearbyPlayer->readFingers(view)&&view.touchCount==4&&view.count==4,"Fourth adjacent key lost its touch or playing command in the real processor");
+ check(nearbyPlayer->engine.activeVoices()>=4&&audio.getMagnitude(0,256)>.0001f,"Four adjacent keys did not reach concurrent audible voices");
+ for(int i=0;i<4;++i)check(view.touches[(size_t)i].note==48+i&&view.fingers[(size_t)i].origin==48+i,"Adjacent keys were retargeted to their neighbors");
  // A queued tap has no current finger after release. Publish its direction
  // independently, so the UI can keep a green/red indicator until its boundary.
  auto quantized=doc.clone();quantized.getDynamicObject()->setProperty("keyboardMode","toggle");

@@ -38,3 +38,17 @@ export function surfaceAtPoint(keys:SeaboardKey[],x:number,y:number){
  if(action){const lane=ribbonLanes(keys).find(key=>x>=key.x&&x<key.x+key.w);if(lane)return {key:keys.find(key=>key.note===lane.note)!,area:action}}
  const key=keyAtPoint(keys,x,y);if(key)return {key,area:'key' as const}
 }
+
+/** Physical MIDI position, independent of the keywave/zone currently owned. */
+export function touchPoint(keys:SeaboardKey[],touch:{note:number;pitch:number;slide:number;surface:boolean}){
+ const pitch=Number.isFinite(touch.pitch)?touch.pitch:touch.note
+ const first=keys[0]!,last=keys.at(-1)!
+ const upper=keys.findIndex(key=>key.note>=pitch)
+ const high=upper<0?last:keys[upper]!,low=keys[Math.max(0,upper-1)]!
+ const fraction=high.note===low.note?0:Math.max(0,Math.min(1,(pitch-low.note)/(high.note-low.note)))
+ const center=(key:SeaboardKey)=>key.x+key.w/2
+ const x=pitch<first.note?keyBed.left+2:pitch>last.note?keyBed.left+keyBed.width-2:center(low)+(center(high)-center(low))*fraction
+ const slide=Math.max(0,Math.min(1,touch.slide)),key=keys.find(key=>key.note===touch.note)??high
+ const y=touch.surface?keyBed.surfaceBottom-slide*(keyBed.surfaceBottom-keyBed.surfaceTop):keyBed.top+(1-slide)*key.h
+ return {x,y,edge:pitch<first.note?'low':pitch>last.note?'high':undefined}
+}

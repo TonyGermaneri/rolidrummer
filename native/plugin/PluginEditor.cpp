@@ -154,9 +154,16 @@ void DrummerEditor::timerCallback(){
  DrummerProcessor::FingerSnapshot snapshot;
  if(plugin.readFingers(snapshot)){
   o->setProperty("touchSerial",juce::String((juce::int64)snapshot.touchSerial));o->setProperty("touchNote",snapshot.touchNote);
+  juce::Array<juce::var> touches;
+  for(int i=0;i<snapshot.touchCount;++i){const auto& touch=snapshot.touches[(size_t)i];auto* item=new juce::DynamicObject;
+   item->setProperty("id",juce::String((juce::int64)touch.id));item->setProperty("channel",touch.channel);item->setProperty("note",touch.note);
+   item->setProperty("pitch",touch.pitch);item->setProperty("slide",touch.slide);item->setProperty("pressure",touch.pressure);item->setProperty("surface",touch.surface);touches.add(item);
+  }
+  o->setProperty("touches",touches);
   juce::Array<juce::var> fingers;
   for(int i=0;i<snapshot.count;++i){const auto& view=snapshot.fingers[(size_t)i];auto*f=new juce::DynamicObject;
    f->setProperty("owner",juce::String((juce::int64)view.owner));f->setProperty("sustained",view.sustained);f->setProperty("toggled",view.toggled);f->setProperty("playing",view.playing);
+   f->setProperty("touch",juce::String((juce::int64)view.touch));
    f->setProperty("channel",view.channel);f->setProperty("note",view.note);f->setProperty("zone",view.zone);
    f->setProperty("candidate",view.candidate);
    f->setProperty("queued",view.queued);f->setProperty("origin",view.origin);
@@ -165,7 +172,7 @@ void DrummerEditor::timerCallback(){
   o->setProperty("fingers",fingers);
   juce::Array<juce::var> latches;
   for(int origin=0;origin<128;++origin){const auto& queued=snapshot.latches[(size_t)origin];if(!queued.action)continue;
-   auto* item=new juce::DynamicObject;item->setProperty("origin",origin);item->setProperty("note",queued.note>=0?queued.note:origin);item->setProperty("action",queued.action==1?"start":"stop");latches.add(item);
+   auto* item=new juce::DynamicObject;item->setProperty("origin",origin);item->setProperty("note",queued.note>=0?queued.note:origin);item->setProperty("action",queued.action==1?"start":"stop");item->setProperty("touch",juce::String((juce::int64)queued.touch));latches.add(item);
   }
   o->setProperty("pendingLatches",latches);
   auto* performance=new juce::DynamicObject;performance->setProperty("beat",snapshot.beat);performance->setProperty("bpm",snapshot.bpm);performance->setProperty("epoch",(double)snapshot.epoch);

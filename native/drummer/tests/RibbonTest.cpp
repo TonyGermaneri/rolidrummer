@@ -23,6 +23,50 @@ Midi hardware(uint8_t status,uint8_t a,uint8_t b){return {0,status,a,b,Midi::mes
 Midi bend(int semitones,int ch=1,float range=48){const int value=8192+int(std::lround(semitones*8191./range));return hardware((uint8_t)(0xe0|ch),(uint8_t)(value&127),(uint8_t)(value>>7));}
 }
 int main(){try{
+ // Nearby physical touches must never compete for member channels or origins.
+ // Exercise every arrival order, both sides of E/F, all modes and both grids.
+ for(const auto notes:{std::array<int,4>{{48,49,50,51}},std::array<int,4>{{48,50,52,53}}}){
+  auto order=notes;
+  do {for(const auto mode:{KeyboardMode::normal,KeyboardMode::hold,KeyboardMode::toggle})for(bool quantized:{false,true}){
+   auto config=fixture();config.keyboardMode=mode;config.latchGrid=quantized?4:0;Scheduler nearby;
+   for(int i=0;i<4;++i)process(nearby,config,.1+i*.01,{hardware((uint8_t)(0xb1+i),74,100),hardware((uint8_t)(0x91+i),(uint8_t)order[(size_t)i],100)});
+   if(quantized&&mode!=KeyboardMode::normal)process(nearby,config,4);
+   check(playing(nearby)==4,"Fourth nearby key failed to play independently");
+   for(int i=0;i<4;++i){const auto& touch=nearby.physicalTouches()[(size_t)i+1];check(touch.down&&touch.note==order[(size_t)i]&&nearby.contacts()[(size_t)i+1].touch==touch.id,"Nearby physical finger was merged with a keywave command");}
+   const auto fourth=nearby.physicalTouches()[4].id;
+   process(nearby,config,4.1,{hardware(0xb4,74,70),hardware(0xd4,96,0)});
+   check(playing(nearby)==4&&nearby.physicalTouches()[4].id==fourth,"Fourth-key modulation lost its physical identity or stopped a peer");
+   for(int i=1;i<4;++i)check(nearby.contacts()[(size_t)i].zone==2,"Nearby modulation changed another key's zone");
+   process(nearby,config,4.2,{hardware(0x84,(uint8_t)order[3],64)});
+   check(!nearby.physicalTouches()[4].down&&nearby.physicalTouches()[1].down&&nearby.physicalTouches()[2].down&&nearby.physicalTouches()[3].down,"Releasing the fourth key hid another physical finger");
+  }}while(std::next_permutation(order.begin(),order.end()));
+ }
+ // Physical identity is independent of the one-command-per-origin policy.
+ {
+  auto config=fixture();Scheduler physical;
+  process(physical,config,.1,{hardware(0xb1,74,100),hardware(0x91,48,100),hardware(0xb2,74,100),hardware(0x92,64,100)});
+  check(physical.physicalTouches()[1].down&&physical.physicalTouches()[2].down,"Parallel ownership hid one of two physical fingers");
+  check(playing(physical)==0,"Same-zone parallel press escaped toggle ownership");
+  const auto original=physical.physicalTouches()[1].id;
+  process(physical,config,.2,{hardware(0xb1,74,0)});
+  check(physical.physicalTouches()[1].down&&physical.physicalTouches()[1].id==original&&physical.physicalTouches()[1].slide==0,"Stop ribbon hid or replaced its physical finger");
+  process(physical,config,.3,{hardware(0x81,48,64)});
+  check(!physical.physicalTouches()[1].down&&physical.physicalTouches()[2].down,"Physical note-off affected a parallel finger");
+  process(physical,config,.4,{hardware(0x91,50,100)});
+  check(physical.physicalTouches()[1].down&&physical.physicalTouches()[1].id!=original,"Channel reuse recycled the old physical finger identity");
+  process(physical,config,.5,{hardware(0x81,48,64)});
+  check(physical.physicalTouches()[1].down,"Stale note-off hid a newer physical finger");
+  process(physical,config,.6,{hardware(0xb0,123,0)});
+  for(const auto& touch:physical.physicalTouches())check(!touch.down,"Panic left a physical finger marker behind");
+ }
+ // An editor gesture cannot erase a hardware finger on the same channel.
+ {
+  auto config=fixture();Scheduler mixed;
+  process(mixed,config,.1,{hardware(0xb1,74,100),hardware(0x91,48,100),{0,0x91,50,100}});
+  check(mixed.physicalTouches()[1].down&&mixed.physicalTouches()[maxContacts+1].down,"Screen MIDI replaced a hardware finger's raw identity");
+  process(mixed,config,.2,{{0,0x81,50,64}});
+  check(mixed.physicalTouches()[1].down&&!mixed.physicalTouches()[maxContacts+1].down,"Screen note-off hid a hardware finger");
+ }
  // Every tap is scoped to one origin; many independent parts can stay latched.
  for(const auto mode:{KeyboardMode::normal,KeyboardMode::hold,KeyboardMode::toggle})for(bool quantized:{false,true}){
   auto cfg=fixture();cfg.keyboardMode=mode;cfg.latchGrid=quantized?4:0;Scheduler s;

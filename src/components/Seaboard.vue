@@ -7,7 +7,7 @@ import {request} from '../native/bridge'
 import {fitSeaboard} from '../lib/seaboardLayout'
 import {useRollClock,keyHitLevels} from '../performance'
 import {keyOrigins} from '../lib/keyMapping'
-import {seaboardKeys,keySlide,keyBed,ribbonLanes,surfaceAtPoint,type RibbonAction,type SeaboardKey} from '../lib/seaboardKeys'
+import {seaboardKeys,keySlide,keyBed,ribbonLanes,surfaceAtPoint,touchPoint,type RibbonAction,type SeaboardKey} from '../lib/seaboardKeys'
 const emit=defineEmits<{patch:[direction:number]}>()
 const props=defineProps<{base:number}>()
 const stage=ref<HTMLElement|null>(null),surface=ref({width:0,height:0})
@@ -40,24 +40,40 @@ const parallelOrigins=computed(()=>new Set((state.telemetry.fingers??[]).filter(
 const modes=[{id:'normal',label:'Normal',help:'Release a key to stop its part. The sustain pedal can hold released keys.'},{id:'hold',label:'Hold',help:'Keep released keys playing. Pedal up clears released keys.'},{id:'toggle',label:'Toggle',help:'Press a key to latch it; press the same zone to stop. A different zone replaces it. Pedal up clears released keys.'}] as const
 const shortNames:Record<string,string>={'Closed hat':'CH','Open hat':'OH','Pedal hat':'PH','High tom':'HT','Mid tom':'MT','Low tom':'LT','High conga':'HC','Low conga':'LC','Cowbell':'Bell','Shaker':'Shkr'}
 function keyLabel(name=''){return shortNames[name]??(name.length>5?name.slice(0,4)+'…':name)}
-const fingerLocations=computed(()=>[...(state.telemetry.fingers??[])].sort((a,b)=>Number(!!b.sustained)-Number(!!a.sustained)).flatMap(f=>{const key=keyboard.value.find(k=>k.note===f.note);return key?[{...f,x:key.x+key.w*(.5+(f.glide-.5)*.7),y:top+3+(1-f.slide)*(key.h-6),radius:2.5+Math.max(.1,f.pressure)*3}]:[]}))
 type TouchArea='key'|RibbonAction
 type Contact={channel:number;svg:SVGSVGElement;key:SeaboardKey;area:TouchArea;playing:boolean}
 const contacts=new Map<number,Contact>()
-const keyboardContacts=new Map<number,number>()
+const pointerTouches=ref(new Map<number,{id:string;channel:number;note:number;x:number;y:number;pressure:number;area:TouchArea}>())
+const keyboardContacts=ref(new Map<number,{channel:number;area:'key'|'top'}>())
+function touchColor(id:string){let hash=0;for(const char of id)hash=(hash*31+char.charCodeAt(0))%360;return `hsl(${(hash*137.508)%360} 75% 75%)`}
+const physicalLocations=computed(()=>{
+ const virtual=[...keyboardContacts.value].flatMap(([note,contact])=>{const key=keyboard.value.find(key=>key.note===note);return key?[{id:`keyboard:${note}`,channel:contact.channel,note,x:key.x+key.w/2,y:contact.area==='top'?(keyBed.surfaceTop+top)/2:top+key.h/2,pressure:.5,area:contact.area as TouchArea}]:[]})
+ const local=[...pointerTouches.value.values(),...virtual].map(touch=>({...touch,touch:(state.telemetry.touches??[]).find(t=>!t.surface&&t.channel===touch.channel)?.id,edge:undefined as string|undefined}))
+ return [...(state.telemetry.touches??[]).filter(touch=>touch.surface).map(touch=>({...touch,...touchPoint(keyboard.value,touch),id:`touch:${touch.id}`,touch:touch.id,area:'key' as TouchArea})),...local].map(touch=>({...touch,radius:2.7+Math.max(0,Math.min(1,touch.pressure))*1.7,color:touchColor(touch.touch||touch.id)}))
+})
+const echoLocations=computed(()=>{
+ const playing=[...(state.telemetry.fingers??[])].filter(f=>f.playing!==false).flatMap(f=>{const key=keyboard.value.find(k=>k.note===f.note);return key?[{...f,id:`owner:${f.owner??f.channel}:${f.zone}`,origin:f.origin??origins.value[f.note],action:undefined as 'start'|'stop'|undefined,x:key.x+key.w*(.5+(f.glide-.5)*.7),y:top+3+(1-f.slide)*(key.h-6),radius:5.8}]:[]})
+ const pending=(state.telemetry.pendingLatches??[]).flatMap(latch=>{const key=keyboard.value.find(k=>k.note===latch.note);return key?[{...latch,id:`queue:${latch.origin}:${latch.action}:${latch.touch??''}`,owner:undefined,channel:-1,zone:-1,sustained:false,toggled:false,x:key.x+key.w/2,y:top+key.h-10,radius:5.8}]:[]})
+ return [...playing,...pending].map(echo=>{
+  const source=physicalLocations.value.find(touch=>echo.touch&&echo.touch!=='0'&&touch.touch===echo.touch)??(echo.action==='stop'?physicalLocations.value.find(touch=>touch.area==='stop'&&origins.value[touch.note]===echo.origin):undefined)
+  return {...echo,source,sourceId:source?.touch?`touch:${source.touch}`:source?.id??(echo.touch?`touch:${echo.touch}`:undefined),color:source?.color??touchColor(echo.touch||echo.id),fromX:(source?.x??echo.x)-echo.x,fromY:(source?.y??echo.y)-echo.y}
+ })
+})
 const macro=ref([...state.telemetry.macros])
 const touching=new Set<number>()
 watch(()=>state.telemetry.macros,values=>{values.forEach((value,i)=>{if(!touching.has(i))macro.value[i]=value})})
 function zoneBottom(zones:{upper:number}[],i:number){return i?zones[i-1].upper:0}
-function usedChannels(){const used=new Set([...contacts.values()].filter(c=>c.channel>=0).map(c=>c.channel).concat([...keyboardContacts.values()]));state.telemetry.contacts.forEach((value,ch)=>{if(value)used.add(ch)});return used}
+function usedChannels(){const used=new Set([...contacts.values()].filter(c=>c.channel>=0).map(c=>c.channel).concat([...keyboardContacts.value.values()].map(c=>c.channel)));state.telemetry.contacts.forEach((value,ch)=>{if(value)used.add(ch)});for(const touch of state.telemetry.touches??[])used.add(touch.channel);return used}
 function selectKey(note:number){const origin=origins.value[note];if(keys.value.has(note))state.selected=note;else if(state.trackKeywave&&origin>=0)state.selected=origin}
 function point(svg:SVGSVGElement,e:PointerEvent){const p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;return p.matrixTransform(svg.getScreenCTM()!.inverse())}
+function recordPointer(e:PointerEvent,c:Contact){const p=point(c.svg,e);pointerTouches.value.set(e.pointerId,{id:`pointer:${e.pointerId}`,channel:c.channel,note:c.key.note,x:p.x,y:p.y,pressure:e.pressure||.2,area:c.area})}
 function stopKey(note:number){selectKey(note);observeKeyTouch([0x90,note,1]);void attempt(()=>request('ribbon',{action:'stop',note}))}
 function enter(c:Contact,key:SeaboardKey,area:TouchArea,e?:PointerEvent){
  if(area==='stop')stopKey(key.note)
  if(c.playing){sendMidi([0x80|c.channel,c.key.note,64]);c.playing=false}
  c.key=key;c.area=area
  if(area==='stop')return
+ if(c.channel<0)return
  selectKey(key.note);sendMidi([0xe0|c.channel,0,64]);sendMidi([0xd0|c.channel,100,0])
  sendMidi([0xb0|c.channel,74,area==='top'?127:Math.round(keySlide(key,e?point(c.svg,e).y:top+key.h/2)*127)])
  if(area==='top'){observeKeyTouch([0x90,key.note,100]);void attempt(()=>request('ribbon',{action:'top',note:key.note,channel:c.channel,velocity:100}))}
@@ -67,13 +83,14 @@ function enter(c:Contact,key:SeaboardKey,area:TouchArea,e?:PointerEvent){
 function down(e:PointerEvent){
  if(e.button!==0)return
  const target=e.currentTarget as SVGElement,svg=target.ownerSVGElement!,actual=point(svg,e),touch=surfaceAtPoint(keyboard.value,actual.x,actual.y)
- if(!touch||origins.value[touch.key.note]<0)return
- const used=usedChannels(),channel=Array.from({length:15},(_,i)=>i+1).find(c=>!used.has(c));if(channel===undefined)return
+ if(!touch)return
+ const used=usedChannels(),channel=Array.from({length:15},(_,i)=>i+1).find(c=>!used.has(c))??-1
  target.setPointerCapture(e.pointerId)
- const c:Contact={channel,svg,key:touch.key,area:touch.area,playing:false};contacts.set(e.pointerId,c);enter(c,touch.key,touch.area,e)
+ const c:Contact={channel,svg,key:touch.key,area:touch.area,playing:false};contacts.set(e.pointerId,c);recordPointer(e,c);enter(c,touch.key,touch.area,e)
 }
 function move(e:PointerEvent){
  const c=contacts.get(e.pointerId);if(!c)return
+ recordPointer(e,c)
  const actual=point(c.svg,e),touch=surfaceAtPoint(keyboard.value,actual.x,actual.y);if(!touch)return
  if(touch.key.note!==c.key.note){
   if(touch.area!=='key'&&touch.area===c.area){
@@ -84,28 +101,29 @@ function move(e:PointerEvent){
   if(c.area!=='stop')enter(c,touch.key,touch.area,e)
  }else if(c.area==='stop')enter(c,touch.key,touch.area,e)
  else {
-  if(touch.area==='top'&&c.area!=='top')void attempt(()=>request('ribbon',{action:'moveTop',note:touch.key.note,channel:c.channel}))
+  if(touch.area==='top'&&c.area!=='top'&&c.channel>=0)void attempt(()=>request('ribbon',{action:'moveTop',note:touch.key.note,channel:c.channel}))
   c.area=touch.area;c.key=touch.key
-  sendMidi([0xb0|c.channel,74,touch.area==='top'?127:Math.round(keySlide(touch.key,actual.y)*127)])
-  if(e.pressure>0)sendMidi([0xd0|c.channel,Math.round(e.pressure*127),0])
+  if(c.channel>=0){sendMidi([0xb0|c.channel,74,touch.area==='top'?127:Math.round(keySlide(touch.key,actual.y)*127)])
+  if(e.pressure>0)sendMidi([0xd0|c.channel,Math.round(e.pressure*127),0])}
  }
+ recordPointer(e,c)
 }
-function up(e:PointerEvent){const c=contacts.get(e.pointerId);if(c){if(c.playing)sendMidi([0x80|c.channel,c.key.note,64]);contacts.delete(e.pointerId)}}
+function up(e:PointerEvent){const c=contacts.get(e.pointerId);if(c){if(c.playing)sendMidi([0x80|c.channel,c.key.note,64]);contacts.delete(e.pointerId)}pointerTouches.value.delete(e.pointerId)}
 function ribbonDown(e:KeyboardEvent,note:number,action:RibbonAction){
  if(e.repeat)return
  if(action==='stop'){stopKey(note);return}
- if(keyboardContacts.has(note))return
+ if(keyboardContacts.value.has(note))return
  const channel=Array.from({length:15},(_,i)=>i+1).find(c=>!usedChannels().has(c));if(channel===undefined)return
- keyboardContacts.set(note,channel);selectKey(note);observeKeyTouch([0x90,note,100]);sendMidi([0xe0|channel,0,64]);sendMidi([0xd0|channel,100,0]);void attempt(()=>request('ribbon',{action:'top',note,channel,velocity:100}))
+ keyboardContacts.value.set(note,{channel,area:'top'});selectKey(note);observeKeyTouch([0x90,note,100]);sendMidi([0xe0|channel,0,64]);sendMidi([0xd0|channel,100,0]);void attempt(()=>request('ribbon',{action:'top',note,channel,velocity:100}))
 }
 function keyboardDown(e:KeyboardEvent,note:number){
  if(e.key!==' '&&e.key!=='Enter')return;e.preventDefault();selectKey(note)
- if(e.repeat||keyboardContacts.has(note)||origins.value[note]<0)return
+ if(e.repeat||keyboardContacts.value.has(note)||origins.value[note]<0)return
  const used=usedChannels(),channel=Array.from({length:15},(_,i)=>i+1).find(c=>!used.has(c))
- if(channel===undefined)return;keyboardContacts.set(note,channel);sendMidi([0xe0|channel,0,64]);sendMidi([0xd0|channel,100,0]);sendMidi([0xb0|channel,74,64]);sendMidi([0x90|channel,note,100])
+ if(channel===undefined)return;keyboardContacts.value.set(note,{channel,area:'key'});sendMidi([0xe0|channel,0,64]);sendMidi([0xd0|channel,100,0]);sendMidi([0xb0|channel,74,64]);sendMidi([0x90|channel,note,100])
 }
-function keyboardUp(note:number){const channel=keyboardContacts.get(note);if(channel!==undefined){sendMidi([0x80|channel,note,64]);keyboardContacts.delete(note)}}
-function panic(){for(const contact of contacts.values())if(contact.playing)sendMidi([0x80|contact.channel,contact.key.note,64]);for(const [note,channel] of keyboardContacts)sendMidi([0x80|channel,note,64]);contacts.clear();keyboardContacts.clear();touching.clear()}
+function keyboardUp(note:number){const contact=keyboardContacts.value.get(note);if(contact){sendMidi([0x80|contact.channel,note,64]);keyboardContacts.value.delete(note)}}
+function panic(){for(const contact of contacts.values())if(contact.playing)sendMidi([0x80|contact.channel,contact.key.note,64]);for(const [note,contact] of keyboardContacts.value)sendMidi([0x80|contact.channel,note,64]);contacts.clear();pointerTouches.value.clear();keyboardContacts.value.clear();touching.clear()}
 watch(()=>props.base,panic)
 function cc(i:number,v:number){macro.value[i]=v;state.telemetry.macros[i]=v;void attempt(()=>request('parameter',{id:`macro${i}`,value:v}))}
 function padKey(e:KeyboardEvent){if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key))return;e.preventDefault();const step=e.shiftKey?.1:.01;if(e.key==='ArrowLeft')cc(3,Math.max(0,macro.value[3]-step));else if(e.key==='ArrowRight')cc(3,Math.min(1,macro.value[3]+step));else if(e.key==='ArrowUp')cc(4,Math.min(1,macro.value[4]+step));else if(e.key==='ArrowDown')cc(4,Math.max(0,macro.value[4]-step))}
@@ -149,7 +167,11 @@ window.addEventListener('blur',panic);onBeforeUnmount(()=>{window.removeEventLis
 <g v-if="latchActions.has(key.note)" class="key-latch-pending" :class="`latch-${latchActions.get(key.note)}`" :data-queued-key="key.note" :data-queued-action="latchActions.get(key.note)" role="img" :aria-label="latchActions.get(key.note)==='start'?'Queued start':'Queued stop'" :transform="`translate(${key.x+key.w/2} ${top+key.h-10})`" pointer-events="none"><title>{{latchActions.get(key.note)==='start'?'Starts':'Stops'}} at the next quantized boundary</title><circle r="4.2"/><path v-if="latchActions.get(key.note)==='start'" d="M -1.1 -2 L 2 0 L -1.1 2 Z"/><rect v-else x="-1.5" y="-1.5" width="3" height="3"/></g>
 </g></g>
 <g v-for="action in (['top','stop'] as const)" :key="action" class="performance-ribbon" :class="`ribbon-${action}`" :aria-label="action==='top'?'Top-zone ribbon':'Stop ribbon'"><g v-for="lane in lanes" :key="lane.note" class="ribbon-lane" :class="{black:lane.black,held:held.has(lane.note),queued:queued.has(lane.note)}" role="button" tabindex="0" :data-ribbon-note="lane.note" :data-ribbon-action="action" :aria-label="`${action==='top'?'Top zone':'Stop'} · ${keys.get(lane.note)?.name||`Note ${lane.note} · ${keys.get(origins[lane.note])?.name||'unassigned'}`}`" @pointerdown="down" @pointermove="move" @pointerup="up" @pointercancel="up" @keydown.enter.prevent="ribbonDown($event,lane.note,action)" @keydown.space.prevent="ribbonDown($event,lane.note,action)" @keyup="($event.key===' '||$event.key==='Enter')&&keyboardUp(lane.note)" @blur="keyboardUp(lane.note)"><title>{{action==='top'?'Top zone':'Stop'}} · {{keys.get(lane.note)?.name||`Note ${lane.note}`}}</title><rect :x="lane.x" :y="action==='top'?keyBed.surfaceTop:top+height+.1" :width="lane.w" :height="action==='top'?top-keyBed.surfaceTop:keyBed.surfaceBottom-top-height-.1"/><path v-if="action==='top'" :d="`M ${lane.x+lane.w/2-1.5} ${top-4} L ${lane.x+lane.w/2} ${top-7} L ${lane.x+lane.w/2+1.5} ${top-4}`"/><rect v-else class="stop-mark" :x="lane.x+lane.w/2-1.3" :y="top+height+6" width="2.6" height="2.6"/></g></g>
-<g class="finger-indicators" pointer-events="none" aria-label="Touch and sustain positions"><g v-for="finger in fingerLocations" :key="finger.owner??`channel:${finger.channel}`" :data-finger="finger.channel" :data-owner="finger.owner" :data-sustained="!!finger.sustained" :data-toggled="!!finger.toggled" :class="{sustained:finger.sustained,toggled:finger.toggled}" :aria-label="`${finger.toggled?'Toggled':finger.sustained?'Sustained':'Touching'} note ${finger.note}`" :transform="`translate(${finger.x} ${finger.y})`"><title>{{finger.toggled?'Toggled on':finger.sustained?'Held after release':'Finger touching key'}}</title><circle :r="finger.radius+2" class="finger-glow"/><circle :r="finger.radius" class="finger-dot"/><circle r=".85" fill="white"/></g></g>
+<g class="finger-indicators" pointer-events="none" aria-label="Physical fingers and command echoes">
+ <g class="finger-emissions" aria-hidden="true"><path v-for="echo in echoLocations.filter(echo=>echo.source)" :key="echo.id" :data-emission="echo.id" :data-source-touch="echo.sourceId" :stroke="echo.color" :d="`M ${echo.source!.x} ${echo.source!.y} L ${echo.x} ${echo.y}`"/></g>
+ <g v-for="echo in echoLocations" :key="echo.id" class="command-echo" :class="{sustained:echo.sustained,toggled:echo.toggled,pending:echo.action,'stop-echo':echo.action==='stop'}" :data-owner="echo.owner" :data-echo="echo.id" :data-source-touch="echo.sourceId" :data-sustained="!!echo.sustained" :data-toggled="!!echo.toggled" :aria-label="`${echo.action?`Queued ${echo.action}`:echo.toggled?'Toggled':echo.sustained?'Sustained':'Playing'} note ${echo.note}`" :style="{'--touch-color':echo.color,'--emit-x':`${echo.fromX}px`,'--emit-y':`${echo.fromY}px`}" :transform="`translate(${echo.x} ${echo.y})`"><title>{{echo.action?`Queued ${echo.action}`:echo.toggled?'Toggled on':echo.sustained?'Held after release':'Playing keywave'}} · command echo</title><circle :r="echo.radius" class="echo-ring"/><circle :r="echo.radius" class="echo-pulse"/></g>
+ <g v-for="finger in physicalLocations" :key="finger.id" class="physical-finger" :data-finger="finger.channel" :data-touch="finger.id" :data-source-touch="finger.touch?`touch:${finger.touch}`:finger.id" :data-edge="finger.edge" :style="{'--touch-color':finger.color}" :aria-label="`Finger touching note ${finger.note}`" role="img" :transform="`translate(${finger.x} ${finger.y})`"><title>Physical finger · note {{finger.note}}{{finger.edge?' · outside visible range':''}}</title><circle :r="finger.radius+2.8" class="finger-glow"/><circle :r="finger.radius" class="finger-dot"/><circle r="1.1" fill="white"/></g>
+</g>
 <text v-for="key in keyboard.filter(k=>keys.has(k.note))" :key="key.note" class="seaboard-key-label" :x="key.x+key.w/2" :y="key.black?121:134" text-anchor="middle"><title>{{keys.get(key.note)?.name}}</title>{{keyLabel(keys.get(key.note)?.name)}}</text>
 </svg>
 <div class="seaboard-faders"><input v-for="i in 3" :key="i" :value="macro[i-1]" type="range" min="0" max="1" step=".001" :aria-label="`Global controller ${i}`" @pointerdown="touching.add(i-1)" @pointerup="touching.delete(i-1)" @pointercancel="touching.delete(i-1)" @keydown="touching.add(i-1)" @keyup="touching.delete(i-1)" @blur="touching.delete(i-1)" @input="cc(i-1,Number(($event.target as HTMLInputElement).value))"/></div>
@@ -157,6 +179,7 @@ window.addEventListener('blur',panic);onBeforeUnmount(()=>{window.removeEventLis
 <button class="seaboard-bindings" aria-label="Global MIDI bindings" @click="state.settingsSection='midi';state.tab='Settings'">⚙</button>
 </div></div></div></template>
 <style scoped>
+.physical-finger .finger-glow{fill:var(--touch-color);opacity:.3;filter:blur(1.3px)}.physical-finger .finger-dot{fill:#edffff;fill-opacity:.92;stroke:var(--touch-color);stroke-width:1;filter:drop-shadow(0 0 3px var(--touch-color))}.finger-emissions path{fill:none;stroke-width:.65;stroke-opacity:.4;stroke-dasharray:1 1}.command-echo .echo-ring{fill:var(--touch-color);fill-opacity:.07;stroke:var(--touch-color);stroke-opacity:.85;stroke-width:.8}.command-echo.sustained .echo-ring{stroke-dasharray:1.5 1;fill-opacity:.1}.command-echo.toggled .echo-ring{stroke:var(--key-toggle);fill:var(--key-toggle);fill-opacity:.15}.command-echo.pending .echo-ring{stroke:#4cdb88;stroke-dasharray:1.4 1}.command-echo.stop-echo .echo-ring{stroke:#ff666d}.echo-pulse{fill:none;stroke:var(--touch-color);stroke-width:.8;opacity:0;animation:emit-command .32s ease-out both;transform-box:view-box;transform-origin:0 0}@keyframes emit-command{0%{transform:translate(var(--emit-x),var(--emit-y)) scale(.45);opacity:.95}65%{opacity:.7}100%{transform:translate(0,0) scale(1.4);opacity:0}}@media(prefers-reduced-motion:reduce){.echo-pulse{animation:none}}
 .keyboard-performance{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;--key-toggle:#be86ef}.keyboard-modes{display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex:none;padding:0 5px 3px}.keyboard-modes>span{font:7px 'Orbitron',sans-serif;letter-spacing:.1em;color:var(--text-dim);margin-right:3px}.keyboard-modes button{font-size:8px;padding:3px 8px}.keyboard-modes button.active{background:var(--c-primary);border-color:var(--c-primary);color:var(--bg)}.keyboard-modes small{font-size:9px;margin-left:5px}.seaboard-key.queued .key-outline{stroke:var(--c-primary);stroke-dasharray:2 2;stroke-width:1.4}.key-sounding{fill:var(--c-primary);stroke:#fff;stroke-opacity:.65;stroke-width:1.3;filter:drop-shadow(0 0 3px var(--c-primary))}.key-toggled{fill:var(--key-toggle);fill-opacity:.52;stroke:var(--key-toggle);stroke-width:1.2}.seaboard-key.toggled.held .key-selected{opacity:.12}.finger-indicators .toggled .finger-glow{fill:var(--key-toggle);opacity:.35}.finger-indicators .toggled .finger-dot{fill:var(--key-toggle);filter:drop-shadow(0 0 2px var(--key-toggle))}
 
 .performance-ribbon{cursor:pointer;touch-action:none;outline:none;color:#4cdb88}.performance-ribbon.ribbon-stop{color:#ff666d}.performance-ribbon rect{fill:currentColor;fill-opacity:.05;stroke:currentColor;stroke-opacity:.25;stroke-width:.5}.ribbon-lane:hover>rect,.ribbon-lane:focus-visible>rect,.ribbon-lane.held>rect{fill-opacity:.25;stroke-opacity:.8}.ribbon-lane{outline:none}.ribbon-lane.black>rect{fill-opacity:.12}.ribbon-lane.queued>rect{stroke-dasharray:1 1;stroke-opacity:1}.ribbon-lane path{fill:none;stroke:currentColor;stroke-width:.6;pointer-events:none;opacity:.6}.ribbon-lane .stop-mark{fill-opacity:.6;stroke:none;pointer-events:none}.performance-ribbon text{fill:currentColor;fill-opacity:.65;font:5px system-ui;letter-spacing:.7px}.key-latch-pending{color:#4cdb88}.key-latch-pending.latch-stop{color:#ff666d}.key-latch-pending circle{fill:currentColor;stroke:#07100b;stroke-width:.8;filter:drop-shadow(0 0 2px currentColor)}.key-latch-pending path,.key-latch-pending rect{fill:#07100b}.preset-button{cursor:pointer}.preset-button:hover rect,.preset-button:focus-visible rect{fill:#ffffff18;stroke:var(--c-primary);stroke-width:.4}.preset-button:focus{outline:none}

@@ -7,6 +7,7 @@
 namespace drummer {
 constexpr int maxZones = 8;
 constexpr int maxContacts = 16;
+constexpr int maxPhysicalTouches = maxContacts * 2; // Hardware and editor input have separate lifetimes.
 constexpr int maxRuntimeClips = 2048;
 constexpr int maxCandidates = 16;
 constexpr int intentDimensions = 4;
@@ -77,12 +78,19 @@ struct Contact {
     int inputNote = -1; // Current physical lane; key identifies its editable origin.
     int anchorNote = -1; // Original note-on pitch, retained for note-off/poly pressure.
     uint64_t owner = 0;
+    uint64_t touch = 0; // Physical source survives zone changes and latching.
     double opens = 0, switches = 0;
     float releaseVelocity = 0;
     Expression values;
     int clip=-1,wantedClip=-1;
     PatternIntent intent {{.5f,.5f,.5f,.5f}};
     double intentBeat=0,nextIntent=0,changedAt=0;
+};
+struct PhysicalTouch {
+    uint64_t id = 0;
+    bool down = false, surface = false;
+    int channel = 0, note = -1, bend = 8192;
+    float pitch = 0, slide = .5f, pressure = 0;
 };
 /** Native clip bus. No allocation/locks/I/O in process; editor configuration is immutable. */
 class Scheduler {
@@ -95,10 +103,12 @@ public:
     void reconfigure(const Configuration& previous,const Configuration& next,double beat,Sink,void*) noexcept;
     const std::array<Contact,maxContacts>& contacts() const { return fingers; }
     const std::array<Contact,maxSustained>& sustainedContacts() const { return sustained; }
+    const std::array<PhysicalTouch,maxPhysicalTouches>& physicalTouches() const { return touches; }
     bool hasHeldNotes() const noexcept;
     bool hasPendingLatch(int key) const noexcept { return key>=0&&key<128&&latches[(size_t)key].active; }
     int pendingLatchAction(int key) const noexcept { return hasPendingLatch(key)?(latches[(size_t)key].start?1:2):0; }
     int pendingLatchNote(int key) const noexcept { return hasPendingLatch(key)?latches[(size_t)key].next.inputNote:-1; }
+    uint64_t pendingLatchTouch(int key) const noexcept { return hasPendingLatch(key)?latches[(size_t)key].next.touch:0; }
     uint64_t touchSerial() const noexcept {return touchGeneration;}
     int lastTouchNote() const noexcept {return touchedNote;}
     uint32_t evaluations = 0;
@@ -111,6 +121,8 @@ private:
     std::array<PendingOff,capacity> pendingOffs;
     int pendingOffCount = 0;
     std::array<Contact,maxContacts> fingers {};
+    std::array<PhysicalTouch,maxPhysicalTouches> touches {};
+    uint64_t physicalGeneration = 0;
     std::array<Contact,maxSustained> sustained {};
     std::array<bool,maxContacts> pedals {};
     int pedalCC = 64, pedalMaster = 0;
@@ -120,7 +132,9 @@ private:
     double latchGrid=0;
     struct Surface {int slide=64,region=0,velocity=100,bend=8192,note=-1,lane=-1,bodyNote=-1,rpnMsb=127,rpnLsb=127,bendSemitones=48,bendCents=0;bool known=false;};
     std::array<Surface,maxContacts> surfaces{};
-    void stopKey(const Configuration&,int note,int offset,double beat,Sink,void*) noexcept;
+    void stopKey(const Configuration&,int note,int offset,double beat,Sink,void*,uint64_t touch=0) noexcept;
+    void observeTouch(const Configuration&,const Midi&) noexcept;
+    uint64_t sourceTouch(const Midi& m) const noexcept {return touches[(size_t)((m.status&15)+((m.surface||m.anchor>=0)?0:maxContacts))].id;}
     void routeSurface(const Configuration&,int channel,int offset,double beat,double bpm,bool strike,Sink,void*) noexcept;
     void expression(const Configuration&,Contact&,int offset,double beat,double bpm,Sink,void*) noexcept;
     bool physicalKeyDown(int key) const noexcept;

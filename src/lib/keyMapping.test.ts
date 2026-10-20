@@ -2,7 +2,7 @@ import {describe,it,expect} from 'vitest'
 import {factory,normalize,clone} from '../model'
 import {keyOrigins} from './keyMapping'
 import {captureSoundKit,withSoundKit} from './kits'
-import {seaboardKeys,keyAtPoint,keySlide,keyBed,ribbonAtPoint,ribbonLanes,surfaceAtPoint} from './seaboardKeys'
+import {seaboardKeys,keyAtPoint,keySlide,keyBed,ribbonAtPoint,ribbonLanes,surfaceAtPoint,touchPoint} from './seaboardKeys'
 const legacy=[48,50,52,53,55,57,59,60,62,64,65,67,69,71,72,74]
 describe('chromatic keywaves and parallel pitches',()=>{
  it('repeats the ordered bank at both edges across every MIDI pitch without inventing bindings',()=>{
@@ -31,6 +31,23 @@ describe('chromatic keywaves and parallel pitches',()=>{
  })
 })
 describe('black-key touch geometry',()=>{
+ it('positions physical fingers from raw pitch and full-surface Slide, independently of black/white commands',()=>{
+  const keys=seaboardKeys(48),natural=keys[0]!,sharp=keys[1]!
+  const touch={note:49,pitch:49,slide:.4,surface:true}
+  const point=touchPoint(keys,touch)
+  expect(point.x).toBeCloseTo(sharp.x+sharp.w/2)
+  expect(point.y).toBeCloseTo(keyBed.surfaceBottom-.4*(keyBed.surfaceBottom-keyBed.surfaceTop))
+  expect(point.y).toBeGreaterThan(keyBed.top+sharp.h)
+  expect(touchPoint(keys,{...touch,pitch:48.5}).x).toBeCloseTo((natural.x+natural.w/2+sharp.x+sharp.w/2)/2)
+  expect(touchPoint(keys,{...touch,slide:1}).y).toBe(keyBed.surfaceTop)
+  expect(touchPoint(keys,{...touch,slide:0}).y).toBe(keyBed.surfaceBottom)
+  expect(touchPoint(keys,{...touch,slide:.5,surface:false}).y).toBeCloseTo(keyBed.top+sharp.h/2)
+  for(const pitch of [-12,140]){
+   const point=touchPoint(keys,{...touch,pitch})
+   expect(point.x).toBeGreaterThanOrEqual(keyBed.left);expect(point.x).toBeLessThan(keyBed.left+keyBed.width)
+   expect(point.edge).toBe(pitch<48?'low':'high')
+  }
+ })
  it('uses each black key’s full short height and routes the region below it to adjacent white keys',()=>{
   const keys=seaboardKeys(48)
   for(const black of keys.filter(key=>key.black)){

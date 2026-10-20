@@ -34,6 +34,7 @@ beforeEach(() => {
   backend.state.patch = factory(); backend.state.selected = 48; backend.state.error = ''
   backend.state.ready=false;backend.state.trackKeywave=false;performanceView.patterns={};performanceView.notes=[];performanceView.epoch=-1
   backend.state.telemetry.contacts = []; backend.state.telemetry.fingers = []; backend.state.telemetry.macros = [0, 0, 0, 0, 0]
+  backend.state.telemetry.touches=[]
   backend.state.telemetry.pendingLatches=[]
   backend.request.mockReset().mockImplementation(async (method:string)=>method==='waveform'?{peaks:[],duration:.5}:true); backend.midi.mockReset()
   vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
@@ -276,38 +277,88 @@ describe('Seaboard component interaction contracts', () => {
   })
 
   it('moves physical finger markers while held and removes them on release', async () => {
-    backend.state.telemetry.fingers = [{channel: 1, note: 48, slide: 0, glide: .5, pressure: .1}]
+    backend.state.telemetry.touches = [{id:'1',channel:1,note:48,pitch:48,slide:0,pressure:.1,surface:true}]
     const root = await render(Seaboard, {base: 36})
     const marker = find(root, n => n.props['data-finger'] === 1)
     const before = marker.props.transform
     const radius = nodes(marker, n => n.tag === 'circle')[1].props.r
-    backend.state.telemetry.fingers[0].slide = 1
-    backend.state.telemetry.fingers[0].pressure = 1
+    backend.state.telemetry.touches[0].slide = 1
+    backend.state.telemetry.touches[0].pressure = 1
     await settle()
     expect(marker.props.transform).not.toBe(before)
     expect(nodes(marker, n => n.tag === 'circle')[1].props.r).toBeGreaterThan(radius)
     expect(nodes(root, n => n.props.class === 'key-selected')).toHaveLength(1)
-    backend.state.telemetry.fingers = []; await settle()
+    backend.state.telemetry.touches = []; await settle()
     expect(nodes(root, n => n.props['data-finger'] !== undefined)).toHaveLength(0)
   })
 
-  it('keeps the released marker at its captured position with sustain styling through channel reuse', async () => {
-    const old={owner:'101',channel:1,note:48,zone:1,slide:.7,glide:.6,pressure:.8,sustained:false}
+  it('leaves a command echo after release while a reused channel gets a new physical finger', async () => {
+    const old={owner:'101',touch:'1',channel:1,note:48,zone:1,slide:.7,glide:.6,pressure:.8,sustained:false}
     backend.state.telemetry.fingers=[old]
+    backend.state.telemetry.touches=[{id:'1',channel:1,note:48,pitch:48.2,slide:.7,pressure:.8,surface:true}]
     const root=await render(Seaboard,{base:36})
     const marker=find(root,n=>n.props['data-owner']==='101'),position=marker.props.transform
-    backend.state.telemetry.fingers=[{...old,sustained:true},{owner:'102',channel:1,note:50,zone:0,slide:.1,glide:.5,pressure:.2,sustained:false}]
+    backend.state.telemetry.fingers=[{...old,sustained:true},{owner:'102',touch:'2',channel:1,note:50,zone:0,slide:.1,glide:.5,pressure:.2,sustained:false}]
+    backend.state.telemetry.touches=[{id:'2',channel:1,note:50,pitch:50,slide:.1,pressure:.2,surface:true}]
     await settle()
     expect(find(root,n=>n.props['data-owner']==='101')).toBe(marker)
     expect(marker.props.transform).toBe(position)
     expect(marker.props.class).toContain('sustained')
     expect(marker.props['aria-label']).toBe('Sustained note 48')
-    expect(nodes(root,n=>n.props['data-finger']===1)).toHaveLength(2)
-    const physical=find(root,n=>n.props['data-owner']==='102')
-    expect(physical.props['data-sustained']).toBe(false)
+    expect(nodes(root,n=>n.props['data-finger']===1)).toHaveLength(1)
+    const physical=find(root,n=>n.props['data-touch']==='touch:2')
+    expect(physical.props.class).toContain('physical-finger')
     backend.state.telemetry.fingers=[backend.state.telemetry.fingers[1]];await settle()
     expect(nodes(root,n=>n.props['data-owner']==='101')).toHaveLength(0)
-    expect(find(root,n=>n.props['data-owner']==='102')).toBe(physical)
+    expect(find(root,n=>n.props['data-touch']==='touch:2')).toBe(physical)
+  })
+
+  it('keeps all four nearby physical fingers visible when commands merge, toggle off or queue',async()=>{
+    backend.state.telemetry.touches=[48,49,50,51].map((note,i)=>({id:String(i+1),channel:i+1,note,pitch:note,slide:.7,pressure:.4,surface:true}))
+    backend.state.telemetry.fingers=[{owner:'101',touch:'4',channel:4,note:51,origin:48,zone:1,slide:.5,glide:.5,pressure:.4,playing:true}]
+    const root=await render(Seaboard,{base:36})
+    const fingers=nodes(root,n=>n.props['data-touch']!==undefined)
+    expect(fingers).toHaveLength(4)
+    expect(new Set(fingers.map(n=>n.props.transform)).size).toBe(4)
+    expect(nodes(root,n=>n.props['data-emission']!==undefined)).toHaveLength(1)
+    backend.state.patch.keyboardMode='toggle';backend.state.telemetry.fingers=[]
+    backend.state.telemetry.pendingLatches=[{note:51,origin:48,action:'stop',touch:'4'}]
+    await settle()
+    for(const finger of fingers)expect(find(root,n=>n.props['data-touch']===finger.props['data-touch'])).toBe(finger)
+    expect(nodes(root,n=>n.props['data-finger']!==undefined)).toHaveLength(4)
+    backend.state.telemetry.pendingLatches=[];await settle()
+    expect(nodes(root,n=>n.props['data-finger']!==undefined)).toHaveLength(4)
+    expect(nodes(root,n=>n.props['data-echo']!==undefined)).toHaveLength(0)
+  })
+
+  it('shows an on-screen finger immediately and keeps its exact position through the stop ribbon',async()=>{
+    const root=await render(Seaboard,{base:48}),key=find(root,n=>n.props['data-drop']==='key:48')
+    ;(key as any).ownerSVGElement={createSVGPoint:()=>({x:0,y:0,matrixTransform(){return {x:this.x,y:this.y}}}),getScreenCTM:()=>({inverse:()=>({})})}
+    await event(key,'pointerdown',{button:0,pointerId:7,clientX:155,clientY:250,pressure:.3})
+    const finger=find(root,n=>n.props['data-touch']==='pointer:7')
+    expect(finger.props.transform).toBe('translate(155 250)')
+    backend.state.telemetry.touches=[{id:'1',channel:1,note:48,pitch:48,slide:.2,pressure:.3,surface:false}];await settle()
+    expect(nodes(root,n=>n.props['data-finger']!==undefined)).toHaveLength(1)
+    await event(key,'pointermove',{pointerId:7,clientX:157,clientY:280,pressure:.7})
+    expect(find(root,n=>n.props['data-touch']==='pointer:7')).toBe(finger)
+    expect(finger.props.transform).toBe('translate(157 280)')
+    expect(backend.request).toHaveBeenLastCalledWith('ribbon',{action:'stop',note:48})
+    // An old audio snapshot must not resurrect a released on-screen pointer.
+    await settle()
+    expect(nodes(root,n=>n.props['data-finger']!==undefined)).toHaveLength(1)
+    await event(key,'pointerup',{pointerId:7})
+    expect(nodes(root,n=>n.props['data-finger']!==undefined)).toHaveLength(0)
+  })
+
+  it('shows an unbound touch even when every member channel is occupied',async()=>{
+    backend.state.patch.keys=[];backend.state.telemetry.contacts=Array.from({length:16},()=>1)
+    const root=await render(Seaboard,{base:48}),key=find(root,n=>n.props['data-drop']==='key:48')
+    ;(key as any).ownerSVGElement={createSVGPoint:()=>({x:0,y:0,matrixTransform(){return {x:this.x,y:this.y}}}),getScreenCTM:()=>({inverse:()=>({})})}
+    await event(key,'pointerdown',{button:0,pointerId:9,clientX:155,clientY:250,pressure:.4})
+    expect(find(root,n=>n.props['data-touch']==='pointer:9').props.transform).toBe('translate(155 250)')
+    expect(backend.midi).not.toHaveBeenCalled()
+    await event(key,'pointerup',{pointerId:9})
+    expect(nodes(root,n=>n.props['data-finger']!==undefined)).toHaveLength(0)
   })
 
   it('releases only its own contact on unmount and sends XY keyboard controls to native parameters', async () => {

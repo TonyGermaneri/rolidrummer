@@ -221,10 +221,11 @@ void DrummerProcessor::publishFingers() noexcept {
  for(const auto& f:scheduler.sustainedContacts())if(f.held)rememberPattern(f,standalonePpq,true);
  if(fingerBusy.test_and_set(std::memory_order_acquire))return;
  fingerSnapshot.count=0;fingerSnapshot.touchSerial=scheduler.touchSerial();fingerSnapshot.touchNote=scheduler.lastTouchNote();
- for(int key=0;key<128;++key)fingerSnapshot.latches[(size_t)key]={scheduler.pendingLatchAction(key),scheduler.pendingLatchNote(key)};
+ fingerSnapshot.touchCount=0;for(const auto& touch:scheduler.physicalTouches())if(touch.down)fingerSnapshot.touches[(size_t)fingerSnapshot.touchCount++]=touch;
+ for(int key=0;key<128;++key)fingerSnapshot.latches[(size_t)key]={scheduler.pendingLatchAction(key),scheduler.pendingLatchNote(key),scheduler.pendingLatchTouch(key)};
  // Ordinary launch quantization also schedules a future start, independently
  // of Hold/Toggle's latch grid. Give it the same immediate visual feedback.
- auto pendingStart=[&](const drummer::Contact& f){if(f.held&&f.opens>standalonePpq+1e-9&&f.key>=0&&!fingerSnapshot.latches[(size_t)f.key].action)fingerSnapshot.latches[(size_t)f.key]={1,f.inputNote>=0?f.inputNote:f.key};};
+ auto pendingStart=[&](const drummer::Contact& f){if(f.held&&f.opens>standalonePpq+1e-9&&f.key>=0&&!fingerSnapshot.latches[(size_t)f.key].action)fingerSnapshot.latches[(size_t)f.key]={1,f.inputNote>=0?f.inputNote:f.key,f.touch};};
  for(const auto& f:scheduler.contacts())pendingStart(f);
  for(const auto& f:scheduler.sustainedContacts())pendingStart(f);
  fingerSnapshot.patterns=lastPatterns;
@@ -237,6 +238,7 @@ void DrummerProcessor::publishFingers() noexcept {
   if(index>=0&&(fingerSnapshot.fingers[(size_t)index].playing||!playing))return;
   if(index<0){index=fingerSnapshot.count++;shown[(size_t)f.key]=index;}
   auto& view=fingerSnapshot.fingers[(size_t)index];view={f.owner,f.channel,f.inputNote>=0?f.inputNote:f.key,f.zone,f.values.slide,f.values.glide,f.values.press,sustained,f.toggled,playing};view.queued=scheduler.hasPendingLatch(f.key);view.origin=f.key;
+  view.touch=f.touch;
   if(f.key>=0&&f.key<128)view.candidate=lastPatterns[(size_t)f.key].candidate;
  };
  for(const auto& f:scheduler.contacts())if(f.down&&!f.suppressed)append(f,false);
