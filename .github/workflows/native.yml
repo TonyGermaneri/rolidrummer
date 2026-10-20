@@ -211,7 +211,16 @@ jobs:
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
           VERSION: ${{ github.ref_name }}
         run: |
-          native/tools/macos-notarize.sh native/build/plugin "$RUNNER_TEMP/notarized" Release
+          mkdir -p validation
+          if ! native/tools/macos-notarize.sh native/build/plugin "$RUNNER_TEMP/notarized" Release 2>&1 | tee validation/notarization.log; then
+            python3 - <<'PY'
+          from pathlib import Path
+          detail = '\n'.join(Path('validation/notarization.log').read_text(errors='replace').splitlines()[-60:])
+          detail = detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print('::error title=Apple notarization or stapling failed::' + detail)
+          PY
+            exit 1
+          fi
           echo "done=true" >> "$GITHUB_OUTPUT"
       - name: Package verified universal bundles
         env:
