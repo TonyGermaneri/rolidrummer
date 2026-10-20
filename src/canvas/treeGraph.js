@@ -190,6 +190,9 @@ export class TreeGraph {
     this.dpr = 1
     this.width = 1
     this.height = 1
+    this.hasViewport = false
+    this.cameraRestored = false
+    this.adjustingView = false
     this.biggest = 1
     this.deepest = 1
 
@@ -224,7 +227,7 @@ export class TreeGraph {
       // Where the camera ended up is part of the arrangement. Only at the
       // end of the gesture -- a wheel is fifty transforms and none of the
       // first forty-nine is where anybody meant to be.
-      .on('end', () => { if (this.onArrange) this.onArrange() })
+      .on('end', () => { if (!this.adjustingView && this.onArrange) this.onArrange() })
     select(this.canvas).call(this.zoom)
 
     /** What is being dragged, and everything that came with it. */
@@ -401,11 +404,15 @@ export class TreeGraph {
      * invent. @see rebuild
      */
     this.rebuild({ settle: true })
-    if (camera && Number.isFinite(camera.k) && camera.k > 0) {
+    this.cameraRestored = Boolean(camera && Number.isFinite(camera.k) && camera.k > 0)
+    if (this.cameraRestored) {
       select(this.canvas).call(this.zoom.transform,
         zoomIdentity.translate(camera.x || 0, camera.y || 0).scale(camera.k))
+      // Old layouts could be saved while the container was collapsed. Recover
+      // those blank views without moving a usable remembered arrangement.
+      if (this.hasViewport && !this.drawn.some(seat => { const [x,y]=this.screenOf(seat); return x>=0&&x<this.width&&y>=0&&y<this.height })) this.fitView()
     } else {
-      this.fitView()
+      if (this.hasViewport) this.fitView()
     }
   }
 
@@ -1279,12 +1286,28 @@ export class TreeGraph {
 
   resize() {
     const box = this.box.getBoundingClientRect()
+    if (box.width <= 0 || box.height <= 0) { this.hasViewport = false; return }
+    const first = !this.hasViewport, previousWidth = this.width, previousHeight = this.height
+    this.hasViewport = true
     this.dpr = Math.min(2, window.devicePixelRatio || 1)
     this.width = Math.max(1, Math.round(box.width))
     this.height = Math.max(1, Math.round(box.height))
     this.canvas.width = Math.round(this.width * this.dpr)
     this.canvas.height = Math.round(this.height * this.dpr)
+    if (this.source) {
+      this.adjustingView = true
+      try {
+        if (first && !this.cameraRestored) this.fitView()
+        else if (!first) this.shiftViewport((this.width-previousWidth)/2,(this.height-previousHeight)/2)
+        else if (!this.drawn.some(seat => { const [x,y]=this.screenOf(seat); return x>=0&&x<this.width&&y>=0&&y<this.height })) this.fitView()
+      } finally { this.adjustingView = false }
+    }
     this.paintSoon()
+  }
+
+  shiftViewport(x,y) {
+    if (!x && !y) return
+    select(this.canvas).call(this.zoom.transform,zoomIdentity.translate(this.at.x+x,this.at.y+y).scale(this.at.k))
   }
 
   paintSoon() {

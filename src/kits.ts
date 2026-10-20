@@ -3,7 +3,7 @@ import {state,shared,flushEdits,writeShared,refreshShared,soundPreview,previewSo
 import {clone,factoryAssets,partName,type Asset} from './model'
 import {defaultSettings} from './types'
 import {request,native} from './native/bridge'
-import {captureSoundKit,withSoundKit,type SoundKit} from './lib/kits'
+import {captureSoundKit,withSoundKit,normalizeSoundKit,type SoundKit} from './lib/kits'
 export const kitState=reactive({id:'',name:'',query:'',busy:false,saving:false,scope:'all',status:'',previewAll:true})
 watch(()=>soundPreview.kit,(kit,previous)=>{if(!kit&&previous&&kitState.status.startsWith('Previewing'))kitState.status='Kit preview ended. Current patch sounds are active.'},{flush:'sync'})
 export const savedKits=computed(()=>Object.values(shared).filter(field=>field.key.startsWith('kit/')&&field.value?.version===1).sort((a,b)=>a.value.name.localeCompare(b.value.name)))
@@ -16,6 +16,7 @@ export async function rememberSoundRoot(path:string){
 }
 export async function applySoundKit(kit:SoundKit,guard=()=>true){
  const checked=withSoundKit(state.patch,kit)
+ kit=normalizeSoundKit(kit)
  await flushEdits()
  if(!guard())return false
  await cancelSoundPreview()
@@ -70,7 +71,7 @@ export async function matchSounds(query:string,note?:number){
   const result=await request<{assignments:{note:number;asset:Asset}[];sounds:number;limited:boolean}>('soundMatch',{query:query.trim(),roots:soundRoots.value,assets,keys:keys.map(key=>({note:key.note,name:key.name,part:partName(key.parts),parts:key.parts}))})
   if(ticket!==generation)return
   if(before!==fingerprint()){kitState.status='The instrument changed. Search again to match its current keywaves.';return}
-  const kit:SoundKit={version:1,id:'search',name:query.trim(),keys:result.assignments.map(({note,asset})=>({note,sound:asset.preset?clone(asset.preset.sound):{path:asset.path,s:{...defaultSettings(asset.name),reverse:false}}}))}
+  const kit:SoundKit={version:1,keyLayoutVersion:1,id:'search',name:query.trim(),keys:result.assignments.map(({note,asset})=>({note,sound:asset.preset?clone(asset.preset.sound):{path:asset.path,s:{...defaultSettings(asset.name),reverse:false}}}))}
   if(!kit.keys.length)throw Error('No matching sounds were found. Add a sound library folder or choose a saved kit.')
   kitState.previewAll=note===undefined
   if(!await previewSoundKit(kit,()=>ticket===generation&&before===fingerprint())){

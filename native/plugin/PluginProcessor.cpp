@@ -77,7 +77,7 @@ void DrummerProcessor::prepareToPlay(double sr,int max){rate=sr;previewRate=sr;p
 bool DrummerProcessor::isBusesLayoutSupported(const BusesLayout&l)const{return l.getMainOutputChannelSet()==juce::AudioChannelSet::stereo()||l.getMainOutputChannelSet()==juce::AudioChannelSet::mono();}
 void DrummerProcessor::renderTo(int end){if(end<=rendered)return;engine.process(outputL+rendered,outputR+rendered,end-rendered,nullptr,0,{clock.bpm,clock.ppq+(rendered-eventBase)*clock.bpm/(60*rate),clock.playing});rendered=end;}
 void DrummerProcessor::emit(void*ctx,const drummer::Event&e){auto&p=*static_cast<DrummerProcessor*>(ctx);p.renderTo(e.offset+p.eventBase);
- drummer::PlayedEvent view;view.epoch=p.monitorEpoch;view.beat=p.monitorSegment+e.offset*p.clock.bpm/(60*p.rate);view.owner=e.owner;view.token=e.token;view.key=e.key;view.note=e.drumNote;view.duration=e.duration;view.velocity=e.velocity;
+ drummer::PlayedEvent view;view.epoch=p.monitorEpoch;view.beat=p.monitorSegment+e.offset*p.clock.bpm/(60*p.rate);view.owner=e.owner;view.token=e.token;view.key=e.key;view.inputNote=e.inputNote;view.note=e.drumNote;view.duration=e.duration;view.velocity=e.velocity;
  bool record=true;
  switch(e.type){
   case drummer::Event::hit:view.type=drummer::PlayedEvent::on;break;
@@ -219,6 +219,12 @@ void DrummerProcessor::publishFingers() noexcept {
  for(const auto& f:scheduler.sustainedContacts())if(f.held)rememberPattern(f,standalonePpq,true);
  if(fingerBusy.test_and_set(std::memory_order_acquire))return;
  fingerSnapshot.count=0;
+ for(int key=0;key<128;++key)fingerSnapshot.latches[(size_t)key]={scheduler.pendingLatchAction(key),scheduler.pendingLatchNote(key)};
+ // Ordinary launch quantization also schedules a future start, independently
+ // of Hold/Toggle's latch grid. Give it the same immediate visual feedback.
+ auto pendingStart=[&](const drummer::Contact& f){if(f.held&&f.opens>standalonePpq+1e-9&&f.key>=0&&!fingerSnapshot.latches[(size_t)f.key].action)fingerSnapshot.latches[(size_t)f.key]={1,f.inputNote>=0?f.inputNote:f.key};};
+ for(const auto& f:scheduler.contacts())pendingStart(f);
+ for(const auto& f:scheduler.sustainedContacts())pendingStart(f);
  fingerSnapshot.patterns=lastPatterns;
  fingerSnapshot.runtime=active;if(active)fingerSnapshot.patternHash=active->patternHash;
  fingerSnapshot.beat=monitorBeat;fingerSnapshot.bpm=hostBpm.load();fingerSnapshot.epoch=monitorEpoch;
@@ -228,7 +234,7 @@ void DrummerProcessor::publishFingers() noexcept {
   int index=shown[(size_t)f.key];
   if(index>=0&&(fingerSnapshot.fingers[(size_t)index].playing||!playing))return;
   if(index<0){index=fingerSnapshot.count++;shown[(size_t)f.key]=index;}
-  auto& view=fingerSnapshot.fingers[(size_t)index];view={f.owner,f.channel,f.key,f.zone,f.values.slide,f.values.glide,f.values.press,sustained,f.toggled,playing};view.queued=scheduler.hasPendingLatch(f.key);
+  auto& view=fingerSnapshot.fingers[(size_t)index];view={f.owner,f.channel,f.inputNote>=0?f.inputNote:f.key,f.zone,f.values.slide,f.values.glide,f.values.press,sustained,f.toggled,playing};view.queued=scheduler.hasPendingLatch(f.key);view.origin=f.key;
   if(f.key>=0&&f.key<128)view.candidate=lastPatterns[(size_t)f.key].candidate;
  };
  for(const auto& f:scheduler.contacts())if(f.down&&!f.suppressed)append(f,false);

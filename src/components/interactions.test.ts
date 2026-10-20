@@ -27,12 +27,14 @@ import KeyControls from './KeyControls.vue'
 import PianoRollPanel from './PianoRollPanel.vue'
 import {acceptPerformance,performanceView} from '../performance'
 import { importPattern, midiImport, finishMidiImport } from '../midiImport'
+import {seaboardKeys,keyBed} from '../lib/seaboardKeys'
 
 let cleanup: (() => void)[] = []
 beforeEach(() => {
   backend.state.patch = factory(); backend.state.selected = 48; backend.state.error = ''
   backend.state.ready=false;backend.state.trackKeywave=false;performanceView.patterns={};performanceView.notes=[];performanceView.epoch=-1
   backend.state.telemetry.contacts = []; backend.state.telemetry.fingers = []; backend.state.telemetry.macros = [0, 0, 0, 0, 0]
+  backend.state.telemetry.pendingLatches=[]
   backend.request.mockReset().mockImplementation(async (method:string)=>method==='waveform'?{peaks:[],duration:.5}:true); backend.midi.mockReset()
   vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
   vi.stubGlobal('document', { activeElement: null })
@@ -42,6 +44,41 @@ afterEach(() => { cleanup.forEach(fn => fn()); cleanup = []; finishMidiImport(fa
 async function render(component: any, props = {}) { const view = await mount(component, props); cleanup.push(view.unmount); return view.root }
 
 describe('keywave piano roll contracts',()=>{
+ it('shows distinct queued start/stop indicators on parallel and origin keys even after the finger has lifted',async()=>{
+  backend.state.telemetry.fingers=[];backend.state.telemetry.pendingLatches=[{note:64,origin:48,action:'start'}]
+  const root=await render(Seaboard,{base:36})
+  for(const note of [48,64]){
+   const marker=find(root,n=>n.props['data-queued-key']===note)
+   expect(marker.props.class).toContain('latch-start');expect(marker.props['aria-label']).toBe('Queued start')
+  }
+  backend.state.telemetry.pendingLatches=[{note:64,origin:48,action:'stop'}];await settle()
+  expect(nodes(root,n=>n.props['data-queued-action']==='stop')).toHaveLength(2)
+  expect(find(root,n=>n.props['data-queued-key']===48).props.class).toContain('latch-stop')
+  backend.state.telemetry.pendingLatches=[];await settle()
+  expect(nodes(root,n=>n.props['data-queued-key']!==undefined)).toHaveLength(0)
+  expect(find(root,n=>n.props['data-drop']==='key:48').props.class).not.toContain('queued')
+ })
+ it('lights a parallel key and its origin while keeping the parallel key visually unbound and tracking the origin',async()=>{
+  backend.state.trackKeywave=true
+  backend.state.telemetry.fingers=[{channel:1,note:64,origin:48,zone:1,slide:.5,glide:.5,pressure:.5,playing:true}]
+  backend.state.telemetry.contacts[1]=49
+  const root=await render(Seaboard,{base:36}),origin=find(root,n=>n.props['data-drop']==='key:48'),parallel=find(root,n=>n.props['data-drop']==='key:64')
+  expect(origin.props.class).toContain('held');expect(origin.props.class).toContain('parallel-origin')
+  expect(parallel.props.class).toContain('held');expect(parallel.props['data-parallel']).toBe(true)
+  expect(nodes(root,n=>n.props.class==='seaboard-key-label')).toHaveLength(16)
+  await event(parallel,'keydown',{key:'Enter'});expect(backend.state.selected).toBe(48)
+  expect(backend.midi).toHaveBeenLastCalledWith([0x92,64,100])
+ })
+ it('hit-tests below a black key as white-key input and scales its slide to the black key’s actual height',async()=>{
+  const root=await render(Seaboard,{base:48}),sharp=find(root,n=>n.props['data-drop']==='key:49'),key=seaboardKeys(48).find(key=>key.note===49)!
+  ;(sharp as any).ownerSVGElement={createSVGPoint:()=>({x:0,y:0,matrixTransform(){return {x:this.x,y:this.y}}}),getScreenCTM:()=>({inverse:()=>({})})}
+  for(const [x,y,note,slide] of [[key.x+key.w/2,keyBed.top+key.h/2,49,64],[key.x+key.w*.25,keyBed.top+key.h+4,48,50],[key.x+key.w*.75,keyBed.top+key.h+4,50,50]]){
+   backend.midi.mockClear();await event(sharp,'pointerdown',{button:0,pointerId:1,clientX:x,clientY:y,pressure:.5})
+   expect(backend.midi.mock.calls.some(call=>call[0][0]===0xb1&&call[0][1]===74&&Math.abs(call[0][2]-slide)<=1)).toBe(true)
+   expect(backend.midi).toHaveBeenLastCalledWith([0x91,note,100]);await event(sharp,'pointerup',{pointerId:1})
+   expect(backend.midi).toHaveBeenLastCalledWith([0x81,note,64])
+  }
+ })
  it('preserves drum filters and mappings through a sound-only drag from a kit or sidebar',async()=>{
   const key=backend.state.patch.keys[0],parts=clone(key.parts),routes=clone(key.routes),zones=clone(key.zones)
   const asset=factoryAssets().find(asset=>asset.name==='Snare')!;let payload=''

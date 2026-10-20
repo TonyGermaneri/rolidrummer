@@ -32,6 +32,7 @@ struct Key {
 enum class KeyboardMode { normal, hold, toggle };
 struct Configuration {
     std::array<Key,128> keys;
+    std::array<int,128> origins=[] {std::array<int,128> result;result.fill(-1);return result;}();
     std::vector<Clip> clips;
     std::vector<PatternGroup> groups;
     double launchGrid = .25, switchGrid = .25;
@@ -42,12 +43,19 @@ struct Configuration {
     int masterChannel = 0;
     int sustainCC = 64; // 0–119, except per-note Slide (74).
 };
+void prepareKeyMapping(Configuration&) noexcept; // Configuration worker, never audio.
+inline int originFor(const Configuration& cfg,int note) noexcept {
+    if(note<0||note>127)return -1;
+    const int origin=cfg.origins[(size_t)note];
+    return cfg.keys[(size_t)note].enabled?note:origin>=0?origin:note;
+}
 struct Clock { double ppq = 0, bpm = 120, sampleRate = 48000; bool playing = false, discontinuity = false; };
 struct Midi { int offset = 0; uint8_t status = 0, a = 0, b = 0; };
 struct Expression { float strike = 1, glide = .5f, slide = 0, press = 0, lift = 0; };
 struct Event {
     enum Type { hit, endHit, expression, releaseContact, killContact, switchZone, panic, globalCC } type = hit;
     int offset = 0, key = -1, channel = 0, drumNote = -1;
+    int inputNote = -1;
     uint64_t owner = 0, token = 0;
     float velocity = 1;
     double duration = 0; // Pattern note length, in quarter-note beats.
@@ -60,6 +68,7 @@ struct Contact {
     bool held = false;
     bool toggled = false, suppressed = false; // Replaced/stopped physical touches cannot restart on an edit.
     int key = -1, zone = 0, wanted = 0, channel = 0;
+    int inputNote = -1; // Physical pitch; key identifies its editable origin.
     uint64_t owner = 0;
     double opens = 0, switches = 0;
     float releaseVelocity = 0;
@@ -81,6 +90,8 @@ public:
     const std::array<Contact,maxSustained>& sustainedContacts() const { return sustained; }
     bool hasHeldNotes() const noexcept;
     bool hasPendingLatch(int key) const noexcept { return key>=0&&key<128&&latches[(size_t)key].active; }
+    int pendingLatchAction(int key) const noexcept { return hasPendingLatch(key)?(latches[(size_t)key].start?1:2):0; }
+    int pendingLatchNote(int key) const noexcept { return hasPendingLatch(key)?latches[(size_t)key].next.inputNote:-1; }
     uint32_t evaluations = 0;
     bool overflow = false;
 private:
@@ -99,7 +110,7 @@ private:
     std::array<Latch,128> latches{};
     double latchGrid=0;
     bool physicalKeyDown(int key) const noexcept;
-    bool queueLatch(const Configuration&,const Midi&,double,Sink,void*) noexcept;
+    bool queueLatch(const Configuration&,const Midi&,int inputNote,double,Sink,void*) noexcept;
     void applyLatch(const Configuration&,Latch&,int,double,Sink,void*) noexcept;
     Contact& contact(int i) noexcept { return i < maxContacts ? fingers[(size_t)i] : sustained[(size_t)(i-maxContacts)]; }
     bool pedalDown(int channel) const noexcept { return pedals[(size_t)pedalMaster] || pedals[(size_t)channel]; }

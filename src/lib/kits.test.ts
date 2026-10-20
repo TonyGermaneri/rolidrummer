@@ -19,8 +19,8 @@ describe('sound-only kits',()=>{
   expect(()=>withSoundKit(patch,{...kit,version:2} as any)).toThrow('supported')
  })
  it('loads a saved sound onto a missing keywave without importing a pattern or filter',()=>{
-  const patch=factory(),kit=captureSoundKit(patch,'Extra sound','kit-3');kit.keys=[{...kit.keys[0],note:49}]
-  const loaded=withSoundKit(patch,kit),key=loaded.keys.find(key=>key.note===49)!
+  const patch=factory(),kit=captureSoundKit(patch,'Extra sound','kit-3');kit.keys=[{...kit.keys[0],note:96}]
+  const loaded=withSoundKit(patch,kit),key=loaded.keys.find(key=>key.note===96)!
   expect(key.sound).toEqual(kit.keys[0].sound);expect(key.parts).toEqual([])
   expect(key.zones).toEqual([{upper:1,clipId:''}]);expect(loaded.clips).toEqual(patch.clips)
  })

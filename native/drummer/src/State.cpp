@@ -67,11 +67,22 @@ juce::var defaultDocument(){
   keys.add(object({{"note",get(v,"note")},{"name",get(v,"name")},{"parts",get(v,"parts")},{"zoneSource",2},{"zones",zones},{"routes",get(v,"routes")},{"mpeDefaultsVersion",1},{"sound",object({{"path",get(v,"source")},{"s",settings}})}}));
  }
  juce::Array<juce::var> cc;for(int n:{107,109,111,113,114})cc.add(n);
- return object({{"version",1},{"id","builtin:factory"},{"name",get(data,"name")},{"keys",keys},{"clips",get(data,"clips")},{"templateZones",zones},{"launchGrid",.25},{"switchGrid",.25},{"hardRelease",false},{"sustainCC",64},{"keyboardMode","normal"},{"latchQuantize",true},{"latchBars",1},{"volume",.8},{"bpm",120.},{"globalCC",cc},{"globalRoutes",juce::Array<juce::var>()}});
+ return object({{"version",1},{"keyLayoutVersion",1},{"id","builtin:factory"},{"name",get(data,"name")},{"keys",keys},{"clips",get(data,"clips")},{"templateZones",zones},{"launchGrid",.25},{"switchGrid",.25},{"hardRelease",false},{"sustainCC",64},{"keyboardMode","normal"},{"latchQuantize",true},{"latchBars",1},{"volume",.8},{"bpm",120.},{"globalCC",cc},{"globalRoutes",juce::Array<juce::var>()}});
 }
 std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  auto doc=input.clone();
  if((int)get(doc,"version")!=1)throw std::runtime_error("Unsupported patch version");
+ if((int)get(doc,"keyLayoutVersion")!=1){
+  auto keys=get(doc,"keys");std::map<int,int> mapping;
+  if(auto* list=keys.getArray()){
+   for(const auto& key:*list){const double value=number(key,"note",48,0,127);const int note=(int)value;if(value!=note||!mapping.emplace(note,0).second)throw std::runtime_error("Invalid or duplicate keywave pitch");}
+   if(!mapping.empty()){int note=mapping.begin()->first;for(auto& entry:mapping)entry.second=note++;}
+   for(auto& key:*list)key.getDynamicObject()->setProperty("note",mapping[(int)get(key,"note",48)]);
+  }
+  auto neural=get(doc,"neural");
+  for(const char* field:{"keys","warnings"}){auto entries=get(neural,field);if(auto* list=entries.getArray())for(auto& entry:*list){const int old=(int)get(entry,"key",-1);if(mapping.count(old))entry.getDynamicObject()->setProperty("key",mapping[old]);}}
+  doc.getDynamicObject()->setProperty("keyLayoutVersion",1);
+ }
  if(auto id=get(doc,"id");!id.isVoid()&&(!id.isString()||id.toString().isEmpty()||id.toString().length()>128))throw std::runtime_error("Invalid patch identity");
  if(auto neural=get(doc,"neural");!neural.isVoid()&&(!neural.isObject()||(int)get(neural,"version")!=1))throw std::runtime_error("Unsupported neural patch version");
  if(auto*clips=get(doc,"clips").getArray())for(auto&clip:*clips)for(int p=0;p<3;++p)if(get(clip,"id").toString()=="factory-"+juce::String(p)&&(double)get(clip,"length")==4.&&(sameNotes(get(clip,"notes"),legacyGrooveNotes(p,true))||sameNotes(get(clip,"notes"),legacyGrooveNotes(p,false)))){
@@ -177,10 +188,12 @@ std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  juce::Array<juce::var> pads;for(auto&[id,sound]:sounds)pads.add(juce::String(id));
  auto meta=object({{"volume",number(doc,"volume",.8,0,1.5)},{"play",false},{"pads",pads},{"bpm",number(doc,"bpm",120,20,400)},{"fx",get(doc,"fx")}});
  r->performance=ssb::buildPerformance(meta,sounds,true);
+ prepareKeyMapping(c);
  if(auto value=get(doc,"globalCC");auto* cc=value.getArray())for(int i=0;i<std::min(5,cc->size());++i)r->cc[(size_t)i]=std::clamp((int)(*cc)[i],0,127);
  // Only pattern/routing changes retarget held contacts. Sound/FX edits keep
  // current intent, dwell and pending switches intact. Hashing stays off audio.
  juce::MemoryOutputStream shape;
+ for(int origin:c.origins)shape.writeInt(origin);
  for(const auto& key:c.keys){shape.writeBool(key.enabled);shape.writeInt(key.zoneSource);shape.writeInt(key.zoneCount);shape.writeBool(key.intentEnabled);for(bool part:key.parts)shape.writeBool(part);for(int i=0;i<key.zoneCount;++i){const auto& zone=key.zones[(size_t)i];shape.writeFloat(zone.upper);shape.writeInt(zone.clip);shape.writeInt(zone.group);}}
  shape.writeInt((int)c.clips.size());for(const auto& clip:c.clips){shape.writeInt64((juce::int64)clip.id);shape.writeDouble(clip.length);shape.writeDouble(clip.origin);}
  shape.writeInt((int)c.groups.size());for(const auto& group:c.groups){shape.writeInt(group.count);for(int i=0;i<group.count;++i){const auto& candidate=group.candidates[(size_t)i];shape.writeInt(candidate.clip);for(float coordinate:candidate.position)shape.writeFloat(coordinate);}}

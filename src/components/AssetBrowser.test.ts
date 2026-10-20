@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { factory } from '../model'
+import {toRaw} from 'vue'
 import { event, find, mount, settle } from '../testing/componentHost'
 const fake = vi.hoisted(() => ({ state: null as any, shared: null as any, request: vi.fn(), write: vi.fn(), graphs: [] as any[] }))
 vi.mock('../native/bridge', () => ({ native: () => true, request: fake.request }))
@@ -18,7 +19,7 @@ vi.mock('./DataGrid.vue', async () => {
 })
 vi.mock('../canvas/treeGraph.js', () => ({ TreeGraph: class {
   source: any; look = {}; drawn = []; layout: any; destroyed = false
-  constructor(_box: unknown, public callbacks: any) { fake.graphs.push(this) }
+  constructor(public box: unknown, public callbacks: any) { fake.graphs.push(this) }
   setTree(tree: unknown, layout: unknown) { this.source = tree; this.layout = layout }
   setMarked() {}
   arrangement() { return this.layout }
@@ -51,11 +52,23 @@ it('assigns a selected browser sound directly to the sidebar target keywave',asy
  await event(find(view.root,n=>n.tag==='button'&&n.textContent.includes('ASSIGN TO')),'click')
  expect(fake.state.patch.keys.find((key:any)=>key.note===50).sound.s.name).toBe('Snare')
  expect(fake.state.selected).toBe(50)
- expect(fake.state.patch.keys.find((key:any)=>key.note===50).parts).toEqual([42])
+ expect(fake.state.patch.keys.find((key:any)=>key.note===50).parts).toEqual([38,40])
 })
 const directory = (root: any) => find(root, n => n.props['aria-label'] === 'Library directory')
 
 describe('browser component contracts', () => {
+  it('creates a graph only after its conditional container mounts and recreates it after grid/graph switches',async()=>{
+    const view=await render()
+    expect(fake.graphs).toHaveLength(0)
+    const button=(label:string)=>find(view.root,n=>n.tag==='button'&&n.textContent===label)
+    await event(button('Graph'),'click')
+    expect(fake.graphs).toHaveLength(1);const first=fake.graphs[0]
+    expect(toRaw(first.box)).toBe(find(view.root,n=>n.props.class==='graph-box'))
+    expect(first.source.nodes.filter((n:any)=>n.leaf).length).toBeGreaterThan(0)
+    await event(button('Grid'),'click');expect(first.destroyed).toBe(true)
+    await event(button('Graph'),'click');expect(fake.graphs).toHaveLength(2)
+    expect(toRaw(fake.graphs[1].box)).toBe(find(view.root,n=>n.props.class==='graph-box'))
+  })
   it('browses patch rows, filters and loads by stable ID without audio or file requests',async()=>{
     const patches=[{id:'patch/A',path:'patch/A',name:'Alpha',folder:false,size:0,keyCount:16,patternCount:3},{id:'patch/B',path:'patch/B',name:'Beta',folder:false,size:0,keyCount:4,patternCount:2}]
     const load=vi.fn(),view=await mount(AssetBrowser,{patches,currentId:'patch/A',onLoadPatch:load});cleanup.push(view.unmount)

@@ -9,6 +9,7 @@ struct PlayedEvent {
  uint64_t epoch=0,owner=0,token=0;
  double beat=0,duration=0;
  int key=-1,note=-1;
+ int inputNote=-1;
  float velocity=0;
 };
 class PerformanceMonitor {

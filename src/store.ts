@@ -2,13 +2,14 @@ import { reactive, watch } from 'vue'
 import { factory, normalize, clone, type Patch } from './model'
 import { request, native, onNative } from './native/bridge'
 import { acceptPerformance } from './performance'
-import { withSoundKit, type SoundKit } from './lib/kits'
+import { withSoundKit, normalizeSoundKit, type SoundKit } from './lib/kits'
+import {keyOrigins} from './lib/keyMapping'
 export const soundPreview = reactive({ kit: null as SoundKit | null, ready: false })
 let soundPreviewGeneration = 0, documentConflicts = 0
-export interface Finger {owner?:string;sustained?:boolean;toggled?:boolean;playing?:boolean;queued?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
+export interface Finger {origin?:number;owner?:string;sustained?:boolean;toggled?:boolean;playing?:boolean;queued?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
 export interface Playhead {id:number;note:number;pos:number;dur:number;velocity:number;grains:boolean}
 export interface GrainMark {voice:number;when:number;pos:number;len:number;dur:number;pan:number;gain:number;reverse:boolean}
-export const state = reactive({ patch: factory(), selected: 48, trackKeywave: false, lastTouchedKey: -1, tab: 'Keywave', settingsSection: 'libraries', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })
+export const state = reactive({ patch: factory(), selected: 48, trackKeywave: false, lastTouchedKey: -1, tab: 'Keywave', settingsSection: 'libraries', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false, pendingLatches: [] as {note:number;origin:number;action:'start'|'stop'}[] }, history: [] as string[], future: [] as string[] })
 let applying = false, lastSaved = '', lastCheckpoint = '', inFlight = '', generation = 0, nativeRevision = 0, loading = false, legacyIdentityName = ''
 let timer: ReturnType<typeof setTimeout> | undefined, draining: Promise<void> | undefined
 type Pending = { document: Patch; generation: number; activationGrid: number; preserveActivation: boolean }
@@ -26,6 +27,7 @@ export async function previewSoundKit(kit: SoundKit, guard = () => true) {
  await flushEdits()
  if (!guard()) return false
  // Validate without changing the editable/saved document.
+ kit=normalizeSoundKit(kit)
  withSoundKit(state.patch, kit)
  const ticket = ++soundPreviewGeneration
  soundPreview.kit = clone(kit); soundPreview.ready = false
@@ -142,9 +144,11 @@ export function undo(redo = false) {
  void attempt(() => flushEdits(false,0))
 }
 export function observeKeyTouch(bytes:number[]){
- if((bytes[0]&240)!==144||!(bytes[2]>0)||!state.patch.keys.some(key=>key.note===bytes[1]))return
- state.lastTouchedKey=bytes[1]
- if(state.trackKeywave)state.selected=bytes[1]
+ if((bytes[0]&240)!==144||!(bytes[2]>0))return
+ const origin=keyOrigins(state.patch.keys)[bytes[1]]
+ if(origin===undefined||origin<0)return
+ state.lastTouchedKey=origin
+ if(state.trackKeywave)state.selected=origin
 }
 watch(()=>state.trackKeywave,enabled=>{if(enabled&&state.lastTouchedKey>=0&&state.patch.keys.some(key=>key.note===state.lastTouchedKey))state.selected=state.lastTouchedKey},{flush:'sync'})
 onNative('rdTelemetry', data => {

@@ -6,6 +6,13 @@ const hit=(overrides:Partial<PlayedEvent>={}):PlayedEvent=>({type:0,epoch:1,beat
 const frame=(events:PlayedEvent[],beat=3,epoch=1)=>acceptPerformance({performance:{events,beat,epoch,bpm:120,dropped:0}})
 beforeEach(()=>{performanceView.epoch=-1;performanceView.notes=[];performanceView.patterns={}})
 describe('live drum monitoring',()=>{
+ it('flashes both the physical parallel pitch and its origin for the same scheduled hit',()=>{
+  frame([hit({beat:3,key:48,inputNote:64})],3)
+  const levels=keyHitLevels(performanceView.received)
+  expect(levels.get(64)).toBe(.8);expect(levels.get(48)).toBe(.8)
+  expect(performanceView.notes).toHaveLength(1);expect(performanceView.notes[0].key).toBe(48)
+  expect(keyHitLevels(performanceView.received+160).size).toBe(0)
+ })
  it('flashes the source keywave for short scheduled hits and expires the flash without another MIDI event',()=>{
   frame([hit({beat:3,duration:.001,key:48})],3)
   expect(keyHitLevels(performanceView.received).get(48)).toBe(.8)

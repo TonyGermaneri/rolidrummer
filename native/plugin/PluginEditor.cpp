@@ -153,16 +153,21 @@ void DrummerEditor::timerCallback(){
    f->setProperty("owner",juce::String((juce::int64)view.owner));f->setProperty("sustained",view.sustained);f->setProperty("toggled",view.toggled);f->setProperty("playing",view.playing);
    f->setProperty("channel",view.channel);f->setProperty("note",view.note);f->setProperty("zone",view.zone);
    f->setProperty("candidate",view.candidate);
-   f->setProperty("queued",view.queued);
+   f->setProperty("queued",view.queued);f->setProperty("origin",view.origin);
    f->setProperty("slide",view.slide);f->setProperty("glide",view.glide);f->setProperty("pressure",view.pressure);fingers.add(juce::var(f));
   }
   o->setProperty("fingers",fingers);
+  juce::Array<juce::var> latches;
+  for(int origin=0;origin<128;++origin){const auto& queued=snapshot.latches[(size_t)origin];if(!queued.action)continue;
+   auto* item=new juce::DynamicObject;item->setProperty("origin",origin);item->setProperty("note",queued.note>=0?queued.note:origin);item->setProperty("action",queued.action==1?"start":"stop");latches.add(item);
+  }
+  o->setProperty("pendingLatches",latches);
   auto* performance=new juce::DynamicObject;performance->setProperty("beat",snapshot.beat);performance->setProperty("bpm",snapshot.bpm);performance->setProperty("epoch",(double)snapshot.epoch);
   performance->setProperty("dropped",(double)plugin.performanceMonitor.dropped.load());
   juce::Array<juce::var> events;drummer::PlayedEvent event;
   while(plugin.performanceMonitor.pop(event)){
    auto* item=new juce::DynamicObject;item->setProperty("type",(int)event.type);item->setProperty("epoch",(double)event.epoch);item->setProperty("beat",event.beat);item->setProperty("duration",event.duration);
-   item->setProperty("owner",juce::String((juce::int64)event.owner));item->setProperty("token",juce::String((juce::int64)event.token));item->setProperty("key",event.key);item->setProperty("note",event.note);item->setProperty("velocity",event.velocity);events.add(item);
+   item->setProperty("owner",juce::String((juce::int64)event.owner));item->setProperty("token",juce::String((juce::int64)event.token));item->setProperty("key",event.key);item->setProperty("inputNote",event.inputNote);item->setProperty("note",event.note);item->setProperty("velocity",event.velocity);events.add(item);
   }
   performance->setProperty("events",events);o->setProperty("performance",performance);
   const auto& pattern=snapshot.patterns[(size_t)monitoredKey];

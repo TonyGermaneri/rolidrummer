@@ -1,11 +1,18 @@
 import {clone,type Patch,type Sound} from '../model'
-export interface SoundKit {version:1;id:string;name:string;keys:{note:number;sound:Sound}[]}
+import {compactKeyNotes} from './keyMapping'
+export interface SoundKit {version:1;keyLayoutVersion?:1;id:string;name:string;keys:{note:number;sound:Sound}[]}
+export function normalizeSoundKit(kit:SoundKit):SoundKit{
+ const next=clone(kit)
+ if(next.keyLayoutVersion!==1){compactKeyNotes(next.keys);next.keyLayoutVersion=1}
+ return next
+}
 export function captureSoundKit(patch:Patch,name:string,id:string):SoundKit{
  if(!name.trim())throw Error('Give this kit a name.')
- return{version:1,id,name:name.trim(),keys:patch.keys.map(key=>({note:key.note,sound:clone(key.sound)}))}
+ return{version:1,keyLayoutVersion:1,id,name:name.trim(),keys:patch.keys.map(key=>({note:key.note,sound:clone(key.sound)}))}
 }
 export function withSoundKit(patch:Patch,kit:SoundKit):Patch{
  if(kit.version!==1||!Array.isArray(kit.keys)||!kit.keys.length)throw Error('This is not a supported sound kit.')
+ kit=normalizeSoundKit(kit)
  const sounds=new Map<number,Sound>()
  for(const key of kit.keys){
   if(!Number.isInteger(key.note)||key.note<0||key.note>127||sounds.has(key.note)||typeof key.sound?.path!=='string'||!key.sound.s||typeof key.sound.s!=='object')throw Error('This kit contains an invalid keywave sound.')

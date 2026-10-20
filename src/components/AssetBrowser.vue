@@ -150,11 +150,16 @@ function animate() {
     const asset = graphAsset(seat), [x, y] = graph.screenOf(seat)
     return asset && x > -100 && y > -20 && x < box.value!.clientWidth && y < box.value!.clientHeight + 20 ? [{ asset, x, y, dim: seat.dim }] : []
   }).slice(0, 200)
+  else labels.value=[]
   frame = requestAnimationFrame(animate)
 }
 watch(currentTheme,t=>{if(graph){graph.look.ground=t.bg[1];graph.look.from=t.primary;graph.look.to=t.secondary;graph.paintSoon?.()}})
 watch(query, () => { if (!remote) remember(); mark() }, { flush: 'sync' })
-watch(view, () => { if (!remote) remember(); void nextTick(()=>build()) }, { flush: 'sync' })
+watch(view, () => { if (!remote) remember() }, { flush: 'sync' })
+// A nextTick scheduled by a sync watcher can run before this component's
+// render is queued. The graph's conditional container exists only after patch.
+watch(view, () => { if(view.value==='grid'||!busy.value)build() }, { flush: 'post' })
+watch(busy, value => { if(!value&&view.value==='graph'&&!graph)build() }, { flush: 'post' })
 watch(kind, () => {if(preview.id)void attempt(stopPreview);void attempt(boot)})
 watch(()=>props.patches,()=>{if(isPatches.value&&navigation)void attempt(()=>load(''))},{deep:true})
 watch(()=>props.currentId,id=>{if(isPatches.value)chosen.value=rows.value.find(row=>row.id===id)??null})
@@ -200,7 +205,7 @@ onBeforeUnmount(() => {if(preview.id)void attempt(stopPreview); disposed = true;
   <input v-model="pathEntry" aria-label="Library directory" placeholder="Factory library or directory path" @keydown.enter="attempt(()=>navigate(pathEntry))"/><button @click="attempt(()=>load())">↻</button>
   </template><span v-if="isPatches" class="patch-library-title">PATCH LIBRARY</span>
   <input v-model="query" :aria-label="isPatches?'Filter patches':'Filter assets'" :placeholder="isPatches?'Find a patch…':'Filter files…'"/>
-  <div class="segmented"><button :class="{active:view==='grid'}" @click="view='grid'">Grid</button><button :class="{active:view==='graph'}" @click="view='graph'">Graph</button></div>
+  <div class="segmented"><button :class="{active:view==='grid'}" @click="view='grid'">Grid</button><button :class="{active:view==='graph'}" @click="view='graph'">Graph</button></div><button v-if="view==='graph'" aria-label="Fit graph view" @click="graph?.fitView()">Fit</button>
  </div>
  <div class="browser-body">
   <DataGrid v-if="view==='grid'" :rows="visible" :columns="columns" :chosen="chosen||undefined" :view-state="gridState" @interaction="gridView?.begin()" @view="saveGrid" @pick="chosen=$event" @use="use" @drag="(asset:any,event:any)=>!isPatches&&begin(asset,patterns,event,soundOnly)" @cell="(column:string,asset:Asset)=>isPatches?(column==='load'&&use(asset)):(column==='preview'&&attempt(()=>audition(asset,patterns)))" @key="(event:any,asset:Asset)=>{if(!isPatches&&(event.key||event.NativeEvent?.key)===' '&&asset){event.preventDefault();attempt(()=>audition(asset,patterns))}}"/>
@@ -213,3 +218,8 @@ onBeforeUnmount(() => {if(preview.id)void attempt(stopPreview); disposed = true;
  <footer v-else class="browser-footer"><span>{{visible.length}} items · {{patterns?'Drag a MIDI file to a zone':'Drag a sound to a key'}} · ▶ to listen · Double-click folders to open</span><button v-if="assignTo!==undefined" class="assign-sound" :disabled="!chosen||chosen.folder" @click="chosen&&use(chosen)">ASSIGN TO {{midiNoteName(assignTo)}}</button><button v-if="preview.id" @click="attempt(stopPreview)">{{preview.loading?'Loading…':'■ Stop preview'}}</button><button v-if="chosen&&!chosen.folder" draggable="true" @dragstart="htmlDrag($event,chosen!,patterns,soundOnly)">{{chosen.name}} ↗</button><span v-if="!native()">Native app required for folders</span></footer>
 </section>
 </template>
+<style scoped>
+.browser-body{flex:1 1 0;min-width:0;min-height:0;position:relative;overflow:hidden}
+.graph-box{position:absolute;inset:0;width:auto;height:auto;min-width:0;min-height:0}
+.browser-tools,.browser-footer{flex-shrink:0}
+</style>

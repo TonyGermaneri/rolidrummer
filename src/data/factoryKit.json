@@ -67,7 +67,7 @@
       ]
     },
     {
-      "note": 50,
+      "note": 49,
       "name": "Closed hat",
       "parts": [
         42
@@ -133,7 +133,7 @@
       ]
     },
     {
-      "note": 52,
+      "note": 50,
       "name": "Snare",
       "parts": [
         38,
@@ -198,7 +198,7 @@
       ]
     },
     {
-      "note": 53,
+      "note": 51,
       "name": "High tom",
       "parts": [
         48,
@@ -264,7 +264,7 @@
       ]
     },
     {
-      "note": 55,
+      "note": 52,
       "name": "Mid tom",
       "parts": [
         45,
@@ -330,7 +330,7 @@
       ]
     },
     {
-      "note": 57,
+      "note": 53,
       "name": "Low tom",
       "parts": [
         41,
@@ -396,7 +396,7 @@
       ]
     },
     {
-      "note": 59,
+      "note": 54,
       "name": "Clap",
       "parts": [
         39
@@ -464,7 +464,7 @@
       ]
     },
     {
-      "note": 60,
+      "note": 55,
       "name": "Rim",
       "parts": [
         37
@@ -530,7 +530,7 @@
       ]
     },
     {
-      "note": 62,
+      "note": 56,
       "name": "Open hat",
       "parts": [
         46
@@ -596,7 +596,7 @@
       ]
     },
     {
-      "note": 64,
+      "note": 57,
       "name": "Pedal hat",
       "parts": [
         44
@@ -662,7 +662,7 @@
       ]
     },
     {
-      "note": 65,
+      "note": 58,
       "name": "Crash",
       "parts": [
         49,
@@ -730,7 +730,7 @@
       ]
     },
     {
-      "note": 67,
+      "note": 59,
       "name": "Ride",
       "parts": [
         51,
@@ -798,7 +798,7 @@
       ]
     },
     {
-      "note": 69,
+      "note": 60,
       "name": "Cowbell",
       "parts": [
         56
@@ -863,7 +863,7 @@
       ]
     },
     {
-      "note": 71,
+      "note": 61,
       "name": "Shaker",
       "parts": [
         70
@@ -928,7 +928,7 @@
       ]
     },
     {
-      "note": 72,
+      "note": 62,
       "name": "High conga",
       "parts": [
         62,
@@ -994,7 +994,7 @@
       ]
     },
     {
-      "note": 74,
+      "note": 63,
       "name": "Low conga",
       "parts": [
         64

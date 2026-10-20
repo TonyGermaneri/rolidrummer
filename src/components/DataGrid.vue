@@ -17,7 +17,7 @@
  * be handed over as a value -- which means the theme has to be read rather
  * than inherited, and re-read when it changes. @see core/themes.js
  */
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, shallowRef, watch, nextTick } from 'vue'
 import canvasDatagrid from 'canvas-datagrid'
 import { currentTheme } from '../theme/current'
 
@@ -39,6 +39,21 @@ const box = ref(null)
 /** Shallow: the grid owns a canvas and its own event plumbing, and making
     any of that reactive would proxy a great deal of nothing. */
 const grid = shallowRef(null)
+let sizeObserver, sizeFrame = 0, disposed = false
+function fit() {
+  const one = grid.value, parent = box.value
+  if (!one || !parent || disposed) return
+  const width = parent.clientWidth, height = parent.clientHeight
+  if (width <= 0 || height <= 0) return
+  // canvas-datagrid can cache its default 300×150 viewport when mounted in a
+  // flex panel before layout. Give its own style API the final pixel extent.
+  one.style.width = `${width}px`; one.style.height = `${height}px`
+  one.resize(true)
+}
+function queueFit() {
+  if (disposed || sizeFrame) return
+  sizeFrame = requestAnimationFrame(() => { sizeFrame = 0; fit() })
+}
 
 /*
  * A canvas takes a font string and falls back silently.
@@ -269,6 +284,7 @@ function dress() {
     contextMenuFilterInvalidExpresion: mix(theme.error, ground, 0.4),
     mobileEditFontFamily: FACE,
   })
+  queueFit()
 }
 
 /** `#rgb` or `#rrggbb` to three numbers, or mid grey. */
@@ -348,6 +364,9 @@ function build() {
 
   dress()
   restoreView()
+  if (typeof ResizeObserver !== 'undefined') { sizeObserver = new ResizeObserver(queueFit); sizeObserver.observe(box.value) }
+  else window.addEventListener('resize', queueFit)
+  void nextTick(queueFit)
   for (const event of ['mousedown', 'wheel', 'keydown']) grid.value.addEventListener(event, () => {
     if (restoring) return
     userView = true
@@ -520,7 +539,7 @@ let pending = false
 
 function handOver() {
   pending = false
-  if (grid.value) { grid.value.data = props.rows; restoreView() }
+  if (grid.value) { grid.value.data = props.rows; restoreView(); queueFit() }
 }
 
 watch(() => [props.rows, props.rows.length], () => {
@@ -531,7 +550,7 @@ watch(() => [props.rows, props.rows.length], () => {
 })
 
 watch(() => props.columns, (columns) => {
-  if (grid.value) grid.value.schema = columns.map((one) => ({ ...one }))
+  if (grid.value) { grid.value.schema = columns.map((one) => ({ ...one })); queueFit() }
 })
 
 /*
@@ -558,6 +577,8 @@ watch(() => props.chosen, () => {
 watch(currentTheme, dress)
 
 onBeforeUnmount(() => {
+  disposed = true; sizeObserver?.disconnect(); cancelAnimationFrame(sizeFrame)
+  window.removeEventListener('resize', queueFit)
   clearTimeout(handing)
   clearTimeout(viewTimer)
   const one = grid.value
@@ -569,3 +590,6 @@ onBeforeUnmount(() => {
 <template>
   <div ref="box" class="jamin-grid"></div>
 </template>
+<style scoped>
+.jamin-grid{position:absolute;inset:0;min-width:0;min-height:0;overflow:hidden}
+</style>

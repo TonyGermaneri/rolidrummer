@@ -4,7 +4,7 @@ export interface RollNote { beat:number;duration:number;note:number;velocity:num
 export interface PlayedNote extends RollNote { key:number;owner:string;token:string;end:number }
 export interface PatternView { identity:string;key:number;known:boolean;name:string;length:number;notes:RollNote[];totalNotes?:number;origin?:number }
 export interface PatternPosition { identity:string;key:number;phase:number;playing:boolean;zone:number;candidate:number;beat?:number }
-export interface PlayedEvent { type:number;epoch:number;beat:number;duration:number;key:number;note:number;velocity:number;owner:string;token:string }
+export interface PlayedEvent { inputNote?:number;type:number;epoch:number;beat:number;duration:number;key:number;note:number;velocity:number;owner:string;token:string }
 export const performanceView=reactive({epoch:-1,beat:0,bpm:120,received:0,dropped:0,notes:[] as PlayedNote[],hits:{} as Record<number,{when:number;velocity:number}>,patterns:{} as Record<number,{pattern:PatternView;position:PatternPosition;received:number}>})
 export const historyLimit=8192
 const now=()=>typeof performance==='undefined'?Date.now():performance.now()
@@ -29,7 +29,10 @@ export function acceptPerformance(data:{performance?:{epoch:number;beat:number;b
     if(!Number.isInteger(event.note)||event.note<0||event.note>127||!Number.isFinite(event.duration)||event.duration<=0)continue
     performanceView.notes.push({...event,duration:event.duration,end:event.beat+event.duration})
     const age=Math.max(0,frame.beat-event.beat)*60000/frame.bpm
-    if(age<150)performanceView.hits[event.key]={when:received-age,velocity:event.velocity}
+    if(age<150){
+     const hit={when:received-age,velocity:event.velocity};performanceView.hits[event.key]=hit
+     if(event.inputNote!==undefined&&event.inputNote>=0&&event.inputNote<128)performanceView.hits[event.inputNote]=hit
+    }
     index(performanceView.notes[performanceView.notes.length-1])
    }else {
     const ending=event.type===1?tokens.get(event.token):event.type===2?owners.get(event.owner):event.type===3?performanceView.notes:undefined

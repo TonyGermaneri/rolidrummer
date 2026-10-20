@@ -5,8 +5,8 @@ import {visualVars} from './theme/current'
 describe('playable factory kit and legacy migration',()=>{
  it('has a complete tuned kit with backbeats, ghost notes and independent drum roles',()=>{
   const patch=factory();expect(patch.keys).toHaveLength(16)
-  expect(patch.keys.map(k=>k.note)).toEqual([48,50,52,53,55,57,59,60,62,64,65,67,69,71,72,74])
-  expect(patch.keys.every(k=>[0,2,4,5,7,9,11].includes(k.note%12))).toBe(true)
+  expect(patch.keys.map(k=>k.note)).toEqual(Array.from({length:16},(_,i)=>48+i))
+  expect(patch.keyLayoutVersion).toBe(1)
   for(const key of patch.keys){
    expect(key.routes.map(r=>r.source)).toEqual([0,1,2,3,4])
    expect(partName(key.parts)).not.toBe('Custom')

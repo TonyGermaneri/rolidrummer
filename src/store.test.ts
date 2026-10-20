@@ -15,6 +15,14 @@ async function setup() {
 }
 
 describe('editor document synchronization', () => {
+  it('tracks physical parallel-key presses to their editable origins without changing the binding list',async()=>{
+    const {state,sendMidi}=await setup(),notes=state.patch.keys.map(key=>key.note)
+    state.selected=50;state.trackKeywave=false;sendMidi([0x91,64,100]);expect(state.selected).toBe(50);expect(state.lastTouchedKey).toBe(48)
+    state.trackKeywave=true;expect(state.selected).toBe(48)
+    backend.telemetry!({midi:[[0x92,47,100]]});expect(state.selected).toBe(63)
+    backend.telemetry!({midi:[[0x82,47,100]]});expect(state.selected).toBe(63)
+    expect(state.patch.keys.map(key=>key.note)).toEqual(notes)
+  })
   function soundBackend(){
     let revision=1
     backend.request.mockImplementation(async(method,payload)=>{

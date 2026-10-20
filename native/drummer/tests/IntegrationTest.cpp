@@ -64,10 +64,10 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   check(!player.programFailed.load(),"Valid program selection failed");
   player.shared.reset();temporary.deleteFile();temporary.getSiblingFile(temporary.getFileName()+"-wal").deleteFile();temporary.getSiblingFile(temporary.getFileName()+"-shm").deleteFile();
  }
- const std::array<int,16> factoryKeys={48,50,52,53,55,57,59,60,62,64,65,67,69,71,72,74};
+ const std::array<int,16> factoryKeys={48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63};
  check(runtime->performance->contactEffectsOnly,"Drummer prepared unused legacy per-sound reverb convolvers");
- for(int key:factoryKeys)check(runtime->sounds[(size_t)key]!=nullptr,"Factory kit is not mapped to natural keys");
- for(int key=0;key<128;++key)if(runtime->config.keys[(size_t)key].enabled)check(key%12!=1&&key%12!=3&&key%12!=6&&key%12!=8&&key%12!=10,"Factory sound occupies an accidental");
+ for(int key:factoryKeys)check(runtime->sounds[(size_t)key]!=nullptr,"Factory kit is not chromatically mapped");
+ for(int note=0;note<128;++note)check(runtime->config.origins[(size_t)note]>=48&&runtime->config.origins[(size_t)note]<64,"Factory parallel key is unplayable");
  // Real two-bar backbeats, independently voiced parts and tuned sample reuse.
  for(const auto& clip:runtime->config.clips){
   check(clip.length==8,"Factory groove must have two bars");std::vector<double> backbeats,kicks;
@@ -75,8 +75,8 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   check(backbeats==std::vector<double>({1,3,5,7}),"Snare backbeat is not on beats 2 and 4");check(kicks!=backbeats,"Kick doubles the snare rhythm");
   for(int key:factoryKeys)check(std::any_of(clip.notes.begin(),clip.notes.end(),[&](const auto&hit){return runtime->config.keys[(size_t)key].parts[(size_t)hit.note];}),"Factory part lacks pattern events");
  }
- check(runtime->sounds[53]->sample==runtime->sounds[55]->sample&&runtime->sounds[55]->sample==runtime->sounds[57]->sample,"Tuned toms should reuse the waveform");
- check(runtime->sounds[53]->s.pitch>runtime->sounds[55]->s.pitch&&runtime->sounds[55]->s.pitch>runtime->sounds[57]->s.pitch,"Toms lack descending tuning");
+ check(runtime->sounds[51]->sample==runtime->sounds[52]->sample&&runtime->sounds[52]->sample==runtime->sounds[53]->sample,"Tuned toms should reuse the waveform");
+ check(runtime->sounds[51]->s.pitch>runtime->sounds[52]->s.pitch&&runtime->sounds[52]->s.pitch>runtime->sounds[53]->s.pitch,"Toms lack descending tuning");
  // Render every synthesized voice with neutral Glide: tuning must survive MPE.
  {
   ssb::Engine synth;synth.prepare(48000,256);synth.setPerformance(runtime->performance);std::array<float,256> l{},r{};
@@ -450,7 +450,7 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
    // Render a generated hat candidate explicitly, then verify exact session
    // recall; availability in a candidate list alone is not playback evidence.
    auto keys=full.getProperty("keys",{});juce::String generatedHat;
-   for(auto& key:*keys.getArray())if((int)key.getProperty("note",0)==50){
+   for(auto& key:*keys.getArray())if((int)key.getProperty("note",0)==49){
     const auto zones=key.getProperty("zones",{});
     for(const auto& zone:*zones.getArray()){const auto choices=zone.getProperty("candidates",{});if(auto* candidates=choices.getArray())for(const auto& candidate:*candidates)if((bool)candidate.getProperty("generated",false))generatedHat=candidate.getProperty("clipId",{}).toString();}
     check(generatedHat.isNotEmpty(),"Resolved hat part lacks a generated performance");
@@ -462,11 +462,11 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
    for(auto& clip:*clips.getArray()){auto sourceNotes=clip.getProperty("notes",{});juce::Array<juce::var> hats;for(const auto&note:*sourceNotes.getArray())if((int)note.getProperty("note",0)==42)hats.add(note);clip.getDynamicObject()->setProperty("notes",hats);}
   }
   DrummerProcessor player,control;player.apply(drummer::compileDocument(full));control.apply(drummer::compileDocument(filtered));player.prepareToPlay(48000,256);control.prepareToPlay(48000,256);Head a,b;
-  const auto actual=render(player,a,true,2,50),expected=render(control,b,true,2,50);
+  const auto actual=render(player,a,true,2,49),expected=render(control,b,true,2,49);
   check(actual>.001&&std::abs(actual-expected)<1e-8,"Catalog playback leaked kick/snare events into a held hat key");
   juce::MemoryBlock session;player.getStateInformation(session);check(source.deleteFile(),"Library audio source could not be removed");
   DrummerProcessor restored;restored.setStateInformation(session.getData(),(int)session.getSize());restored.prepareToPlay(48000,256);Head c;
-  check(std::abs(render(restored,c,true,2,50)-expected)<1e-8,"Catalog session recall depends on the original archive");
+  check(std::abs(render(restored,c,true,2,49)-expected)<1e-8,"Catalog session recall depends on the original archive");
   root.deleteRecursively();
  }
  std::cout<<"integration: audio, session recall, cross-process settings, MIDI precision, shared sample cache, embedded DAW assets, portable archives, missing-sound recovery, stale-document rejection and cached library playback passed\n";
