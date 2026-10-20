@@ -40,7 +40,11 @@ void DrummerEditor::request(const juce::Array<juce::var>&args,Complete complete)
  }
  if(method=="ready"){plugin.cancelKitPreview();pageReady=true;auto* o=new juce::DynamicObject;o->setProperty("document",juce::JSON::parse(plugin.document()));o->setProperty("standalone",plugin.wrapperType==juce::AudioProcessor::wrapperType_Standalone);o->setProperty("revision",(juce::int64)plugin.stateRevision.load());o->setProperty("activationPending",plugin.activationPending());complete(answer(o));return;}
  if(method=="monitorKey"){monitoredKey=std::clamp((int)payload,0,127);sentPattern.clear();complete(answer(true));return;}
- if(method=="ribbon"){if(payload.toString()!="top"&&payload.toString()!="stop"){complete(failure("Unknown ribbon action"));return;}plugin.screenMidi.push({0xf4,(uint8_t)(payload.toString()=="top"?1:2),0,3});complete(answer(true));return;}
+ if(method=="ribbon"){
+  const auto action=payload.getProperty("action",{}).toString();const auto note=payload.getProperty("note",{});const int pitch=(int)note,channel=(int)payload.getProperty("channel",1);
+  if(!payload.isObject()||(!note.isInt()&&!note.isDouble())||(double)note!=pitch||pitch<0||pitch>127||(action!="top"&&action!="stop"&&action!="moveTop")||channel<1||channel>15){complete(failure("Choose an individual keywave ribbon lane"));return;}
+  plugin.screenMidi.push({(uint8_t)(0xf0|channel),(uint8_t)pitch,(uint8_t)(action=="top"?1:action=="stop"?2:3),0});complete(answer(true));return;
+ }
  if(method=="midi"){if(auto* bytes=payload.getArray();bytes&&bytes->size()>=3)plugin.screenMidi.push({(uint8_t)(int)(*bytes)[0],(uint8_t)(int)(*bytes)[1],(uint8_t)(int)(*bytes)[2],3});complete(answer(true));return;}
  if(method=="transport"){plugin.standalonePlaying=(bool)payload;complete(answer(true));return;}
  if(method=="parameter"){auto id=payload.getProperty("id",{}).toString();if(auto*param=plugin.parameters.getParameter(id)){param->beginChangeGesture();param->setValueNotifyingHost(param->convertTo0to1((float)(double)payload.getProperty("value",0)));param->endChangeGesture();}complete(answer(true));return;}
@@ -149,6 +153,7 @@ void DrummerEditor::timerCallback(){
  juce::Array<juce::var> contacts;for(auto&v:plugin.contacts)contacts.add(v.load());o->setProperty("contacts",contacts);
  DrummerProcessor::FingerSnapshot snapshot;
  if(plugin.readFingers(snapshot)){
+  o->setProperty("touchSerial",juce::String((juce::int64)snapshot.touchSerial));o->setProperty("touchNote",snapshot.touchNote);
   juce::Array<juce::var> fingers;
   for(int i=0;i<snapshot.count;++i){const auto& view=snapshot.fingers[(size_t)i];auto*f=new juce::DynamicObject;
    f->setProperty("owner",juce::String((juce::int64)view.owner));f->setProperty("sustained",view.sustained);f->setProperty("toggled",view.toggled);f->setProperty("playing",view.playing);

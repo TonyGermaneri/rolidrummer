@@ -23,6 +23,14 @@ describe('editor document synchronization', () => {
     backend.telemetry!({midi:[[0x82,47,100]]});expect(state.selected).toBe(63)
     expect(state.patch.keys.map(key=>key.note)).toEqual(notes)
   })
+  it('tracks the latest hardware ribbon lane even without a new note-on, preserving manual selection between touches',async()=>{
+    const {state}=await setup();state.trackKeywave=true
+    backend.telemetry!({touchSerial:'1',touchNote:65});expect(state.selected).toBe(49)
+    state.selected=52;backend.telemetry!({touchSerial:'1',touchNote:65});expect(state.selected).toBe(52)
+    backend.telemetry!({touchSerial:'2',touchNote:66});expect(state.selected).toBe(50)
+    state.trackKeywave=false;backend.telemetry!({touchSerial:'3',touchNote:67});expect(state.selected).toBe(50);expect(state.lastTouchedKey).toBe(51)
+    state.trackKeywave=true;expect(state.selected).toBe(51)
+  })
   function soundBackend(){
     let revision=1
     backend.request.mockImplementation(async(method,payload)=>{

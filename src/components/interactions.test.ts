@@ -9,7 +9,7 @@ vi.mock('../native/bridge', () => ({ request: backend.request, native: () => tru
 vi.mock('../store', async () => {
   const { reactive } = await import('vue')
   backend.state = reactive({ patch: {}, selected: 48, learn: -1, error: '', telemetry: { macros: [0, 0, 0, 0, 0], contacts: [] } })
-  return { state: backend.state, sendMidi: backend.midi, attempt: async (job: () => unknown) => { try { return await job() } catch (error) { backend.state.error = String(error) } } }
+  return { state: backend.state, sendMidi: backend.midi, observeKeyTouch: () => {}, attempt: async (job: () => unknown) => { try { return await job() } catch (error) { backend.state.error = String(error) } } }
 })
 vi.mock('./Knob.vue', async () => {
   const { defineComponent, h } = await import('vue')
@@ -27,7 +27,7 @@ import KeyControls from './KeyControls.vue'
 import PianoRollPanel from './PianoRollPanel.vue'
 import {acceptPerformance,performanceView} from '../performance'
 import { importPattern, midiImport, finishMidiImport } from '../midiImport'
-import {seaboardKeys,keyBed} from '../lib/seaboardKeys'
+import {seaboardKeys,keyBed,ribbonLanes} from '../lib/seaboardKeys'
 
 let cleanup: (() => void)[] = []
 beforeEach(() => {
@@ -79,26 +79,41 @@ describe('keywave piano roll contracts',()=>{
    expect(backend.midi).toHaveBeenLastCalledWith([0x81,note,64])
   }
  })
- it('uses the ribbons as global actions, deduplicates sweeps and leaves key-body gestures independent',async()=>{
-  const root=await render(Seaboard,{base:48}),top=find(root,n=>n.props['aria-label']==='Top zone all keywaves'),stop=find(root,n=>n.props['aria-label']==='Stop all keywaves')
+ it('targets individual chromatic ribbon lanes and visits every crossed white and black key during a sweep',async()=>{
+  const root=await render(Seaboard,{base:48}),lanes=ribbonLanes(seaboardKeys(48))
+  const top=find(root,n=>n.props['data-ribbon-note']===48&&n.props['data-ribbon-action']==='top')
   const svg={createSVGPoint:()=>({x:0,y:0,matrixTransform(){return {x:this.x,y:this.y}}}),getScreenCTM:()=>({inverse:()=>({})})}
-  ;(top as any).ownerSVGElement=svg;(stop as any).ownerSVGElement=svg
-  await event(top,'pointerdown',{button:0,pointerId:7,clientX:200,clientY:168})
-  expect(backend.request).toHaveBeenLastCalledWith('ribbon','top');expect(backend.midi).not.toHaveBeenCalled()
-  for(const x of [250,350,650])await event(top,'pointermove',{pointerId:7,clientX:x,clientY:168})
-  expect(backend.request.mock.calls.filter(call=>call[0]==='ribbon')).toHaveLength(1)
-  await event(top,'pointermove',{pointerId:7,clientX:650,clientY:280})
-  expect(backend.request).toHaveBeenLastCalledWith('ribbon','stop');expect(backend.midi).not.toHaveBeenCalled()
+  ;(top as any).ownerSVGElement=svg
+  const x=(note:number)=>{const lane=lanes.find(key=>key.note===note)!;return lane.x+lane.w/2}
+  await event(top,'pointerdown',{button:0,pointerId:7,clientX:x(48),clientY:168})
+  expect(backend.request).toHaveBeenLastCalledWith('ribbon',{action:'top',note:48,channel:1,velocity:100})
+  await event(top,'pointermove',{pointerId:7,clientX:x(52),clientY:168})
+  expect(backend.request.mock.calls.filter(call=>call[0]==='ribbon').map(call=>call[1].note)).toEqual([48,49,50,51,52])
+  await event(top,'pointermove',{pointerId:7,clientX:x(52),clientY:169})
+  expect(backend.request.mock.calls.filter(call=>call[0]==='ribbon')).toHaveLength(5)
+  await event(top,'pointermove',{pointerId:7,clientX:x(52),clientY:280})
+  expect(backend.request).toHaveBeenLastCalledWith('ribbon',{action:'stop',note:52})
+  backend.request.mockClear();await event(top,'pointermove',{pointerId:7,clientX:x(48),clientY:280})
+  expect(backend.request.mock.calls.filter(call=>call[0]==='ribbon').map(call=>call[1])).toEqual([51,50,49,48].map(note=>({action:'stop',note})))
   await event(top,'pointerup',{pointerId:7})
-  await event(stop,'keydown',{key:'Enter',repeat:false});expect(backend.request).toHaveBeenLastCalledWith('ribbon','stop')
-  backend.request.mockClear();await event(stop,'keydown',{key:'Enter',repeat:true});expect(backend.request).not.toHaveBeenCalled()
-  const natural=find(root,n=>n.props['data-drop']==='key:48');(natural as any).ownerSVGElement=svg
-  await event(natural,'pointerdown',{button:0,pointerId:1,clientX:155,clientY:keyBed.top+keyBed.height/2,pressure:.5})
-  expect(backend.midi).toHaveBeenLastCalledWith([0x91,48,100]);expect(backend.midi.mock.calls.some(call=>call[0][1]===74&&call[0][2]===64)).toBe(true)
-  await event(natural,'pointermove',{pointerId:1,clientX:155,clientY:280})
-  expect(backend.request).toHaveBeenLastCalledWith('ribbon','stop')
+  expect(nodes(root,n=>n.props['data-ribbon-action']==='top')).toHaveLength(49)
+  expect(nodes(root,n=>n.props['data-ribbon-action']==='stop')).toHaveLength(49)
+ })
+ it('keeps the black-key stop lane separate from the intervening white-key body and supports per-key ribbon keyboard controls',async()=>{
+  const root=await render(Seaboard,{base:48}),sharp=seaboardKeys(48).find(key=>key.note===49)!,x=sharp.x+sharp.w*.25
+  const key=find(root,n=>n.props['data-drop']==='key:49'),svg={createSVGPoint:()=>({x:0,y:0,matrixTransform(){return {x:this.x,y:this.y}}}),getScreenCTM:()=>({inverse:()=>({})})};(key as any).ownerSVGElement=svg
+  await event(key,'pointerdown',{button:0,pointerId:1,clientX:x,clientY:keyBed.top+sharp.h+5,pressure:.5})
   expect(backend.midi).toHaveBeenLastCalledWith([0x91,48,100])
-  await event(natural,'pointerup',{pointerId:1});expect(backend.midi).toHaveBeenLastCalledWith([0x81,48,64])
+  const lane=ribbonLanes(seaboardKeys(48)).find(key=>key.note===49)!
+  await event(key,'pointermove',{pointerId:1,clientX:lane.x+lane.w/2,clientY:280})
+  expect(backend.request).toHaveBeenLastCalledWith('ribbon',{action:'stop',note:49})
+  await event(key,'pointerup',{pointerId:1})
+  const stop=find(root,n=>n.props['data-ribbon-note']===49&&n.props['data-ribbon-action']==='stop')
+  await event(stop,'keydown',{key:'Enter',repeat:false});expect(backend.request).toHaveBeenLastCalledWith('ribbon',{action:'stop',note:49})
+  backend.request.mockClear();await event(stop,'keydown',{key:'Enter',repeat:true});expect(backend.request).not.toHaveBeenCalled()
+  const top=find(root,n=>n.props['data-ribbon-note']===49&&n.props['data-ribbon-action']==='top')
+  await event(top,'keydown',{key:'Enter',repeat:false});expect(backend.request).toHaveBeenLastCalledWith('ribbon',{action:'top',note:49,channel:1,velocity:100})
+  await event(top,'keyup',{key:'Enter'});expect(backend.midi).toHaveBeenLastCalledWith([0x81,49,64])
  })
  it('preserves drum filters and mappings through a sound-only drag from a kit or sidebar',async()=>{
   const key=backend.state.patch.keys[0],parts=clone(key.parts),routes=clone(key.routes),zones=clone(key.zones)

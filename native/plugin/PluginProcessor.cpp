@@ -157,9 +157,9 @@ void DrummerProcessor::processBlock(juce::AudioBuffer<float>&buffer,juce::MidiBu
   switchAt=n;
  }
  int count=0;bool full=false;
- // Screen-only ribbon packets share the MIDI queue to preserve gesture order;
- // the private 0xf4 packet is never sent to a host or interpreted as real MIDI.
- ssb::MidiMessage screen;while(screenMidi.pop(screen)){if(count<(int)input.size())input[(size_t)count++]={0,screen.status,screen.data1,screen.data2,screen.status==0xf4?(screen.data1==1?drummer::Midi::ribbonTop:drummer::Midi::ribbonStop):drummer::Midi::message};else full=true;}
+ // Private screen packets (size zero) retain per-key target and channel in
+ // the same ordered queue as note gestures. They are never real host MIDI.
+ ssb::MidiMessage screen;while(screenMidi.pop(screen)){if(count<(int)input.size())input[(size_t)count++]={0,screen.size==0?(uint8_t)(0x90|(screen.status&15)):screen.status,screen.data1,screen.size==0?(uint8_t)100:screen.data2,screen.size==0?(screen.data2==1?drummer::Midi::ribbonTop:screen.data2==2?drummer::Midi::ribbonStop:drummer::Midi::ribbonSlideTop):drummer::Midi::message};else full=true;}
  for(auto m:midi){if(m.numBytes<1)continue;auto size=ssb::midiMessageSize(m.data[0]);if(!size||m.numBytes<size)continue;
   ssb::MidiMessage msg{m.data[0],size>1?m.data[1]:(uint8_t)0,size>2?m.data[2]:(uint8_t)0,size};midiToPage.push(msg);
   if(count<(int)input.size())input[(size_t)count++]={m.samplePosition,msg.status,msg.data1,msg.data2,drummer::Midi::message,true};else full=true;
@@ -220,7 +220,7 @@ void DrummerProcessor::publishFingers() noexcept {
  for(const auto& f:scheduler.contacts())if(f.held&&!f.suppressed)rememberPattern(f,standalonePpq,true);
  for(const auto& f:scheduler.sustainedContacts())if(f.held)rememberPattern(f,standalonePpq,true);
  if(fingerBusy.test_and_set(std::memory_order_acquire))return;
- fingerSnapshot.count=0;
+ fingerSnapshot.count=0;fingerSnapshot.touchSerial=scheduler.touchSerial();fingerSnapshot.touchNote=scheduler.lastTouchNote();
  for(int key=0;key<128;++key)fingerSnapshot.latches[(size_t)key]={scheduler.pendingLatchAction(key),scheduler.pendingLatchNote(key)};
  // Ordinary launch quantization also schedules a future start, independently
  // of Hold/Toggle's latch grid. Give it the same immediate visual feedback.

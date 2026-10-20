@@ -74,7 +74,7 @@ juce::var document(bool refreshed,bool effects){
     set(doc,"keys",keys);set(doc,"clips",clips);set(doc,"launchGrid",0);set(doc,"switchGrid",.125);return doc;
 }
 // This workload keeps 128 owners alive while sweeping per-key expression.
-// Reserve the physical ribbons for the separate group-action/isolation tests.
+// Reserve the physical ribbons for the separate per-key ribbon/isolation tests.
 int keyBodySlide(int note,int value){const int pitch=note%12;const bool black=pitch==1||pitch==3||pitch==6||pitch==8||pitch==10;const int bottom=black?59:16;return bottom+int(std::lround((115-bottom)*value/127.));}
 double residentMiB(){
 #if defined(__APPLE__)

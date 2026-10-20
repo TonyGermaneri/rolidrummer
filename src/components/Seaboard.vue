@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import {computed,onMounted,onBeforeUnmount,ref,watch} from 'vue'
-import {state,sendMidi,attempt} from '../store'
+import {state,sendMidi,attempt,observeKeyTouch} from '../store'
 import {colors} from '../model'
 import {htmlDrop} from '../drag'
 import {request} from '../native/bridge'
 import {fitSeaboard} from '../lib/seaboardLayout'
 import {useRollClock,keyHitLevels} from '../performance'
 import {keyOrigins} from '../lib/keyMapping'
-import {seaboardKeys,keyAtPoint,keySlide,keyBed,ribbonAtPoint,type RibbonAction,type SeaboardKey} from '../lib/seaboardKeys'
+import {seaboardKeys,keySlide,keyBed,ribbonLanes,surfaceAtPoint,type RibbonAction,type SeaboardKey} from '../lib/seaboardKeys'
 const emit=defineEmits<{patch:[direction:number]}>()
 const props=defineProps<{base:number}>()
 const stage=ref<HTMLElement|null>(null),surface=ref({width:0,height:0})
@@ -18,6 +18,7 @@ onBeforeUnmount(()=>{observer?.disconnect();window.removeEventListener('resize',
 const blackPitch=new Set([1,3,6,8,10])
 const {left,top,width,height}=keyBed,whiteWidth=width/29
 const keyboard=computed(()=>seaboardKeys(props.base))
+const lanes=computed(()=>ribbonLanes(keyboard.value))
 function outline(key:typeof keyboard.value[number]) {
  const x=key.x+1,w=key.w-2,y=top,h=key.h;
  if(key.black)return `M ${x+3} ${y+3} Q ${x+w/2} ${y} ${x+w-2} ${y+3} L ${x+w} ${y+h-7} Q ${x+w} ${y+h} ${x+w/2} ${y+h} Q ${x} ${y+h} ${x} ${y+h-7} Z`;
@@ -40,7 +41,9 @@ const modes=[{id:'normal',label:'Normal',help:'Release a key to stop its part. T
 const shortNames:Record<string,string>={'Closed hat':'CH','Open hat':'OH','Pedal hat':'PH','High tom':'HT','Mid tom':'MT','Low tom':'LT','High conga':'HC','Low conga':'LC','Cowbell':'Bell','Shaker':'Shkr'}
 function keyLabel(name=''){return shortNames[name]??(name.length>5?name.slice(0,4)+'…':name)}
 const fingerLocations=computed(()=>[...(state.telemetry.fingers??[])].sort((a,b)=>Number(!!b.sustained)-Number(!!a.sustained)).flatMap(f=>{const key=keyboard.value.find(k=>k.note===f.note);return key?[{...f,x:key.x+key.w*(.5+(f.glide-.5)*.7),y:top+3+(1-f.slide)*(key.h-6),radius:2.5+Math.max(.1,f.pressure)*3}]:[]}))
-const contacts=new Map<number,{note:number;channel:number;svg:SVGSVGElement;key?:SeaboardKey;ribbon?:RibbonAction}>()
+type TouchArea='key'|RibbonAction
+type Contact={channel:number;svg:SVGSVGElement;key:SeaboardKey;area:TouchArea;playing:boolean}
+const contacts=new Map<number,Contact>()
 const keyboardContacts=new Map<number,number>()
 const macro=ref([...state.telemetry.macros])
 const touching=new Set<number>()
@@ -49,27 +52,52 @@ function zoneBottom(zones:{upper:number}[],i:number){return i?zones[i-1].upper:0
 function usedChannels(){const used=new Set([...contacts.values()].filter(c=>c.channel>=0).map(c=>c.channel).concat([...keyboardContacts.values()]));state.telemetry.contacts.forEach((value,ch)=>{if(value)used.add(ch)});return used}
 function selectKey(note:number){const origin=origins.value[note];if(keys.value.has(note))state.selected=note;else if(state.trackKeywave&&origin>=0)state.selected=origin}
 function point(svg:SVGSVGElement,e:PointerEvent){const p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;return p.matrixTransform(svg.getScreenCTM()!.inverse())}
+function stopKey(note:number){selectKey(note);observeKeyTouch([0x90,note,1]);void attempt(()=>request('ribbon',{action:'stop',note}))}
+function enter(c:Contact,key:SeaboardKey,area:TouchArea,e?:PointerEvent){
+ if(area==='stop')stopKey(key.note)
+ if(c.playing){sendMidi([0x80|c.channel,c.key.note,64]);c.playing=false}
+ c.key=key;c.area=area
+ if(area==='stop')return
+ selectKey(key.note);sendMidi([0xe0|c.channel,0,64]);sendMidi([0xd0|c.channel,100,0])
+ sendMidi([0xb0|c.channel,74,area==='top'?127:Math.round(keySlide(key,e?point(c.svg,e).y:top+key.h/2)*127)])
+ if(area==='top'){observeKeyTouch([0x90,key.note,100]);void attempt(()=>request('ribbon',{action:'top',note:key.note,channel:c.channel,velocity:100}))}
+ else sendMidi([0x90|c.channel,key.note,100])
+ c.playing=true
+}
 function down(e:PointerEvent){
  if(e.button!==0)return
- const target=e.currentTarget as SVGElement,svg=target.ownerSVGElement!
- const actual=point(svg,e),ribbon=ribbonAtPoint(actual.x,actual.y),key=keyAtPoint(keyboard.value,actual.x,actual.y)
- if(ribbon){target.setPointerCapture(e.pointerId);contacts.set(e.pointerId,{note:-1,channel:-1,svg,ribbon});runRibbon(ribbon);return}
- if(!key)return
- selectKey(key.note);if(origins.value[key.note]<0)return
+ const target=e.currentTarget as SVGElement,svg=target.ownerSVGElement!,actual=point(svg,e),touch=surfaceAtPoint(keyboard.value,actual.x,actual.y)
+ if(!touch||origins.value[touch.key.note]<0)return
  const used=usedChannels(),channel=Array.from({length:15},(_,i)=>i+1).find(c=>!used.has(c));if(channel===undefined)return
- target.setPointerCapture(e.pointerId);contacts.set(e.pointerId,{note:key.note,channel,svg,key})
- sendMidi([0xe0|channel,0,64]);sendMidi([0xd0|channel,100,0]);move(e);sendMidi([0x90|channel,key.note,100])
+ target.setPointerCapture(e.pointerId)
+ const c:Contact={channel,svg,key:touch.key,area:touch.area,playing:false};contacts.set(e.pointerId,c);enter(c,touch.key,touch.area,e)
 }
-function runRibbon(action:RibbonAction){void attempt(()=>request('ribbon',action))}
 function move(e:PointerEvent){
  const c=contacts.get(e.pointerId);if(!c)return
- const actual=point(c.svg,e),ribbon=ribbonAtPoint(actual.x,actual.y)
- if(ribbon){if(c.ribbon!==ribbon)runRibbon(ribbon);c.ribbon=ribbon;return}
- c.ribbon=undefined;if(!c.key)return
- const value=Math.round(keySlide(c.key,actual.y)*127);sendMidi([0xb0|c.channel,74,value])
- if(e.pressure>0)sendMidi([0xd0|c.channel,Math.round(e.pressure*127),0])
+ const actual=point(c.svg,e),touch=surfaceAtPoint(keyboard.value,actual.x,actual.y);if(!touch)return
+ if(touch.key.note!==c.key.note){
+  if(touch.area!=='key'&&touch.area===c.area){
+   const from=keyboard.value.findIndex(key=>key.note===c.key.note),to=keyboard.value.findIndex(key=>key.note===touch.key.note),step=to>from?1:-1
+   for(let i=from+step;i!==to+step;i+=step)enter(c,keyboard.value[i],touch.area,e)
+  }else enter(c,touch.key,touch.area,e)
+ }else if(touch.area==='stop'){
+  if(c.area!=='stop')enter(c,touch.key,touch.area,e)
+ }else if(c.area==='stop')enter(c,touch.key,touch.area,e)
+ else {
+  if(touch.area==='top'&&c.area!=='top')void attempt(()=>request('ribbon',{action:'moveTop',note:touch.key.note,channel:c.channel}))
+  c.area=touch.area;c.key=touch.key
+  sendMidi([0xb0|c.channel,74,touch.area==='top'?127:Math.round(keySlide(touch.key,actual.y)*127)])
+  if(e.pressure>0)sendMidi([0xd0|c.channel,Math.round(e.pressure*127),0])
+ }
 }
-function up(e:PointerEvent){const c=contacts.get(e.pointerId);if(c){if(c.key)sendMidi([0x80|c.channel,c.note,64]);contacts.delete(e.pointerId)}}
+function up(e:PointerEvent){const c=contacts.get(e.pointerId);if(c){if(c.playing)sendMidi([0x80|c.channel,c.key.note,64]);contacts.delete(e.pointerId)}}
+function ribbonDown(e:KeyboardEvent,note:number,action:RibbonAction){
+ if(e.repeat)return
+ if(action==='stop'){stopKey(note);return}
+ if(keyboardContacts.has(note))return
+ const channel=Array.from({length:15},(_,i)=>i+1).find(c=>!usedChannels().has(c));if(channel===undefined)return
+ keyboardContacts.set(note,channel);selectKey(note);observeKeyTouch([0x90,note,100]);sendMidi([0xe0|channel,0,64]);sendMidi([0xd0|channel,100,0]);void attempt(()=>request('ribbon',{action:'top',note,channel,velocity:100}))
+}
 function keyboardDown(e:KeyboardEvent,note:number){
  if(e.key!==' '&&e.key!=='Enter')return;e.preventDefault();selectKey(note)
  if(e.repeat||keyboardContacts.has(note)||origins.value[note]<0)return
@@ -77,7 +105,7 @@ function keyboardDown(e:KeyboardEvent,note:number){
  if(channel===undefined)return;keyboardContacts.set(note,channel);sendMidi([0xe0|channel,0,64]);sendMidi([0xd0|channel,100,0]);sendMidi([0xb0|channel,74,64]);sendMidi([0x90|channel,note,100])
 }
 function keyboardUp(note:number){const channel=keyboardContacts.get(note);if(channel!==undefined){sendMidi([0x80|channel,note,64]);keyboardContacts.delete(note)}}
-function panic(){for(const contact of contacts.values())if(contact.key)sendMidi([0x80|contact.channel,contact.note,64]);for(const [note,channel] of keyboardContacts)sendMidi([0x80|channel,note,64]);contacts.clear();keyboardContacts.clear();touching.clear()}
+function panic(){for(const contact of contacts.values())if(contact.playing)sendMidi([0x80|contact.channel,contact.key.note,64]);for(const [note,channel] of keyboardContacts)sendMidi([0x80|channel,note,64]);contacts.clear();keyboardContacts.clear();touching.clear()}
 watch(()=>props.base,panic)
 function cc(i:number,v:number){macro.value[i]=v;state.telemetry.macros[i]=v;void attempt(()=>request('parameter',{id:`macro${i}`,value:v}))}
 function padKey(e:KeyboardEvent){if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key))return;e.preventDefault();const step=e.shiftKey?.1:.01;if(e.key==='ArrowLeft')cc(3,Math.max(0,macro.value[3]-step));else if(e.key==='ArrowRight')cc(3,Math.min(1,macro.value[3]+step));else if(e.key==='ArrowUp')cc(4,Math.min(1,macro.value[4]+step));else if(e.key==='ArrowDown')cc(4,Math.max(0,macro.value[4]-step))}
@@ -120,7 +148,7 @@ window.addEventListener('blur',panic);onBeforeUnmount(()=>{window.removeEventLis
 <path v-if="hits.has(key.note)" class="key-sounding" :data-playing-key="key.note" :style="{opacity:hits.get(key.note)}" :d="outline(key)" pointer-events="none"/><path v-if="state.selected===key.note" class="key-selected" :d="outline(key)" pointer-events="none"/><path class="key-outline" :d="outline(key)" pointer-events="none"/>
 <g v-if="latchActions.has(key.note)" class="key-latch-pending" :class="`latch-${latchActions.get(key.note)}`" :data-queued-key="key.note" :data-queued-action="latchActions.get(key.note)" role="img" :aria-label="latchActions.get(key.note)==='start'?'Queued start':'Queued stop'" :transform="`translate(${key.x+key.w/2} ${top+key.h-10})`" pointer-events="none"><title>{{latchActions.get(key.note)==='start'?'Starts':'Stops'}} at the next quantized boundary</title><circle r="4.2"/><path v-if="latchActions.get(key.note)==='start'" d="M -1.1 -2 L 2 0 L -1.1 2 Z"/><rect v-else x="-1.5" y="-1.5" width="3" height="3"/></g>
 </g></g>
-<g v-for="action in (['top','stop'] as const)" :key="action" class="performance-ribbon" :class="`ribbon-${action}`" role="button" tabindex="0" :aria-label="action==='top'?'Top zone all keywaves':'Stop all keywaves'" @pointerdown="down" @pointermove="move" @pointerup="up" @pointercancel="up" @keydown.enter.prevent="!$event.repeat&&runRibbon(action)" @keydown.space.prevent="!$event.repeat&&runRibbon(action)"><title>{{action==='top'?'Start every keywave at its top zone':'Stop every keywave'}} · {{state.patch.latchQuantize&&state.patch.latchBars?'next quantized boundary':'instant'}}</title><rect :x="left" :y="action==='top'?keyBed.surfaceTop:top+height+.1" :width="width" :height="action==='top'?top-keyBed.surfaceTop: keyBed.surfaceBottom-top-height-.1" rx="3"/><text :x="left+width/2" :y="action==='top'?top-4:top+height+10" text-anchor="middle" pointer-events="none">{{action==='top'?'TOP ZONE · ALL KEYWAVES':'■ STOP ALL'}}</text></g>
+<g v-for="action in (['top','stop'] as const)" :key="action" class="performance-ribbon" :class="`ribbon-${action}`" :aria-label="action==='top'?'Top-zone ribbon':'Stop ribbon'"><g v-for="lane in lanes" :key="lane.note" class="ribbon-lane" :class="{black:lane.black,held:held.has(lane.note),queued:queued.has(lane.note)}" role="button" tabindex="0" :data-ribbon-note="lane.note" :data-ribbon-action="action" :aria-label="`${action==='top'?'Top zone':'Stop'} · ${keys.get(lane.note)?.name||`Note ${lane.note} · ${keys.get(origins[lane.note])?.name||'unassigned'}`}`" @pointerdown="down" @pointermove="move" @pointerup="up" @pointercancel="up" @keydown.enter.prevent="ribbonDown($event,lane.note,action)" @keydown.space.prevent="ribbonDown($event,lane.note,action)" @keyup="($event.key===' '||$event.key==='Enter')&&keyboardUp(lane.note)" @blur="keyboardUp(lane.note)"><title>{{action==='top'?'Top zone':'Stop'}} · {{keys.get(lane.note)?.name||`Note ${lane.note}`}}</title><rect :x="lane.x" :y="action==='top'?keyBed.surfaceTop:top+height+.1" :width="lane.w" :height="action==='top'?top-keyBed.surfaceTop:keyBed.surfaceBottom-top-height-.1"/><path v-if="action==='top'" :d="`M ${lane.x+lane.w/2-1.5} ${top-4} L ${lane.x+lane.w/2} ${top-7} L ${lane.x+lane.w/2+1.5} ${top-4}`"/><rect v-else class="stop-mark" :x="lane.x+lane.w/2-1.3" :y="top+height+6" width="2.6" height="2.6"/></g></g>
 <g class="finger-indicators" pointer-events="none" aria-label="Touch and sustain positions"><g v-for="finger in fingerLocations" :key="finger.owner??`channel:${finger.channel}`" :data-finger="finger.channel" :data-owner="finger.owner" :data-sustained="!!finger.sustained" :data-toggled="!!finger.toggled" :class="{sustained:finger.sustained,toggled:finger.toggled}" :aria-label="`${finger.toggled?'Toggled':finger.sustained?'Sustained':'Touching'} note ${finger.note}`" :transform="`translate(${finger.x} ${finger.y})`"><title>{{finger.toggled?'Toggled on':finger.sustained?'Held after release':'Finger touching key'}}</title><circle :r="finger.radius+2" class="finger-glow"/><circle :r="finger.radius" class="finger-dot"/><circle r=".85" fill="white"/></g></g>
 <text v-for="key in keyboard.filter(k=>keys.has(k.note))" :key="key.note" class="seaboard-key-label" :x="key.x+key.w/2" :y="key.black?121:134" text-anchor="middle"><title>{{keys.get(key.note)?.name}}</title>{{keyLabel(keys.get(key.note)?.name)}}</text>
 </svg>
@@ -131,6 +159,6 @@ window.addEventListener('blur',panic);onBeforeUnmount(()=>{window.removeEventLis
 <style scoped>
 .keyboard-performance{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;--key-toggle:#be86ef}.keyboard-modes{display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex:none;padding:0 5px 3px}.keyboard-modes>span{font:7px 'Orbitron',sans-serif;letter-spacing:.1em;color:var(--text-dim);margin-right:3px}.keyboard-modes button{font-size:8px;padding:3px 8px}.keyboard-modes button.active{background:var(--c-primary);border-color:var(--c-primary);color:var(--bg)}.keyboard-modes small{font-size:9px;margin-left:5px}.seaboard-key.queued .key-outline{stroke:var(--c-primary);stroke-dasharray:2 2;stroke-width:1.4}.key-sounding{fill:var(--c-primary);stroke:#fff;stroke-opacity:.65;stroke-width:1.3;filter:drop-shadow(0 0 3px var(--c-primary))}.key-toggled{fill:var(--key-toggle);fill-opacity:.52;stroke:var(--key-toggle);stroke-width:1.2}.seaboard-key.toggled.held .key-selected{opacity:.12}.finger-indicators .toggled .finger-glow{fill:var(--key-toggle);opacity:.35}.finger-indicators .toggled .finger-dot{fill:var(--key-toggle);filter:drop-shadow(0 0 2px var(--key-toggle))}
 
-.performance-ribbon{cursor:pointer;touch-action:none;outline:none;color:#4cdb88}.performance-ribbon.ribbon-stop{color:#ff666d}.performance-ribbon rect{fill:currentColor;fill-opacity:.05;stroke:currentColor;stroke-opacity:.25;stroke-width:.5}.performance-ribbon:hover rect,.performance-ribbon:focus-visible rect{fill-opacity:.22;stroke-opacity:.8}.performance-ribbon text{fill:currentColor;fill-opacity:.65;font:5px system-ui;letter-spacing:.7px}.key-latch-pending{color:#4cdb88}.key-latch-pending.latch-stop{color:#ff666d}.key-latch-pending circle{fill:currentColor;stroke:#07100b;stroke-width:.8;filter:drop-shadow(0 0 2px currentColor)}.key-latch-pending path,.key-latch-pending rect{fill:#07100b}.preset-button{cursor:pointer}.preset-button:hover rect,.preset-button:focus-visible rect{fill:#ffffff18;stroke:var(--c-primary);stroke-width:.4}.preset-button:focus{outline:none}
+.performance-ribbon{cursor:pointer;touch-action:none;outline:none;color:#4cdb88}.performance-ribbon.ribbon-stop{color:#ff666d}.performance-ribbon rect{fill:currentColor;fill-opacity:.05;stroke:currentColor;stroke-opacity:.25;stroke-width:.5}.ribbon-lane:hover>rect,.ribbon-lane:focus-visible>rect,.ribbon-lane.held>rect{fill-opacity:.25;stroke-opacity:.8}.ribbon-lane{outline:none}.ribbon-lane.black>rect{fill-opacity:.12}.ribbon-lane.queued>rect{stroke-dasharray:1 1;stroke-opacity:1}.ribbon-lane path{fill:none;stroke:currentColor;stroke-width:.6;pointer-events:none;opacity:.6}.ribbon-lane .stop-mark{fill-opacity:.6;stroke:none;pointer-events:none}.performance-ribbon text{fill:currentColor;fill-opacity:.65;font:5px system-ui;letter-spacing:.7px}.key-latch-pending{color:#4cdb88}.key-latch-pending.latch-stop{color:#ff666d}.key-latch-pending circle{fill:currentColor;stroke:#07100b;stroke-width:.8;filter:drop-shadow(0 0 2px currentColor)}.key-latch-pending path,.key-latch-pending rect{fill:#07100b}.preset-button{cursor:pointer}.preset-button:hover rect,.preset-button:focus-visible rect{fill:#ffffff18;stroke:var(--c-primary);stroke-width:.4}.preset-button:focus{outline:none}
 .seaboard-stage{overflow:hidden;flex:1 1 0;align-self:stretch;min-width:0;min-height:0;position:relative;display:flex;align-items:center;justify-content:center}.seaboard{flex:none;position:relative;min-width:0;border:0;background:transparent;display:block}.seaboard-svg{width:100%;height:100%;display:block;overflow:hidden}.seaboard-key{cursor:pointer;touch-action:none;outline:none}.key-hit{stroke:#070a0c;stroke-opacity:.45;stroke-width:.4}.key-outline{fill:none;stroke:transparent;stroke-width:.9}.seaboard-key.parallel-origin .key-outline{stroke:var(--c-primary);stroke-width:1.7;filter:drop-shadow(0 0 3px var(--c-primary))}.keybed-hit{touch-action:none}.seaboard-key:hover .key-outline{stroke:#a5abb3;stroke-opacity:.5}.key-selected{fill:var(--c-primary,#d4a84b);opacity:.3;stroke:none}.seaboard-key.held .key-selected{opacity:.45}.finger-glow{fill:var(--c-secondary,#8fb3d6);opacity:.2}.finger-dot{fill:var(--c-secondary,#8fb3d6);stroke:white;stroke-opacity:.75;stroke-width:.6;filter:drop-shadow(0 0 2px var(--c-secondary,#8fb3d6))}.sustained .finger-glow{fill:var(--c-primary,#d4a84b);opacity:.3}.sustained .finger-dot{fill:var(--c-primary,#d4a84b);stroke-dasharray:1.5 1;filter:drop-shadow(0 0 2px var(--c-primary,#d4a84b))}.seaboard-key-label{fill:var(--text-dim,#b7b3aa);font:6px system-ui;pointer-events:none}.seaboard-faders{position:absolute;left:3%;top:29%;width:7.3%;height:25%;display:flex;justify-content:space-around;gap:5%}.seaboard-faders input{writing-mode:vertical-lr;direction:rtl;width:20%;height:100%;appearance:none;-webkit-appearance:none;background:transparent;cursor:ns-resize}.seaboard-faders input::-webkit-slider-runnable-track{width:1px;background:#737b7e}.seaboard-faders input::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:5px;height:2px;background:#c2c9ca;border:0;border-radius:1px;box-shadow:0 0 3px #c2c9ca66}.seaboard-faders input::-moz-range-track{width:1px;background:#737b7e}.seaboard-faders input::-moz-range-thumb{width:5px;height:2px;background:#c2c9ca;border:0;border-radius:1px}.seaboard-xy{position:absolute;left:3%;top:56%;width:7.3%;height:20%;border-radius:3px;cursor:crosshair;touch-action:none}.seaboard-xy i{position:absolute;width:4px;height:4px;border-radius:50%;transform:translate(-50%,50%);background:var(--c-primary);box-shadow:0 0 5px var(--c-primary)}.seaboard-bindings{position:absolute;left:2.8%;top:78%;font-size:9px;padding:0 4px;border:0;background:transparent;color:#949a9f}.seaboard-mappings{position:absolute;left:0;bottom:0;width:370px;max-width:100%;max-height:100%;overflow:auto;background:var(--panel-mid);border:1px solid var(--line);border-radius:5px;padding:14px;z-index:10;box-shadow:0 5px 30px #0009}.sustain-binding{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.pedal-help{font-size:10px;color:var(--text-dim);margin:8px 0}.global-binding{align-items:center;flex-wrap:wrap}.global-binding>span{font-size:10px;width:48px}
 </style>

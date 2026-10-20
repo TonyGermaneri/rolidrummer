@@ -28,3 +28,13 @@ export function keySlide(key:SeaboardKey,y:number){
  if(y>=keyBed.top+key.h)return 0
  return (keyBed.top+key.h-y)/key.h
 }
+
+export function ribbonLanes(keys:SeaboardKey[]){
+ const ordered=[...keys].sort((a,b)=>a.note-b.note)
+ return ordered.map((key,i)=>{const center=key.x+key.w/2,previous=ordered[i-1],next=ordered[i+1];const x=previous?(previous.x+previous.w/2+center)/2:keyBed.left;const right=next?(center+next.x+next.w/2)/2:keyBed.left+keyBed.width;return {...key,x,w:right-x}})
+}
+export function surfaceAtPoint(keys:SeaboardKey[],x:number,y:number){
+ const action=ribbonAtPoint(x,y)
+ if(action){const lane=ribbonLanes(keys).find(key=>x>=key.x&&x<key.x+key.w);if(lane)return {key:keys.find(key=>key.note===lane.note)!,area:action}}
+ const key=keyAtPoint(keys,x,y);if(key)return {key,area:'key' as const}
+}

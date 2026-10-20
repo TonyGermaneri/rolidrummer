@@ -49,7 +49,7 @@ public:
   std::array<KeyPattern,128> patterns{};
   const drummer::Runtime* runtime=nullptr;
   std::array<uint8_t,32> patternHash{};
-  double beat=0,bpm=120;uint64_t epoch=0;
+  double beat=0,bpm=120;uint64_t epoch=0,touchSerial=0;int touchNote=-1;
  };
  // Runtime is immutable and protected from message-thread GC by this snapshot.
  // Dereference it only synchronously on the message thread.

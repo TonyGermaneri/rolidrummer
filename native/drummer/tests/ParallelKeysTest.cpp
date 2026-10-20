@@ -79,24 +79,28 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;try{
  head.beat=12.1;midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)100),0);quant->processBlock(audio,midi);
  check(quant->readFingers(view)&&view.count==1&&!view.fingers[0].playing&&view.latches[48].action==1,"Normal-mode launch quantization is missing its queued-start indicator");
  head.beat=13;quant->processBlock(audio,midi);check(quant->readFingers(view)&&view.fingers[0].playing&&view.latches[48].action==0,"Launch indicator did not clear when playback started");
- // Ribbon commands use the same ordered screen queue as note gestures and
- // reach the real audio scheduler without editing the patch/session document.
- auto ribbonPlayer=std::make_unique<DrummerProcessor>();ribbonPlayer->apply(compileDocument(doc));ribbonPlayer->prepareToPlay(48000,256);Head ribbonHead;ribbonPlayer->setPlayHead(&ribbonHead);
+ // Ribbon packets target one origin, and real hardware glides encounter
+ // individual chromatic lanes while note-off retains its original anchor.
+ auto ribbonDoc=doc.clone();ribbonDoc.getDynamicObject()->setProperty("keyboardMode","toggle");
+ auto ribbonPlayer=std::make_unique<DrummerProcessor>();ribbonPlayer->apply(compileDocument(ribbonDoc));ribbonPlayer->prepareToPlay(48000,256);Head ribbonHead;ribbonPlayer->setPlayHead(&ribbonHead);
  const auto unchanged=ribbonPlayer->document();
- ribbonPlayer->screenMidi.push({0xf4,1,0,3});ribbonPlayer->processBlock(audio,midi);
- check(ribbonPlayer->readFingers(view)&&view.count==0&&view.latches[48].action==1&&view.latches[63].action==1,"Screen top ribbon did not queue all origins");
- ribbonHead.beat=4;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==16,"Screen top ribbon did not open the entire kit");
- for(int i=0;i<view.count;++i)check(view.fingers[(size_t)i].zone==1,"Screen top ribbon did not choose the highest matrix zone");
- ribbonHead.beat=4.1;ribbonPlayer->screenMidi.push({0xf4,2,0,3});ribbonPlayer->processBlock(audio,midi);
- check(ribbonPlayer->readFingers(view)&&view.count==16&&view.latches[48].action==2&&view.latches[63].action==2,"Screen bottom ribbon bypassed quantization or lost stop indicators");
- ribbonHead.beat=8;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==0,"Screen bottom ribbon failed to stop the kit");
- ribbonHead.beat=8.1;midi.addEvent(juce::MidiMessage::controllerEvent(2,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)100),1);midi.addEvent(juce::MidiMessage::noteOff(2,64),2);ribbonPlayer->processBlock(audio,midi);
- check(ribbonPlayer->readFingers(view)&&view.latches[48].action==1&&view.latches[63].action==1,"Hardware top ribbon was not decoded by the processor");
- ribbonHead.beat=12;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==16,"Hardware top ribbon did not play every keywave");
- ribbonHead.beat=12.1;midi.addEvent(juce::MidiMessage::controllerEvent(2,74,0),0);ribbonPlayer->processBlock(audio,midi);
- check(ribbonPlayer->readFingers(view)&&view.count==16&&view.latches[48].action==0,"Post-release hardware reset stopped every keywave");
- ribbonHead.beat=12.2;midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)100),0);midi.addEvent(juce::MidiMessage::noteOff(2,64),1);ribbonPlayer->processBlock(audio,midi);
- check(ribbonPlayer->readFingers(view)&&view.latches[48].action==2,"Hardware bottom ribbon did not queue a stop");
- ribbonHead.beat=16;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==0&&ribbonPlayer->document()==unchanged,"Ribbon performance changed the patch or retained notes");
+ auto screenTop=[&](int note,int ch){ribbonPlayer->screenMidi.push({(uint8_t)(0xf0|ch),(uint8_t)note,1,0});ribbonPlayer->screenMidi.push({(uint8_t)(0x80|ch),(uint8_t)note,64,3});};
+ screenTop(48,1);screenTop(49,2);ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.count==0&&view.latches[48].action==1&&view.latches[49].action==1&&view.latches[50].action==0,"Screen ribbon did not queue only the two touched keywaves");
+ ribbonHead.beat=4;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==2,"Independent ribbon toggles did not play concurrently");
+ for(int i=0;i<view.count;++i)check(view.fingers[(size_t)i].zone==1,"Ribbon touch did not select that key's highest zone");
+ check(ribbonPlayer->engine.activeVoices()>=2&&audio.getMagnitude(0,256)>.0001f,"Concurrent ribbon keywaves did not reach the audible sound engine");
+ ribbonHead.beat=4.1;screenTop(48,1);ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.count==2&&view.latches[48].action==2&&view.latches[49].action==0,"Same-zone toggle queued a stop for another key");
+ ribbonHead.beat=8;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==1&&view.fingers[0].origin==49,"Toggling one key stopped its peer");
+ ribbonHead.beat=8.1;ribbonPlayer->screenMidi.push({0xf1,49,2,0});ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.latches[49].action==2&&view.latches[48].action==0,"Bottom ribbon stop was not scoped to its lane");
+ ribbonHead.beat=12;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==0,"Per-key ribbon stop failed");
+ ribbonHead.beat=12.1;midi.addEvent(juce::MidiMessage::controllerEvent(2,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)100),1);midi.addEvent(juce::MidiMessage::pitchWheel(2,8192+int(std::lround(2*8191./48))),2);midi.addEvent(juce::MidiMessage::noteOff(2,64),3);ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.latches[48].action==1&&view.latches[49].action==1&&view.latches[50].action==1&&view.latches[51].action==0,"Hardware sweep did not visit exactly three lanes");
+ ribbonHead.beat=16;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==3,"Hardware ribbon sweep did not keep its three independent toggles");
+ ribbonHead.beat=16.1;midi.addEvent(juce::MidiMessage::pitchWheel(2,8192),0);midi.addEvent(juce::MidiMessage::controllerEvent(2,74,0),1);midi.addEvent(juce::MidiMessage::noteOn(2,65,(juce::uint8)100),2);midi.addEvent(juce::MidiMessage::noteOff(2,65),3);ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.latches[49].action==2&&view.latches[48].action==0&&view.latches[50].action==0,"Hardware stop touched more than its parallel origin");
+ ribbonHead.beat=20;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==2&&ribbonPlayer->document()==unchanged,"Per-key ribbon performance changed the patch or stopped unrelated parts");
  std::cout<<"parallel-keys: all 128 pitches, half-step orders, MPE reuse, owner/latch rules, legacy migration and real audio/telemetry passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

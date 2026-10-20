@@ -69,7 +69,7 @@ void prepareKeyMapping(Configuration& cfg) noexcept {
     cfg.origins.fill(-1);if(!count)return;
     for(int note=0;note<128;++note)cfg.origins[(size_t)note]=cfg.keys[(size_t)note].enabled?note:notes[(size_t)(((note-notes[0])%count+count)%count)];
 }
-void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};latches={};surfaces={};latchGrid=0;wasPlaying = false;expected = 0;pendingOffCount=0;keyboardMode=KeyboardMode::normal; }
+void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};latches={};surfaces={};latchGrid=0;touchedNote=-1;wasPlaying = false;expected = 0;pendingOffCount=0;keyboardMode=KeyboardMode::normal; }
 bool Scheduler::hasHeldNotes() const noexcept {
     for(const auto& latch:latches)if(latch.active)return true;
     for (const auto& f : fingers) if (f.held) return true;
@@ -129,18 +129,18 @@ bool Scheduler::physicalKeyDown(int key) const noexcept {
     for(const auto& f:fingers)if(f.down&&!f.suppressed&&f.key==key)return true;
     return false;
 }
-bool Scheduler::queueLatch(const Configuration& cfg,const Midi& m,int inputNote,double beat,Sink sink,void* ctx) noexcept {
+bool Scheduler::queueLatch(const Configuration& cfg,const Midi& m,int inputNote,double beat,Sink sink,void* ctx,bool top) noexcept {
     if(keyboardMode==KeyboardMode::normal||cfg.latchGrid<=0||!cfg.keys[m.a].enabled)return false;
     auto& f=fingers[(size_t)(m.status&15)];const auto& key=cfg.keys[m.a];
     auto values=f.values;values.strike=m.b/127.f;values.lift=0;
-    const int zone=zoneAt(key,source(values,key.zoneSource));auto& latch=latches[m.a];
+    const int zone=top?key.zoneCount-1:zoneAt(key,source(values,key.zoneSource));auto& latch=latches[m.a];
     const Contact* owner=nullptr;for(int i=0;i<maxContacts+maxSustained;++i){const auto& old=contact(i);if(old.held&&old.key==m.a&&(!owner||old.owner>owner->owner))owner=&old;}
     const bool playing=latch.active?latch.start:owner!=nullptr;
     const int playingZone=latch.active?latch.next.zone:owner?owner->zone:-1;
     const bool start=keyboardMode!=KeyboardMode::toggle||!playing||playingZone!=zone;
     const bool cancel=latch.active&&((!start&&!owner)||(start&&owner&&owner->zone==zone));
     if(f.held)lift(f,m.offset,sink,ctx);
-    f={};f.down=true;f.key=m.a;f.inputNote=inputNote;f.channel=m.status&15;f.owner=++generation;f.values=values;f.zone=f.wanted=zone;
+    f={};f.down=true;f.fixedTop=top;f.key=m.a;f.inputNote=inputNote;f.anchorNote=m.anchor>=0?m.anchor:inputNote;f.channel=m.status&15;f.owner=++generation;f.values=values;f.zone=f.wanted=zone;
     f.intent=intentTarget(values);f.intentBeat=beat;f.nextIntent=beat+intentTick;f.changedAt=beat;
     f.clip=f.wantedClip=chooseClip(cfg,key,zone,f.intent,-1);
     latch={f,boundary(beat,cfg.latchGrid),!cancel,start,Event::killContact};
@@ -170,28 +170,73 @@ void Scheduler::lift(Contact& f,int offset,Sink sink,void* ctx) noexcept {
     }
     *slot=f;f.held=false;f.toggled=false; // Keep its owner/expression independent when the MPE channel is reused.
 }
-void Scheduler::ribbon(const Configuration& cfg,bool start,int offset,double beat,Sink sink,void* ctx) noexcept {
-    for(int note=0;note<128;++note){
-        if(!cfg.keys[(size_t)note].enabled)continue;
-        auto& latch=latches[(size_t)note];const Contact* owner=nullptr;
-        for(int i=0;i<maxContacts+maxSustained;++i){const auto& old=contact(i);if(old.held&&old.key==note&&(!owner||old.owner>owner->owner))owner=&old;}
-        if(!start&&!owner){for(auto& f:fingers)if(f.key==note&&!f.held)f.suppressed=f.down;latch.active=false;continue;} // Cancel starts that have not sounded yet.
-        const auto& key=cfg.keys[(size_t)note];
-        if(start&&owner&&owner->fixedTop&&owner->zone==key.zoneCount-1){latch.active=false;continue;}
-        Contact next=owner?*owner:Contact{};
-        if(start){
-            next={};next.key=next.inputNote=note;next.channel=cfg.masterChannel;next.owner=++generation;
-            next.values={.8f,.5f,1.f,.8f,0.f};next.fixedTop=true;next.zone=next.wanted=key.zoneCount-1;
-            next.intent=intentTarget(next.values);next.clip=next.wantedClip=chooseClip(cfg,key,next.zone,next.intent,-1);
-        }
-        const double at=boundary(beat,cfg.latchGrid);
-        latch={next,at,true,start,Event::killContact,true};
-        if(at<=beat+1e-10)applyLatch(cfg,latch,offset,beat,sink,ctx);
+void Scheduler::stopKey(const Configuration& cfg,int note,int offset,double beat,Sink sink,void* ctx) noexcept {
+    const int origin=originFor(cfg,note);if(origin<0||!cfg.keys[(size_t)origin].enabled)return;
+    touchedNote=note;++touchGeneration;
+    auto& latch=latches[(size_t)origin];const Contact* owner=nullptr;
+    for(int i=0;i<maxContacts+maxSustained;++i){const auto& old=contact(i);if(old.held&&old.key==origin&&(!owner||old.owner>owner->owner))owner=&old;}
+    if(!owner){for(auto& f:fingers)if(f.key==origin&&!f.held)f.suppressed=f.down;latch.active=false;return;}
+    if(owner->opens>beat+1e-10){
+        latch.active=false;
+        for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if(f.held&&f.key==origin){f.suppressed=f.down;release(f,offset,Event::killContact,sink,ctx);}}
+        return;
     }
+    if(latch.active&&!latch.start)return; // A sweep must not postpone an existing stop.
+    auto next=*owner;next.inputNote=note;
+    latch={next,boundary(beat,cfg.latchGrid),true,false,Event::killContact,true};
+    if(latch.beat<=beat+1e-10)applyLatch(cfg,latch,offset,beat,sink,ctx);
+}
+void Scheduler::expression(const Configuration& cfg,Contact& f,int offset,double beat,double bpm,Sink sink,void* ctx) noexcept {
+    if(!f.held){if(f.key>=0&&hasPendingLatch(f.key)&&latches[(size_t)f.key].next.owner==f.owner)latches[(size_t)f.key].next=f;return;}
+    const auto& key=cfg.keys[(size_t)f.key];advanceIntent(key,f,beat,bpm);choose(cfg,key,f,beat);
+    Event e;e.type=Event::expression;e.offset=offset;e.channel=f.channel;e.owner=f.owner;e.key=f.key;e.values=f.values;sink(ctx,e);
+}
+void Scheduler::routeSurface(const Configuration& cfg,int ch,int offset,double beat,double bpm,bool strike,Sink sink,void* ctx) noexcept {
+    auto& surface=surfaces[(size_t)ch];if(surface.note<0)return;
+    auto& f=fingers[(size_t)ch];
+    const float bendRange=surface.bendSemitones+surface.bendCents*.01f;
+    const float bend=(surface.bend-8192)/float(surface.bend<8192?8192:8191)*bendRange;
+    const float pitch=surface.note+bend;
+    const int region=surface.known?(surface.slide<16?-1:surface.slide>115?1:0):0;
+    int lane=std::clamp((int)std::lround(pitch),0,127);
+    if(region&&surface.region==region&&surface.lane>=0&&std::abs(pitch-surface.lane)<.58f)lane=surface.lane;
+    if(!region){
+        if(strike)surface.bodyNote=surface.note;
+        else if(surface.region)surface.bodyNote=lane;
+        lane=surface.bodyNote;
+        const int pc=lane%12;const bool black=pc==1||pc==3||pc==6||pc==8||pc==10;
+        if(black&&surface.known&&surface.slide<59)lane=std::clamp(lane+(pitch<=lane?-1:1),0,127);
+    }
+    auto bodySlide=[&](int note){const int pc=note%12;const bool black=pc==1||pc==3||pc==6||pc==8||pc==10;const float bottom=black?59.f:16.f;return std::clamp((surface.slide-bottom)/(115.f-bottom),0.f,1.f);};
+    const bool enter=strike||lane!=surface.lane||(surface.region==-1&&region!=-1)||(region==-1&&surface.region!=-1);
+    auto touch=[&](int note){
+        if(region<0)stopKey(cfg,note,offset,beat,sink,ctx);
+        if(f.down){Midi off{offset,(uint8_t)(0x80|ch),(uint8_t)f.anchorNote,64};input(cfg,off,beat,bpm,sink,ctx);}
+        const auto values=f.values;
+        if(region<0){f={};f.down=true;f.suppressed=true;f.key=originFor(cfg,note);f.inputNote=note;f.anchorNote=surface.note;f.channel=ch;f.owner=++generation;f.values=values;return;}
+        f.values.slide=region>0?1.f:surface.known?bodySlide(note):values.slide;
+        if(region)f.values.glide=.5f+.5f*(pitch-note)/std::max(1.f,bendRange);
+        Midi on{offset,(uint8_t)(0x90|ch),(uint8_t)note,(uint8_t)surface.velocity,region>0?Midi::ribbonTop:Midi::message,false,surface.note};
+        input(cfg,on,beat,bpm,sink,ctx);
+    };
+    if(enter){
+        // A large pitch-bend packet can cross several chromatic ribbon lanes.
+        // Visit every crossed key in pitch order, retaining each key's latch.
+        if(!strike&&region&&region==surface.region&&surface.lane>=0){const int step=lane>surface.lane?1:-1;for(int note=surface.lane+step;note!=lane+step;note+=step)touch(note);}
+        else touch(lane);
+    }else if(region>=0){
+        f.fixedTop=region>0;f.values.slide=region>0?1.f:surface.known?bodySlide(lane):f.values.slide;
+        f.values.glide=.5f+.5f*(region?pitch-lane:bend)/std::max(1.f,bendRange);
+        expression(cfg,f,offset,beat,bpm,sink,ctx);
+    }
+    surface.lane=lane;surface.region=region;
 }
 void Scheduler::input(const Configuration& cfg,const Midi& incoming,double beat,double bpm,Sink sink,void* ctx) noexcept {
-    if(incoming.action!=Midi::message){ribbon(cfg,incoming.action==Midi::ribbonTop,incoming.offset,beat,sink,ctx);return;}
-    auto m=incoming;float normalizedSlide=m.b/127.f;
+    if(incoming.action==Midi::ribbonSlideTop){auto& f=fingers[(size_t)(incoming.status&15)];if(f.down&&f.key==originFor(cfg,incoming.a)){f.fixedTop=true;f.values.slide=1;expression(cfg,f,incoming.offset,beat,bpm,sink,ctx);}return;}
+    if(incoming.action==Midi::ribbonStop){stopKey(cfg,incoming.a,incoming.offset,beat,sink,ctx);return;}
+    const bool top=incoming.action==Midi::ribbonTop;
+    auto m=incoming;if(top)m.status=(uint8_t)(0x90|(m.status&15));
+    float normalizedSlide=m.b/127.f;
     if(m.a>127 || m.b>127)return;
     const int ch=m.status&15, op=m.status&240;
     auto& f=fingers[(size_t)ch];
@@ -222,37 +267,25 @@ void Scheduler::input(const Configuration& cfg,const Midi& incoming,double beat,
         e.type=Event::globalCC;e.cc=m.a;e.value=m.b/127.f;sink(ctx,e);
         return;
     }
-    // Seaboard absolute Slide spans both ribbons. Normalize only the key
-    // body and edge-trigger ribbon commands while a physical touch exists.
     auto& surface=surfaces[(size_t)ch];
-    auto region=[](int slide){return slide<16?-1:slide>115?1:0;};
-    auto bodySlide=[](int note,int slide){
-        const int pitch=note%12;const bool black=pitch==1||pitch==3||pitch==6||pitch==8||pitch==10;
-        const float bottom=black?59.f:16.f;
-        return std::clamp((slide-bottom)/(115.f-bottom),0.f,1.f);
-    };
-    if(m.surface&&op==0xb0&&m.a==74){
-        surface.slide=m.b;surface.known=true;
-        if(!f.down||ch==cfg.masterChannel)return; // Pre-note/reset CCs never launch or stop parts.
-        const int next=region(m.b);
-        if(next){if(next!=surface.region)ribbon(cfg,next>0,m.offset,beat,sink,ctx);surface.region=next;return;}
-        surface.region=0;normalizedSlide=bodySlide(f.inputNote,m.b);
+    if(m.surface&&op==0xb0){
+        if(m.a==101)surface.rpnMsb=m.b;
+        else if(m.a==100)surface.rpnLsb=m.b;
+        else if(m.a==99||m.a==98)surface.rpnMsb=surface.rpnLsb=127;
+        else if(surface.rpnMsb==0&&surface.rpnLsb==0&&m.a==6)surface.bendSemitones=m.b;
+        else if(surface.rpnMsb==0&&surface.rpnLsb==0&&m.a==38)surface.bendCents=m.b;
+        if(m.a==74){surface.slide=m.b;surface.known=true;if(surface.note>=0&&ch!=cfg.masterChannel)routeSurface(cfg,ch,m.offset,beat,bpm,false,sink,ctx);return;}
     }
+    if(m.surface&&op==0xe0){surface.bend=(int(m.b)<<7)|m.a;if(surface.note>=0&&ch!=cfg.masterChannel&&(surface.region||(surface.known&&surface.slide<59&&(surface.note%12==1||surface.note%12==3||surface.note%12==6||surface.note%12==8||surface.note%12==10)))){routeSurface(cfg,ch,m.offset,beat,bpm,false,sink,ctx);return;}}
     if(op==0x90 && m.b>0) {
-        if(m.surface&&surface.known&&ch!=cfg.masterChannel){
-            surface.region=region(surface.slide);
-            if(surface.region){
-                if(f.held)lift(f,m.offset,sink,ctx);
-                f={};f.down=true;f.suppressed=true;f.key=originFor(cfg,m.a);f.inputNote=m.a;f.channel=ch;f.owner=++generation;
-                ribbon(cfg,surface.region>0,m.offset,beat,sink,ctx);return;
-            }
-            f.values.slide=bodySlide(m.a,surface.slide);
-        }
+        if(m.surface&&ch!=cfg.masterChannel){surface.note=m.a;surface.velocity=m.b;routeSurface(cfg,ch,m.offset,beat,bpm,true,sink,ctx);return;}
+        if(top)f.values.slide=1;
+        touchedNote=m.a;++touchGeneration;
         const int keyNote=originFor(cfg,m.a);auto mapped=m;mapped.a=(uint8_t)keyNote;
-        if(queueLatch(cfg,mapped,m.a,beat,sink,ctx))return;
+        if(queueLatch(cfg,mapped,m.a,beat,sink,ctx,top))return;
         const auto& k=cfg.keys[(size_t)keyNote];
         auto values=f.values;values.strike=m.b/127.f;values.lift=0;
-        const int zone=zoneAt(k,source(values,k.zoneSource));
+        const int zone=top?k.zoneCount-1:zoneAt(k,source(values,k.zoneSource));
         bool stop=false;
         if(k.enabled){
             // Ownership is by key, independent of the member channel allocated to this press.
@@ -266,8 +299,8 @@ void Scheduler::input(const Configuration& cfg,const Midi& incoming,double beat,
             }
         }
         if(f.held)lift(f,m.offset,sink,ctx);
-        f.down=true;f.fixedTop=false;f.held=k.enabled&&!stop;f.toggled=f.held&&keyboardMode==KeyboardMode::toggle;f.suppressed=stop;
-        f.key=keyNote;f.inputNote=m.a;f.channel=ch;f.owner=++generation;f.values=values;f.releaseVelocity=0;
+        f.down=true;f.fixedTop=top;f.held=k.enabled&&!stop;f.toggled=f.held&&keyboardMode==KeyboardMode::toggle;f.suppressed=stop;
+        f.key=keyNote;f.inputNote=m.a;f.anchorNote=m.anchor>=0?m.anchor:m.a;f.channel=ch;f.owner=++generation;f.values=values;f.releaseVelocity=0;
         f.zone=f.wanted=zone;
         f.intent=intentTarget(f.values);f.intentBeat=beat;f.nextIntent=beat+intentTick;f.changedAt=beat;
         f.clip=f.wantedClip=chooseClip(cfg,k,f.zone,f.intent,k.zones[(size_t)f.zone].clip);
@@ -275,21 +308,17 @@ void Scheduler::input(const Configuration& cfg,const Midi& incoming,double beat,
         return;
     }
     if(op==0x80 || (op==0x90 && m.b==0)) {
-        if(m.surface&&f.inputNote==m.a)surface.region=0;
-        if(f.inputNote==m.a){f.releaseVelocity=m.b/127.f;lift(f,m.offset,sink,ctx);if(latches[(size_t)f.key].active&&latches[(size_t)f.key].next.owner==f.owner)latches[(size_t)f.key].next=f;}
+        if(m.surface&&ch!=cfg.masterChannel){if(surface.note!=m.a)return;surface.note=-1;surface.region=0;}
+        if(f.anchorNote==m.a){f.releaseVelocity=m.b/127.f;lift(f,m.offset,sink,ctx);if(auto& latch=latches[(size_t)f.key];latch.active&&latch.next.owner==f.owner){const int target=latch.next.inputNote;latch.next=f;if(latch.ribbon&&!latch.start)latch.next.inputNote=target;}}
         return;
     }
     if(f.held)advanceIntent(cfg.keys[(size_t)f.key],f,beat,bpm);
     if(op==0xe0){const int raw=(int(m.b)<<7)|m.a;f.values.glide=.5f+.5f*float(raw-8192)/float(raw<8192?8192:8191);}
     else if(op==0xd0) f.values.press=m.a/127.f;
-    else if(op==0xa0 && f.inputNote==m.a) f.values.press=m.b/127.f;
-    else if(op==0xb0 && m.a==74) f.values.slide=normalizedSlide;
+    else if(op==0xa0 && f.anchorNote==m.a) f.values.press=m.b/127.f;
+    else if(op==0xb0 && m.a==74){if(m.b<127)f.fixedTop=false;f.values.slide=normalizedSlide;}
     else return;
-    if(!f.held){if(f.key>=0&&latches[(size_t)f.key].active&&latches[(size_t)f.key].next.owner==f.owner)latches[(size_t)f.key].next=f;return;} // Keep queued/pre-note expression.
-    const auto& k=cfg.keys[(size_t)f.key];
-    if(k.intentSlewMs<=0)advanceIntent(k,f,beat,bpm);
-    choose(cfg,k,f,beat);
-    e.type=Event::expression;e.values=f.values;sink(ctx,e);
+    expression(cfg,f,m.offset,beat,bpm,sink,ctx);
 }
 void Scheduler::process(const Configuration& cfg,Clock clock,int frames,const Midi* midi,int count,Sink sink,void* ctx) noexcept {
     evaluations=0;overflow=false;dueCount=0;

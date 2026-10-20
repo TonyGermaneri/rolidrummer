@@ -2,7 +2,7 @@ import {describe,it,expect} from 'vitest'
 import {factory,normalize,clone} from '../model'
 import {keyOrigins} from './keyMapping'
 import {captureSoundKit,withSoundKit} from './kits'
-import {seaboardKeys,keyAtPoint,keySlide,keyBed,ribbonAtPoint} from './seaboardKeys'
+import {seaboardKeys,keyAtPoint,keySlide,keyBed,ribbonAtPoint,ribbonLanes,surfaceAtPoint} from './seaboardKeys'
 const legacy=[48,50,52,53,55,57,59,60,62,64,65,67,69,71,72,74]
 describe('chromatic keywaves and parallel pitches',()=>{
  it('repeats the ordered bank at both edges across every MIDI pitch without inventing bindings',()=>{
@@ -61,4 +61,13 @@ describe('black-key touch geometry',()=>{
   expect(ribbonAtPoint(keyBed.left-1,164)).toBeUndefined()
   expect(ribbonAtPoint(keyBed.left+keyBed.width,280)).toBeUndefined()
  })
+})
+
+it('gives every chromatic key its own top and stop lane, with white-key territory between a black key and its stop lane',()=>{
+ const keys=seaboardKeys(48),lanes=ribbonLanes(keys)
+ for(const lane of lanes){const x=lane.x+lane.w/2;expect(surfaceAtPoint(keys,x,168)?.key.note).toBe(lane.note);expect(surfaceAtPoint(keys,x,280)?.key.note).toBe(lane.note)}
+ const black=keys.find(key=>key.note===49)!,x=black.x+black.w*.25
+ expect(surfaceAtPoint(keys,x,keyBed.top+black.h+5)?.key.note).toBe(48)
+ const stopLane=lanes.find(key=>key.note===49)!
+ expect(surfaceAtPoint(keys,stopLane.x+stopLane.w/2,280)).toMatchObject({key:{note:49},area:'stop'})
 })

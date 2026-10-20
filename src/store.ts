@@ -10,6 +10,7 @@ export interface Finger {origin?:number;owner?:string;sustained?:boolean;toggled
 export interface Playhead {id:number;note:number;pos:number;dur:number;velocity:number;grains:boolean}
 export interface GrainMark {voice:number;when:number;pos:number;len:number;dur:number;pan:number;gain:number;reverse:boolean}
 export const state = reactive({ patch: factory(), selected: 48, trackKeywave: false, lastTouchedKey: -1, tab: 'Keywave', settingsSection: 'libraries', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false, pendingLatches: [] as {note:number;origin:number;action:'start'|'stop'}[] }, history: [] as string[], future: [] as string[] })
+let lastNativeTouch=''
 let applying = false, lastSaved = '', lastCheckpoint = '', inFlight = '', generation = 0, nativeRevision = 0, loading = false, legacyIdentityName = ''
 let timer: ReturnType<typeof setTimeout> | undefined, draining: Promise<void> | undefined
 type Pending = { document: Patch; generation: number; activationGrid: number; preserveActivation: boolean }
@@ -155,6 +156,7 @@ onNative('rdTelemetry', data => {
  const {performance,pattern,patternPosition,...telemetry}=data
  acceptPerformance({performance,pattern,patternPosition})
  for(const bytes of data.midi??[])observeKeyTouch(bytes)
+ if(data.touchSerial!==undefined&&String(data.touchSerial)!==lastNativeTouch){lastNativeTouch=String(data.touchSerial);if(data.touchNote>=0)observeKeyTouch([0x90,data.touchNote,1])}
  const grains=state.telemetry.grainMarks
  if(data.programFailed&&!state.telemetry.programFailed)state.error='Could not load the MIDI-selected patch. Check the saved patch or select it again.'
  if(data.programUnassigned&&!state.telemetry.programUnassigned)state.status=`MIDI program ${data.program} is unassigned; the current patch is still playing.`
