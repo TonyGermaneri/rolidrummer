@@ -157,10 +157,12 @@ void DrummerProcessor::processBlock(juce::AudioBuffer<float>&buffer,juce::MidiBu
   switchAt=n;
  }
  int count=0;bool full=false;
- ssb::MidiMessage screen;while(screenMidi.pop(screen)){if(count<(int)input.size())input[(size_t)count++]={0,screen.status,screen.data1,screen.data2};else full=true;}
+ // Screen-only ribbon packets share the MIDI queue to preserve gesture order;
+ // the private 0xf4 packet is never sent to a host or interpreted as real MIDI.
+ ssb::MidiMessage screen;while(screenMidi.pop(screen)){if(count<(int)input.size())input[(size_t)count++]={0,screen.status,screen.data1,screen.data2,screen.status==0xf4?(screen.data1==1?drummer::Midi::ribbonTop:drummer::Midi::ribbonStop):drummer::Midi::message};else full=true;}
  for(auto m:midi){if(m.numBytes<1)continue;auto size=ssb::midiMessageSize(m.data[0]);if(!size||m.numBytes<size)continue;
   ssb::MidiMessage msg{m.data[0],size>1?m.data[1]:(uint8_t)0,size>2?m.data[2]:(uint8_t)0,size};midiToPage.push(msg);
-  if(count<(int)input.size())input[(size_t)count++]={m.samplePosition,msg.status,msg.data1,msg.data2};else full=true;
+  if(count<(int)input.size())input[(size_t)count++]={m.samplePosition,msg.status,msg.data1,msg.data2,drummer::Midi::message,true};else full=true;
  }midi.clear();
  for(int i=0;i<count;++i){const auto& m=input[(size_t)i];if((m.status&240)==0xc0&&(m.status&15)==active->config.masterChannel)requestProgram(m.a);}
  for(int i=0;i<count;++i)if((input[(size_t)i].status&240)==0xb0&&input[(size_t)i].a==74){lastSlideChannel=input[(size_t)i].status&15;lastSlideValue=input[(size_t)i].b;}

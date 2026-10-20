@@ -79,6 +79,27 @@ describe('keywave piano roll contracts',()=>{
    expect(backend.midi).toHaveBeenLastCalledWith([0x81,note,64])
   }
  })
+ it('uses the ribbons as global actions, deduplicates sweeps and leaves key-body gestures independent',async()=>{
+  const root=await render(Seaboard,{base:48}),top=find(root,n=>n.props['aria-label']==='Top zone all keywaves'),stop=find(root,n=>n.props['aria-label']==='Stop all keywaves')
+  const svg={createSVGPoint:()=>({x:0,y:0,matrixTransform(){return {x:this.x,y:this.y}}}),getScreenCTM:()=>({inverse:()=>({})})}
+  ;(top as any).ownerSVGElement=svg;(stop as any).ownerSVGElement=svg
+  await event(top,'pointerdown',{button:0,pointerId:7,clientX:200,clientY:168})
+  expect(backend.request).toHaveBeenLastCalledWith('ribbon','top');expect(backend.midi).not.toHaveBeenCalled()
+  for(const x of [250,350,650])await event(top,'pointermove',{pointerId:7,clientX:x,clientY:168})
+  expect(backend.request.mock.calls.filter(call=>call[0]==='ribbon')).toHaveLength(1)
+  await event(top,'pointermove',{pointerId:7,clientX:650,clientY:280})
+  expect(backend.request).toHaveBeenLastCalledWith('ribbon','stop');expect(backend.midi).not.toHaveBeenCalled()
+  await event(top,'pointerup',{pointerId:7})
+  await event(stop,'keydown',{key:'Enter',repeat:false});expect(backend.request).toHaveBeenLastCalledWith('ribbon','stop')
+  backend.request.mockClear();await event(stop,'keydown',{key:'Enter',repeat:true});expect(backend.request).not.toHaveBeenCalled()
+  const natural=find(root,n=>n.props['data-drop']==='key:48');(natural as any).ownerSVGElement=svg
+  await event(natural,'pointerdown',{button:0,pointerId:1,clientX:155,clientY:keyBed.top+keyBed.height/2,pressure:.5})
+  expect(backend.midi).toHaveBeenLastCalledWith([0x91,48,100]);expect(backend.midi.mock.calls.some(call=>call[0][1]===74&&call[0][2]===64)).toBe(true)
+  await event(natural,'pointermove',{pointerId:1,clientX:155,clientY:280})
+  expect(backend.request).toHaveBeenLastCalledWith('ribbon','stop')
+  expect(backend.midi).toHaveBeenLastCalledWith([0x91,48,100])
+  await event(natural,'pointerup',{pointerId:1});expect(backend.midi).toHaveBeenLastCalledWith([0x81,48,64])
+ })
  it('preserves drum filters and mappings through a sound-only drag from a kit or sidebar',async()=>{
   const key=backend.state.patch.keys[0],parts=clone(key.parts),routes=clone(key.routes),zones=clone(key.zones)
   const asset=factoryAssets().find(asset=>asset.name==='Snare')!;let payload=''

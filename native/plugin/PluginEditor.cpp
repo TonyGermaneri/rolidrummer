@@ -40,6 +40,7 @@ void DrummerEditor::request(const juce::Array<juce::var>&args,Complete complete)
  }
  if(method=="ready"){plugin.cancelKitPreview();pageReady=true;auto* o=new juce::DynamicObject;o->setProperty("document",juce::JSON::parse(plugin.document()));o->setProperty("standalone",plugin.wrapperType==juce::AudioProcessor::wrapperType_Standalone);o->setProperty("revision",(juce::int64)plugin.stateRevision.load());o->setProperty("activationPending",plugin.activationPending());complete(answer(o));return;}
  if(method=="monitorKey"){monitoredKey=std::clamp((int)payload,0,127);sentPattern.clear();complete(answer(true));return;}
+ if(method=="ribbon"){if(payload.toString()!="top"&&payload.toString()!="stop"){complete(failure("Unknown ribbon action"));return;}plugin.screenMidi.push({0xf4,(uint8_t)(payload.toString()=="top"?1:2),0,3});complete(answer(true));return;}
  if(method=="midi"){if(auto* bytes=payload.getArray();bytes&&bytes->size()>=3)plugin.screenMidi.push({(uint8_t)(int)(*bytes)[0],(uint8_t)(int)(*bytes)[1],(uint8_t)(int)(*bytes)[2],3});complete(answer(true));return;}
  if(method=="transport"){plugin.standalonePlaying=(bool)payload;complete(answer(true));return;}
  if(method=="parameter"){auto id=payload.getProperty("id",{}).toString();if(auto*param=plugin.parameters.getParameter(id)){param->beginChangeGesture();param->setValueNotifyingHost(param->convertTo0to1((float)(double)payload.getProperty("value",0)));param->endChangeGesture();}complete(answer(true));return;}

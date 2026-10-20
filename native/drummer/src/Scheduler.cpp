@@ -40,7 +40,7 @@ void advanceIntent(const Key& key,Contact& contact,double beat,double bpm) {
     contact.intentBeat=beat;
 }
 void choose(const Configuration& cfg,const Key& key,Contact& contact,double beat) {
-    const float value=source(contact.values,key.zoneSource);
+    const float value=contact.fixedTop?1.f:source(contact.values,key.zoneSource);
     int next=zoneAt(key,value);
     if(next>contact.zone && value<key.zones[(size_t)contact.zone].upper+cfg.hysteresis)next=contact.zone;
     if(next<contact.zone && value>key.zones[(size_t)(contact.zone-1)].upper-cfg.hysteresis)next=contact.zone;
@@ -69,7 +69,7 @@ void prepareKeyMapping(Configuration& cfg) noexcept {
     cfg.origins.fill(-1);if(!count)return;
     for(int note=0;note<128;++note)cfg.origins[(size_t)note]=cfg.keys[(size_t)note].enabled?note:notes[(size_t)(((note-notes[0])%count+count)%count)];
 }
-void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};latches={};latchGrid=0;wasPlaying = false;expected = 0;pendingOffCount=0;keyboardMode=KeyboardMode::normal; }
+void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};latches={};surfaces={};latchGrid=0;wasPlaying = false;expected = 0;pendingOffCount=0;keyboardMode=KeyboardMode::normal; }
 bool Scheduler::hasHeldNotes() const noexcept {
     for(const auto& latch:latches)if(latch.active)return true;
     for (const auto& f : fingers) if (f.held) return true;
@@ -102,7 +102,7 @@ void Scheduler::reconfigure(const Configuration& previous,const Configuration& n
         const bool keepSwitch=sameLayout&&(f.wanted!=oldZone||identity(previous,f.wantedClip)!=oldId)&&f.switches>beat+1e-10;
         const int wanted=keepSwitch?std::clamp(f.wanted,0,key.zoneCount-1):-1;
         const auto wantedId=keepSwitch?identity(previous,f.wantedClip):0;
-        f.zone=sameLayout?oldZone:zoneAt(key,source(f.values,key.zoneSource));f.clip=select(f.zone,oldId);
+        f.zone=f.fixedTop?key.zoneCount-1:sameLayout?oldZone:zoneAt(key,source(f.values,key.zoneSource));f.clip=select(f.zone,oldId);
         if(keepSwitch){f.wanted=wanted;f.wantedClip=select(wanted,wantedId);}
         else{f.wanted=f.zone;f.wantedClip=f.clip;f.switches=beat;}
         if(!wasHeld||oldId!=identity(next,f.clip)||oldZone!=f.zone){
@@ -152,7 +152,7 @@ void Scheduler::applyLatch(const Configuration& cfg,Latch& latch,int offset,doub
     Contact* physical=nullptr;for(auto& f:fingers)if(f.owner==queued.owner&&f.down&&!f.suppressed){physical=&f;break;}
     if(!latch.start){if(physical)physical->suppressed=true;return;}
     auto next=physical?*physical:queued;next.down=physical!=nullptr;next.held=true;next.suppressed=false;next.toggled=keyboardMode==KeyboardMode::toggle;
-    const auto& key=cfg.keys[(size_t)next.key];next.zone=next.wanted=zoneAt(key,source(next.values,key.zoneSource));next.intent=intentTarget(next.values);
+    const auto& key=cfg.keys[(size_t)next.key];next.zone=next.wanted=next.fixedTop?key.zoneCount-1:zoneAt(key,source(next.values,key.zoneSource));next.intent=intentTarget(next.values);
     next.clip=next.wantedClip=chooseClip(cfg,key,next.zone,next.intent,-1);next.opens=next.switches=next.changedAt=next.intentBeat=beat;next.nextIntent=beat+intentTick;
     if(physical){*physical=next;return;}
     auto slot=std::find_if(sustained.begin(),sustained.end(),[](const auto& f){return !f.held;});
@@ -162,7 +162,7 @@ void Scheduler::applyLatch(const Configuration& cfg,Latch& latch,int offset,doub
 void Scheduler::lift(Contact& f,int offset,Sink sink,void* ctx) noexcept {
     f.down=false;
     if(!f.held)return;
-    if(keyboardMode==KeyboardMode::normal && !pedalDown(f.channel)){release(f,offset,Event::releaseContact,sink,ctx);return;}
+    if(keyboardMode==KeyboardMode::normal && !pedalDown(f.channel) && !(hasPendingLatch(f.key)&&latches[(size_t)f.key].ribbon)){release(f,offset,Event::releaseContact,sink,ctx);return;}
     auto slot=std::find_if(sustained.begin(),sustained.end(),[](const auto& c){return !c.held;});
     if(slot==sustained.end()){
         slot=std::min_element(sustained.begin(),sustained.end(),[](const auto&a,const auto&b){return a.owner<b.owner;});
@@ -170,15 +170,36 @@ void Scheduler::lift(Contact& f,int offset,Sink sink,void* ctx) noexcept {
     }
     *slot=f;f.held=false;f.toggled=false; // Keep its owner/expression independent when the MPE channel is reused.
 }
-void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double bpm,Sink sink,void* ctx) noexcept {
+void Scheduler::ribbon(const Configuration& cfg,bool start,int offset,double beat,Sink sink,void* ctx) noexcept {
+    for(int note=0;note<128;++note){
+        if(!cfg.keys[(size_t)note].enabled)continue;
+        auto& latch=latches[(size_t)note];const Contact* owner=nullptr;
+        for(int i=0;i<maxContacts+maxSustained;++i){const auto& old=contact(i);if(old.held&&old.key==note&&(!owner||old.owner>owner->owner))owner=&old;}
+        if(!start&&!owner){for(auto& f:fingers)if(f.key==note&&!f.held)f.suppressed=f.down;latch.active=false;continue;} // Cancel starts that have not sounded yet.
+        const auto& key=cfg.keys[(size_t)note];
+        if(start&&owner&&owner->fixedTop&&owner->zone==key.zoneCount-1){latch.active=false;continue;}
+        Contact next=owner?*owner:Contact{};
+        if(start){
+            next={};next.key=next.inputNote=note;next.channel=cfg.masterChannel;next.owner=++generation;
+            next.values={.8f,.5f,1.f,.8f,0.f};next.fixedTop=true;next.zone=next.wanted=key.zoneCount-1;
+            next.intent=intentTarget(next.values);next.clip=next.wantedClip=chooseClip(cfg,key,next.zone,next.intent,-1);
+        }
+        const double at=boundary(beat,cfg.latchGrid);
+        latch={next,at,true,start,Event::killContact,true};
+        if(at<=beat+1e-10)applyLatch(cfg,latch,offset,beat,sink,ctx);
+    }
+}
+void Scheduler::input(const Configuration& cfg,const Midi& incoming,double beat,double bpm,Sink sink,void* ctx) noexcept {
+    if(incoming.action!=Midi::message){ribbon(cfg,incoming.action==Midi::ribbonTop,incoming.offset,beat,sink,ctx);return;}
+    auto m=incoming;float normalizedSlide=m.b/127.f;
     if(m.a>127 || m.b>127)return;
     const int ch=m.status&15, op=m.status&240;
     auto& f=fingers[(size_t)ch];
     Event e; e.offset=m.offset;e.channel=ch;e.owner=f.owner;e.key=f.key;e.values=f.values;
     if(op==0xb0 && (m.a==120 || m.a==123)) {
-        if(ch==cfg.masterChannel){e.type=Event::panic;sink(ctx,e);fingers={};sustained={};pedals={};latches={};pendingOffCount=0;}
+        if(ch==cfg.masterChannel){e.type=Event::panic;sink(ctx,e);fingers={};sustained={};pedals={};latches={};surfaces={};pendingOffCount=0;}
         else {const auto type=m.a==120?Event::killContact:Event::releaseContact;
-            release(f,m.offset,type,sink,ctx);f.down=false;pedals[(size_t)ch]=false;
+            release(f,m.offset,type,sink,ctx);f.down=false;pedals[(size_t)ch]=false;surfaces[(size_t)ch]={};
             for(auto& held:sustained)if(held.channel==ch)release(held,m.offset,type,sink,ctx);
             for(auto& latch:latches)if(latch.active&&latch.next.channel==ch)latch.active=false;
         }
@@ -195,13 +216,38 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
         }
         return;
     }
-    // CC74 is per-channel note expression, never a global controller or a
-    // broadcast. A master-channel CC74 cannot move member-channel contacts.
+    // Key-body CC74 is per-channel expression. A master-channel CC74
+    // cannot move member contacts; ribbon gestures are handled below.
     if(op==0xb0 && ch==cfg.masterChannel && m.a!=74) {
         e.type=Event::globalCC;e.cc=m.a;e.value=m.b/127.f;sink(ctx,e);
         return;
     }
+    // Seaboard absolute Slide spans both ribbons. Normalize only the key
+    // body and edge-trigger ribbon commands while a physical touch exists.
+    auto& surface=surfaces[(size_t)ch];
+    auto region=[](int slide){return slide<16?-1:slide>115?1:0;};
+    auto bodySlide=[](int note,int slide){
+        const int pitch=note%12;const bool black=pitch==1||pitch==3||pitch==6||pitch==8||pitch==10;
+        const float bottom=black?59.f:16.f;
+        return std::clamp((slide-bottom)/(115.f-bottom),0.f,1.f);
+    };
+    if(m.surface&&op==0xb0&&m.a==74){
+        surface.slide=m.b;surface.known=true;
+        if(!f.down||ch==cfg.masterChannel)return; // Pre-note/reset CCs never launch or stop parts.
+        const int next=region(m.b);
+        if(next){if(next!=surface.region)ribbon(cfg,next>0,m.offset,beat,sink,ctx);surface.region=next;return;}
+        surface.region=0;normalizedSlide=bodySlide(f.inputNote,m.b);
+    }
     if(op==0x90 && m.b>0) {
+        if(m.surface&&surface.known&&ch!=cfg.masterChannel){
+            surface.region=region(surface.slide);
+            if(surface.region){
+                if(f.held)lift(f,m.offset,sink,ctx);
+                f={};f.down=true;f.suppressed=true;f.key=originFor(cfg,m.a);f.inputNote=m.a;f.channel=ch;f.owner=++generation;
+                ribbon(cfg,surface.region>0,m.offset,beat,sink,ctx);return;
+            }
+            f.values.slide=bodySlide(m.a,surface.slide);
+        }
         const int keyNote=originFor(cfg,m.a);auto mapped=m;mapped.a=(uint8_t)keyNote;
         if(queueLatch(cfg,mapped,m.a,beat,sink,ctx))return;
         const auto& k=cfg.keys[(size_t)keyNote];
@@ -220,7 +266,7 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
             }
         }
         if(f.held)lift(f,m.offset,sink,ctx);
-        f.down=true;f.held=k.enabled&&!stop;f.toggled=f.held&&keyboardMode==KeyboardMode::toggle;f.suppressed=stop;
+        f.down=true;f.fixedTop=false;f.held=k.enabled&&!stop;f.toggled=f.held&&keyboardMode==KeyboardMode::toggle;f.suppressed=stop;
         f.key=keyNote;f.inputNote=m.a;f.channel=ch;f.owner=++generation;f.values=values;f.releaseVelocity=0;
         f.zone=f.wanted=zone;
         f.intent=intentTarget(f.values);f.intentBeat=beat;f.nextIntent=beat+intentTick;f.changedAt=beat;
@@ -229,6 +275,7 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
         return;
     }
     if(op==0x80 || (op==0x90 && m.b==0)) {
+        if(m.surface&&f.inputNote==m.a)surface.region=0;
         if(f.inputNote==m.a){f.releaseVelocity=m.b/127.f;lift(f,m.offset,sink,ctx);if(latches[(size_t)f.key].active&&latches[(size_t)f.key].next.owner==f.owner)latches[(size_t)f.key].next=f;}
         return;
     }
@@ -236,7 +283,7 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
     if(op==0xe0){const int raw=(int(m.b)<<7)|m.a;f.values.glide=.5f+.5f*float(raw-8192)/float(raw<8192?8192:8191);}
     else if(op==0xd0) f.values.press=m.a/127.f;
     else if(op==0xa0 && f.inputNote==m.a) f.values.press=m.b/127.f;
-    else if(op==0xb0 && m.a==74) f.values.slide=m.b/127.f;
+    else if(op==0xb0 && m.a==74) f.values.slide=normalizedSlide;
     else return;
     if(!f.held){if(f.key>=0&&latches[(size_t)f.key].active&&latches[(size_t)f.key].next.owner==f.owner)latches[(size_t)f.key].next=f;return;} // Keep queued/pre-note expression.
     const auto& k=cfg.keys[(size_t)f.key];

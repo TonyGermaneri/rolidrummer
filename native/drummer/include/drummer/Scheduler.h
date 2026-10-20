@@ -50,7 +50,11 @@ inline int originFor(const Configuration& cfg,int note) noexcept {
     return cfg.keys[(size_t)note].enabled?note:origin>=0?origin:note;
 }
 struct Clock { double ppq = 0, bpm = 120, sampleRate = 48000; bool playing = false, discontinuity = false; };
-struct Midi { int offset = 0; uint8_t status = 0, a = 0, b = 0; };
+struct Midi {
+    int offset = 0; uint8_t status = 0, a = 0, b = 0;
+    enum Action { message, ribbonTop, ribbonStop } action=message;
+    bool surface=false; // Hardware absolute Slide; screen gestures are already normalized.
+};
 struct Expression { float strike = 1, glide = .5f, slide = 0, press = 0, lift = 0; };
 struct Event {
     enum Type { hit, endHit, expression, releaseContact, killContact, switchZone, panic, globalCC } type = hit;
@@ -67,6 +71,7 @@ struct Contact {
     bool down = false; // Physical contact, including keys without an assigned sound.
     bool held = false;
     bool toggled = false, suppressed = false; // Replaced/stopped physical touches cannot restart on an edit.
+    bool fixedTop = false; // Ribbon-owned parts stay at their top zone until replaced.
     int key = -1, zone = 0, wanted = 0, channel = 0;
     int inputNote = -1; // Physical pitch; key identifies its editable origin.
     uint64_t owner = 0;
@@ -106,9 +111,12 @@ private:
     std::array<bool,maxContacts> pedals {};
     int pedalCC = 64, pedalMaster = 0;
     KeyboardMode keyboardMode = KeyboardMode::normal;
-    struct Latch { Contact next;double beat=0;bool active=false,start=true;Event::Type releaseType=Event::killContact; };
+    struct Latch { Contact next;double beat=0;bool active=false,start=true;Event::Type releaseType=Event::killContact;bool ribbon=false; };
     std::array<Latch,128> latches{};
     double latchGrid=0;
+    struct Surface {int slide=64,region=0;bool known=false;};
+    std::array<Surface,maxContacts> surfaces{};
+    void ribbon(const Configuration&,bool start,int offset,double beat,Sink,void*) noexcept;
     bool physicalKeyDown(int key) const noexcept;
     bool queueLatch(const Configuration&,const Midi&,int inputNote,double,Sink,void*) noexcept;
     void applyLatch(const Configuration&,Latch&,int,double,Sink,void*) noexcept;

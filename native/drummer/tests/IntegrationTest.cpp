@@ -125,7 +125,7 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
    juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer midi;DrummerProcessor::FingerSnapshot fingers;
    midi.addEvent(juce::MidiMessage::pitchWheel(2,0),0);midi.addEvent(juce::MidiMessage::noteOn(2,48,(juce::uint8)100),0);
    double left=0;for(int b=0;b<32;++b){player.processBlock(audio,midi);for(int i=0;i<256;++i)left+=audio.getSample(0,i)*audio.getSample(0,i);}check(left>.01,"One-zone audio fixture was silent");
-   midi.addEvent(juce::MidiMessage::pitchWheel(3,16383),0);midi.addEvent(juce::MidiMessage::controllerEvent(3,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(3,48,(juce::uint8)100),0);player.processBlock(audio,midi);
+   midi.addEvent(juce::MidiMessage::pitchWheel(3,16383),0);midi.addEvent(juce::MidiMessage::controllerEvent(3,74,115),0);midi.addEvent(juce::MidiMessage::noteOn(3,48,(juce::uint8)100),0);player.processBlock(audio,midi);
    check(player.readFingers(fingers)&&fingers.count==1&&fingers.fingers[0].channel==2&&fingers.fingers[0].zone==2,"Processor retained multiple zones/markers for a key");
    midi.addEvent(juce::MidiMessage::controllerEvent(2,74,64),0);midi.addEvent(juce::MidiMessage::channelPressureChange(2,127),1);midi.addEvent(juce::MidiMessage::noteOff(2,48),2);
    left=0;double right=0;for(int b=0;b<96;++b){player.processBlock(audio,midi);if(b>48)for(int i=0;i<256;++i){left+=audio.getSample(0,i)*audio.getSample(0,i);right+=audio.getSample(1,i)*audio.getSample(1,i);}}
@@ -145,12 +145,12 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   const auto original=snapshot.fingers[0];
   midi.addEvent(juce::MidiMessage::controllerEvent(1,64,127),0);
   midi.addEvent(juce::MidiMessage::noteOff(2,48),1);
-  midi.addEvent(juce::MidiMessage::controllerEvent(2,74,5),2);
+  midi.addEvent(juce::MidiMessage::controllerEvent(2,74,20),2);
   midi.addEvent(juce::MidiMessage::noteOn(2,50,(juce::uint8)100),3);
   player.processBlock(audio,midi);read();check(snapshot.count==2,"Reused channel lost a sustained marker");
   int latched=0;for(int i=0;i<snapshot.count;++i){const auto& f=snapshot.fingers[(size_t)i];
    if(f.sustained){++latched;check(f.owner==original.owner&&f.note==48&&f.slide==original.slide&&f.glide==original.glide&&f.pressure==original.pressure,"Sustained marker changed captured values");}
-   else check(f.owner!=original.owner&&f.note==50&&f.slide==5/127.f,"New finger inherited sustained identity");
+   else check(f.owner!=original.owner&&f.note==50&&std::abs(f.slide-4/99.f)<.0001f,"New finger inherited sustained identity");
   }check(latched==1,"Incorrect sustained marker count");
   midi.addEvent(juce::MidiMessage::controllerEvent(1,64,0),0);player.processBlock(audio,midi);read();
   check(snapshot.count==1&&!snapshot.fingers[0].sustained&&snapshot.fingers[0].note==50,"Pedal up retained latched marker or removed physical finger");
@@ -177,9 +177,9 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
    check(energy>.01&&player.freePlaying.load(),"Released software latch stopped producing audio with a stopped host");
    if(toggle){
     // A held replacement in a different zone owns all subsequent expression for this key.
-    midi.addEvent(juce::MidiMessage::controllerEvent(3,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(3,50,(juce::uint8)100),0);player.processBlock(audio,midi);
+    midi.addEvent(juce::MidiMessage::controllerEvent(3,74,115),0);midi.addEvent(juce::MidiMessage::noteOn(3,50,(juce::uint8)100),0);player.processBlock(audio,midi);
     check(player.readFingers(snapshot)&&snapshot.count==1&&snapshot.fingers[0].channel==2&&snapshot.fingers[0].zone==2&&!snapshot.fingers[0].sustained&&snapshot.fingers[0].toggled,"Zone handoff left duplicate/wrong processor owners");
-    midi.addEvent(juce::MidiMessage::controllerEvent(4,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(4,50,(juce::uint8)100),0);player.processBlock(audio,midi);
+    midi.addEvent(juce::MidiMessage::controllerEvent(4,74,115),0);midi.addEvent(juce::MidiMessage::noteOn(4,50,(juce::uint8)100),0);player.processBlock(audio,midi);
     check(player.readFingers(snapshot)&&snapshot.count==0&&!player.freePlaying.load(),"Same-zone toggle left physical-but-suppressed markers or a running gate");
     // Sound/routing edits must not revive either explicitly stopped physical contact.
     patch.getDynamicObject()->setProperty("switchGrid",.25);auto keys=patch.getProperty("keys",{});(*keys.getArray())[1].getDynamicObject()->setProperty("zoneSource",3);
@@ -258,7 +258,7 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   const Input events[]={
    {0,juce::MidiMessage::noteOn(2,48,(juce::uint8)110)},
    {5000,juce::MidiMessage::noteOn(3,50,(juce::uint8)110)},
-   {17000,juce::MidiMessage::controllerEvent(3,74,127)},
+   {17000,juce::MidiMessage::controllerEvent(3,74,115)},
    {60000,juce::MidiMessage::noteOff(2,48)},
    {65000,juce::MidiMessage::noteOff(3,50)},
    {85000,juce::MidiMessage::noteOn(2,48,(juce::uint8)110)},
@@ -296,18 +296,18 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
  // Before the host resumes, free-running output matches the live host exactly.
  const auto liveAudio=stoppedRender(64,false);
  for(size_t i=0;i<48000;++i)check(std::abs(liveAudio[i]-stoppedAudio[i])<.0001,"Stopped-host patterns differ from host-timed patterns");
- // Through the actual processor: no CC74 can fan out into other notes/macros.
+ // Key-body CC74 stays per-note; only the dedicated ribbon bands act globally.
  {
   auto config=doc.clone();config.getDynamicObject()->setProperty("switchGrid",0.);auto cc=config.getProperty("globalCC",{});(*cc.getArray())[0]=74;
   DrummerProcessor isolated;isolated.apply(drummer::compileDocument(config));isolated.prepareToPlay(48000,256);Head host;isolated.setPlayHead(&host);
   juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer midi;
   midi.addEvent(juce::MidiMessage::noteOn(2,48,(juce::uint8)100),0);midi.addEvent(juce::MidiMessage::noteOn(3,50,(juce::uint8)100),0);isolated.processBlock(audio,midi);
-  midi.addEvent(juce::MidiMessage::controllerEvent(2,74,127),0);midi.addEvent(juce::MidiMessage::controllerEvent(1,74,64),1);host.beat=256/24000.;isolated.processBlock(audio,midi);
+  midi.addEvent(juce::MidiMessage::controllerEvent(2,74,115),0);midi.addEvent(juce::MidiMessage::controllerEvent(1,74,64),1);host.beat=256/24000.;isolated.processBlock(audio,midi);
   check(isolated.contactSlide[1].load()==1&&isolated.contactSlide[2].load()==0,"Processor broadcasts slide between channels");
   check((isolated.contacts[1].load()>>8)==2&&(isolated.contacts[2].load()>>8)==0,"Processor changes both held pattern zones");
   check(isolated.parameters.getParameter("macro0")->getValue()==0,"CC74 drives a global macro");
   midi.addEvent(juce::MidiMessage::controllerEvent(3,74,64),0);host.beat=512/24000.;isolated.processBlock(audio,midi);
-  check(isolated.contactSlide[1].load()==1&&isolated.contactSlide[2].load()==64/127.f,"Second finger overwrites first finger expression");
+  check(isolated.contactSlide[1].load()==1&&std::abs(isolated.contactSlide[2].load()-48/99.f)<.01f,"Second finger overwrites first finger expression");
  }
  // Browsing/import history must not add work to the audio callback until a
  // pattern is actually bound. Aliases of a bound pattern still share one bus.

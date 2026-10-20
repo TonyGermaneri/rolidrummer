@@ -2,7 +2,7 @@ import {describe,it,expect} from 'vitest'
 import {factory,normalize,clone} from '../model'
 import {keyOrigins} from './keyMapping'
 import {captureSoundKit,withSoundKit} from './kits'
-import {seaboardKeys,keyAtPoint,keySlide,keyBed} from './seaboardKeys'
+import {seaboardKeys,keyAtPoint,keySlide,keyBed,ribbonAtPoint} from './seaboardKeys'
 const legacy=[48,50,52,53,55,57,59,60,62,64,65,67,69,71,72,74]
 describe('chromatic keywaves and parallel pitches',()=>{
  it('repeats the ordered bank at both edges across every MIDI pitch without inventing bindings',()=>{
@@ -42,12 +42,23 @@ describe('black-key touch geometry',()=>{
    expect(keyAtPoint(keys,center+black.w*.2,bottom+1)?.note).toBe(black.note+1)
   }
  })
- it('keeps E/F and B/C independently playable at the top, middle and ribbon',()=>{
+ it('keeps E/F and B/C independently playable throughout the key body',()=>{
   const keys=seaboardKeys(48)
   for(const note of [52,53,59,60]){
    const key=keys.find(key=>key.note===note)!
-   for(const y of [keyBed.top+1,keyBed.top+key.h/2,keyBed.top+key.h+5])expect(keyAtPoint(keys,key.x+key.w/2,y)?.note).toBe(note)
+   for(const y of [keyBed.top+1,keyBed.top+key.h/2,keyBed.top+key.h-1])expect(keyAtPoint(keys,key.x+key.w/2,y)?.note).toBe(note)
   }
   expect(keyAtPoint(keys,keyBed.left-1,keyBed.top+20)).toBeUndefined()
+ })
+ it('separates the white-key zone matrix from both full-width ribbons',()=>{
+  const keys=seaboardKeys(48),white=keys.find(key=>!key.black)!,x=white.x+white.w/2
+  expect(keyBed.top).toBe(175);expect(keyBed.top+white.h).toBe(272)
+  expect(keySlide(white,keyBed.top)).toBe(1);expect(keySlide(white,keyBed.top+white.h)).toBe(0)
+  for(const [y,action] of [[164,'top'],[174,'top'],[273,'stop'],[287,'stop']] as const){
+   expect(keyAtPoint(keys,x,y)).toBeUndefined();expect(ribbonAtPoint(x,y)).toBe(action)
+  }
+  for(const y of [keyBed.top,keyBed.top+white.h])expect(ribbonAtPoint(x,y)).toBeUndefined()
+  expect(ribbonAtPoint(keyBed.left-1,164)).toBeUndefined()
+  expect(ribbonAtPoint(keyBed.left+keyBed.width,280)).toBeUndefined()
  })
 })

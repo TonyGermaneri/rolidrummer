@@ -1,5 +1,11 @@
 const accidentals=new Set([1,3,6,8,10])
-export const keyBed={left:150,top:173,width:572,height:106,ribbon:10}
+export const keyBed={left:150,top:175,width:572,height:97,surfaceTop:163,surfaceBottom:288}
+export type RibbonAction='top'|'stop'
+export function ribbonAtPoint(x:number,y:number):RibbonAction|undefined{
+ if(x<keyBed.left||x>=keyBed.left+keyBed.width)return
+ if(y>=keyBed.surfaceTop&&y<keyBed.top)return 'top'
+ if(y>keyBed.top+keyBed.height&&y<=keyBed.surfaceBottom)return 'stop'
+}
 export function seaboardKeys(base:number){
  const notes=Array.from({length:Math.min(49,128-base)},(_,i)=>base+i)
  const whiteWidth=keyBed.width/notes.filter(note=>!accidentals.has(note%12)).length
@@ -13,7 +19,7 @@ export function seaboardKeys(base:number){
 }
 export type SeaboardKey=ReturnType<typeof seaboardKeys>[number]
 export function keyAtPoint(keys:SeaboardKey[],x:number,y:number){
- if(y<keyBed.top-keyBed.ribbon||y>keyBed.top+keyBed.height+keyBed.ribbon)return
+ if(y<keyBed.top||y>keyBed.top+keyBed.height)return
  return keys.find(key=>key.black&&x>=key.x&&x<key.x+key.w&&y>=keyBed.top&&y<=keyBed.top+key.h)
   ??keys.find(key=>!key.black&&x>=key.x&&x<key.x+key.w)
 }

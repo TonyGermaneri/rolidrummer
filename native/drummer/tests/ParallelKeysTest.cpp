@@ -79,5 +79,24 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;try{
  head.beat=12.1;midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)100),0);quant->processBlock(audio,midi);
  check(quant->readFingers(view)&&view.count==1&&!view.fingers[0].playing&&view.latches[48].action==1,"Normal-mode launch quantization is missing its queued-start indicator");
  head.beat=13;quant->processBlock(audio,midi);check(quant->readFingers(view)&&view.fingers[0].playing&&view.latches[48].action==0,"Launch indicator did not clear when playback started");
+ // Ribbon commands use the same ordered screen queue as note gestures and
+ // reach the real audio scheduler without editing the patch/session document.
+ auto ribbonPlayer=std::make_unique<DrummerProcessor>();ribbonPlayer->apply(compileDocument(doc));ribbonPlayer->prepareToPlay(48000,256);Head ribbonHead;ribbonPlayer->setPlayHead(&ribbonHead);
+ const auto unchanged=ribbonPlayer->document();
+ ribbonPlayer->screenMidi.push({0xf4,1,0,3});ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.count==0&&view.latches[48].action==1&&view.latches[63].action==1,"Screen top ribbon did not queue all origins");
+ ribbonHead.beat=4;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==16,"Screen top ribbon did not open the entire kit");
+ for(int i=0;i<view.count;++i)check(view.fingers[(size_t)i].zone==1,"Screen top ribbon did not choose the highest matrix zone");
+ ribbonHead.beat=4.1;ribbonPlayer->screenMidi.push({0xf4,2,0,3});ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.count==16&&view.latches[48].action==2&&view.latches[63].action==2,"Screen bottom ribbon bypassed quantization or lost stop indicators");
+ ribbonHead.beat=8;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==0,"Screen bottom ribbon failed to stop the kit");
+ ribbonHead.beat=8.1;midi.addEvent(juce::MidiMessage::controllerEvent(2,74,127),0);midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)100),1);midi.addEvent(juce::MidiMessage::noteOff(2,64),2);ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.latches[48].action==1&&view.latches[63].action==1,"Hardware top ribbon was not decoded by the processor");
+ ribbonHead.beat=12;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==16,"Hardware top ribbon did not play every keywave");
+ ribbonHead.beat=12.1;midi.addEvent(juce::MidiMessage::controllerEvent(2,74,0),0);ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.count==16&&view.latches[48].action==0,"Post-release hardware reset stopped every keywave");
+ ribbonHead.beat=12.2;midi.addEvent(juce::MidiMessage::noteOn(2,64,(juce::uint8)100),0);midi.addEvent(juce::MidiMessage::noteOff(2,64),1);ribbonPlayer->processBlock(audio,midi);
+ check(ribbonPlayer->readFingers(view)&&view.latches[48].action==2,"Hardware bottom ribbon did not queue a stop");
+ ribbonHead.beat=16;ribbonPlayer->processBlock(audio,midi);check(ribbonPlayer->readFingers(view)&&view.count==0&&ribbonPlayer->document()==unchanged,"Ribbon performance changed the patch or retained notes");
  std::cout<<"parallel-keys: all 128 pitches, half-step orders, MPE reuse, owner/latch rules, legacy migration and real audio/telemetry passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

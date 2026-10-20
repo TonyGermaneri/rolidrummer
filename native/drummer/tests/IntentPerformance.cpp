@@ -73,6 +73,9 @@ juce::var document(bool refreshed,bool effects){
     }
     set(doc,"keys",keys);set(doc,"clips",clips);set(doc,"launchGrid",0);set(doc,"switchGrid",.125);return doc;
 }
+// This workload keeps 128 owners alive while sweeping per-key expression.
+// Reserve the physical ribbons for the separate group-action/isolation tests.
+int keyBodySlide(int note,int value){const int pitch=note%12;const bool black=pitch==1||pitch==3||pitch==6||pitch==8||pitch==10;const int bottom=black?59:16;return bottom+int(std::lround((115-bottom)*value/127.));}
 double residentMiB(){
 #if defined(__APPLE__)
     mach_task_basic_info_data_t info{};mach_msg_type_number_t size=MACH_TASK_BASIC_INFO_COUNT;
@@ -106,7 +109,7 @@ Run run(double rate,int block,bool effects,bool collect,int instances=1,double d
     struct Input{int at;juce::MidiMessage message;};std::vector<Input> events;
     events.push_back({0,juce::MidiMessage::controllerEvent(1,64,127)});
     for(int i=0;i<128;++i){const int channel=2+i%15,pitch=i;
-        events.push_back({i*3,juce::MidiMessage::controllerEvent(channel,74,i%128)});
+        events.push_back({i*3,juce::MidiMessage::controllerEvent(channel,74,keyBodySlide(pitch,i%128))});
         events.push_back({i*3,juce::MidiMessage::channelPressureChange(channel,(i*7)%128)});
         events.push_back({i*3,juce::MidiMessage::noteOn(channel,pitch,(juce::uint8)(70+i%50))});
         events.push_back({i*3+1,juce::MidiMessage::noteOff(channel,pitch,(juce::uint8)(i%128))});
@@ -116,7 +119,7 @@ Run run(double rate,int block,bool effects,bool collect,int instances=1,double d
     const int pedalUp=int(rate*(duration-.75)),release=int(rate*(duration-.5)),total=int(rate*duration);
     for(int frame=600;frame<release;frame+=137){const int ch=2+(frame/137)%15;
         events.push_back({frame,juce::MidiMessage::channelPressureChange(ch,(frame/137)%128)});
-        events.push_back({frame,juce::MidiMessage::controllerEvent(ch,74,(frame/311)%128)});
+        events.push_back({frame,juce::MidiMessage::controllerEvent(ch,74,keyBodySlide(46+ch,(frame/311)%128))});
         events.push_back({frame,juce::MidiMessage::pitchWheel(ch,(frame*17)%16384)});
     }
     events.push_back({pedalUp,juce::MidiMessage::controllerEvent(1,64,0)});
