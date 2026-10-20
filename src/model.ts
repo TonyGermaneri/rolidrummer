@@ -8,10 +8,10 @@ export interface Route{source:number;target:string;min:number;max:number;curve:n
 export interface Sound{path:string;asset?:string;missing?:string;s:SoundSettings & {reverse:boolean}}
 export interface Key{note:number;name:string;parts:number[];sound:Sound;zones:Zone[];zoneSource:number;routes:Route[];mpeDefaultsVersion?:number;neuralLock?:boolean;patternIntent?:PatternIntentSettings;rhythmSpace?:{version:number;precision?:number;mean:number[];scale:number[];eigenvalues:number[];components:number[][]}}
 export interface PatternGeneration{version:number;method:string;seed:string;attempt:number;parents:string[];fragmentParents:number[];unitBeats:number;role:string;feel:string;densityBounds:[number,number];preserveAnchors:boolean;preserveFinalBeat:boolean}
-export interface Clip{id:string;name:string;path?:string;channel?:number;track?:number;length:number;notes:{beat:number;duration:number;note:number;velocity:number}[];generation?:PatternGeneration}
+export interface Clip{id:string;name:string;path?:string;channel?:number;track?:number;length:number;loopLength?:number;notes:{beat:number;duration:number;note:number;velocity:number}[];generation?:PatternGeneration}
 export interface NeuralResolution{version:1;autoMode?:boolean;managedClipIds?:string[];patchId:string;familyId?:string;familyPolicyVersion?:number;familyBuildId?:string;familyRevision?:number;query:string;interpretedQuery?:string;queryVersion?:number;phraseBars?:number;variationCount?:number;generationVersion?:number;generatedCount?:number;indexId:string;libraryRevision:number;modelVersion:string;preprocessingVersion:number;featureVersion:number;resolverVersion:number;seed:string;numericPrecision?:number;numerator:number;denominator:number;feel:'straight'|'triplet';keys:{key:number;sparse:string;steady:string;fill:string;sparseDensity:number;steadyDensity:number;fillDensity:number;fillFallback:boolean;grooveCandidates:number;fillCandidates:number}[];warnings:{key:number;reason:string}[]}
 export type KeyboardMode = 'normal' | 'hold' | 'toggle'
-export interface Patch{fx:MasterFx;version:number;id?:string;name:string;keys:Key[];clips:Clip[];templateZones:Zone[];launchGrid:number;switchGrid:number;hardRelease:boolean;sustainCC:number;keyboardMode:KeyboardMode;volume:number;bpm:number;globalCC:number[];globalRoutes:Route[];neural?:NeuralResolution}
+export interface Patch{fx:MasterFx;version:number;id?:string;name:string;keys:Key[];clips:Clip[];templateZones:Zone[];launchGrid:number;switchGrid:number;hardRelease:boolean;sustainCC:number;keyboardMode:KeyboardMode;latchQuantize?:boolean;latchBars?:number;volume:number;bpm:number;globalCC:number[];globalRoutes:Route[];neural?:NeuralResolution}
 export interface Asset{id:string;path:string;name:string;folder:boolean;size:number;modified?:string;libraryId?:string;preset?:{sound:Sound;routes:Route[];parts:number[]}}
 export const colors=Array.from({length:8},(_,i)=>`var(--zone-${i})`)
 export const clone=<T>(v:T):T=>JSON.parse(JSON.stringify(v))
@@ -33,6 +33,7 @@ export function normalize(p:Patch):Patch{
  for(const k of p.keys){if(k.zoneSource===4)k.zoneSource=2;k.sound.s={...defaultSettings(k.name),...migratePresetSettings(k.sound.s),reverse:k.sound.s.reverse??false};k.routes??=[];if(k.mpeDefaultsVersion!==1){if(!k.routes.length)k.routes=defaultMpeRoutes();k.mpeDefaultsVersion=1}}
  for(let i=0;i<3;i++){const clip=p.clips.find(c=>c.id===`factory-${i}`);if(clip&&clip.length===4&&[false,true].some(version=>{const old=legacyGrooveNotes(i,version);return clip.notes.length===old.length&&clip.notes.every((note,j)=>(['beat','duration','note','velocity'] as const).every(field=>Math.abs(note[field]-old[j][field])<1e-7))})){clip.notes=grooveNotes(i);clip.length=8;clip.name=factoryData.clips[i].name}}
 
+ p.latchQuantize??=true;p.latchBars=Number.isFinite(p.latchBars)?Math.max(0,Math.min(16,Math.trunc(p.latchBars!))):1;
  p.keyboardMode=p.keyboardMode==='hold'||p.keyboardMode==='toggle'?p.keyboardMode:'normal';
  p.sustainCC=Number.isFinite(p.sustainCC)&&p.sustainCC!==74?Math.max(0,Math.min(119,Math.trunc(p.sustainCC))):64;
  p.globalRoutes??=[];p.fx=normalizeFx(p.fx);return p
@@ -40,7 +41,7 @@ export function normalize(p:Patch):Patch{
 export function factory():Patch{
  const zones=[{upper:.22,clipId:'factory-0'},{upper:.76,clipId:'factory-1'},{upper:1,clipId:'factory-2'}]
  const keys:Key[]=factoryData.voices.map(v=>({note:v.note,name:v.name,parts:clone(v.parts),sound:{path:v.source,s:{...defaultSettings(v.name),...v.settings} as Sound['s']},zones:clone(zones),zoneSource:2,routes:clone(v.routes),mpeDefaultsVersion:1}))
- return normalize({fx:normalizeFx(),version:1,id:'builtin:factory',name:factoryData.name,keys,clips:clone(factoryData.clips),templateZones:zones,launchGrid:.25,switchGrid:.25,hardRelease:false,sustainCC:64,keyboardMode:'normal',volume:.8,bpm:120,globalCC:[107,109,111,113,114],globalRoutes:[]})
+ return normalize({fx:normalizeFx(),version:1,id:'builtin:factory',name:factoryData.name,keys,clips:clone(factoryData.clips),templateZones:zones,launchGrid:.25,switchGrid:.25,hardRelease:false,sustainCC:64,keyboardMode:'normal',latchQuantize:true,latchBars:1,volume:.8,bpm:120,globalCC:[107,109,111,113,114],globalRoutes:[]})
 }
 export function factoryAssets():Asset[]{return factory().keys.map(key=>({id:`factory-kit:${key.note}`,path:key.sound.path,name:key.name,folder:false,size:0,preset:{sound:clone(key.sound),routes:clone(key.routes),parts:clone(key.parts)}}))}
 export const sources=['Strike','Glide / pitch','Slide / CC74','Press / pressure','Lift / release']

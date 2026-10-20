@@ -15,6 +15,134 @@ async function setup() {
 }
 
 describe('editor document synchronization', () => {
+  function soundBackend(){
+    let revision=1
+    backend.request.mockImplementation(async(method,payload)=>{
+      if(method==='soundMatch')return{assignments:[{note:48,asset:{path:'factory:kick',name:'Preview kick'}}],sounds:16,limited:false}
+      if(method==='previewKit'||method==='cancelKitPreview')return true
+      if(method==='setDocument')return{document:payload.document,revision:++revision,conflict:false}
+      if(method==='sharedCommit')return{ok:true,fields:payload.map((operation:any)=>({...operation,revision:++revision}))}
+      return[]
+    })
+  }
+  it('automatically auditions semantic bindings without editing the patch, history, redo or saved patches',async()=>{
+    const store=await setup(),kits=await import('./kits');soundBackend()
+    const before=clone(store.state.patch);store.state.future=['existing redo']
+    await kits.matchSounds('Rock drums')
+    expect(store.soundPreview.ready).toBe(true)
+    expect(store.soundPreview.kit?.keys[0].sound.s.name).toBe('Preview kick')
+    expect(store.state.patch).toEqual(before);expect(store.state.history).toEqual([]);expect(store.state.future).toEqual(['existing redo'])
+    expect(backend.request).toHaveBeenCalledWith('previewKit',expect.objectContaining({revision:1,kit:expect.objectContaining({name:'Rock drums'})}))
+    expect(backend.request.mock.calls.some(call=>call[0]==='setDocument')).toBe(false)
+    await expect(kits.saveSoundKit()).rejects.toThrow('Apply or cancel')
+    await store.saveSharedPatch()
+    expect(Object.values(store.shared).find(field=>field.key.startsWith('patch/'))!.value.keys[0].sound).toEqual(before.keys[0].sound)
+  })
+  it('cancels a completed kit preview without a document edit or Undo step',async()=>{
+    const store=await setup(),kits=await import('./kits');soundBackend();const before=clone(store.state.patch)
+    await kits.matchSounds('Rock drums');kits.cancelSoundSearch()
+    expect(store.soundPreview.kit).toBeNull();expect(store.state.patch).toEqual(before);expect(store.state.history).toEqual([])
+    expect(backend.request).toHaveBeenCalledWith('cancelKitPreview')
+    expect(backend.request.mock.calls.some(call=>call[0]==='setDocument')).toBe(false)
+  })
+  it('commits the auditioned sounds only on Apply and can undo the kit in one step',async()=>{
+    const store=await setup(),kits=await import('./kits');soundBackend();const before=clone(store.state.patch)
+    await kits.matchSounds('Rock drums');await kits.applySoundPreview()
+    expect(store.soundPreview.kit).toBeNull();expect(store.state.history).toHaveLength(1)
+    expect(store.state.patch.keys[0].sound.s.name).toBe('Preview kick');expect(kits.kitState.name).toBe('Rock drums')
+    expect(store.state.patch.clips).toEqual(before.clips);expect(store.state.patch.keys[0].zones).toEqual(before.keys[0].zones)
+    expect(store.state.patch.keys[0].routes).toEqual(before.keys[0].routes);expect(store.state.patch.keys[0].parts).toEqual(before.keys[0].parts)
+    expect(backend.request.mock.calls.filter(call=>call[0]==='setDocument')).toHaveLength(1)
+    // Applying must not momentarily cancel the audition while preparing its commit.
+    expect(backend.request.mock.calls.some(call=>call[0]==='cancelKitPreview')).toBe(false)
+    store.undo();await store.flushEdits(false,0);expect(store.state.patch).toEqual(before)
+  })
+  it('discards a preview on manual edits and ignores a native preview acknowledgement after Cancel',async()=>{
+    const store=await setup(),kits=await import('./kits');soundBackend()
+    await kits.matchSounds('Rock drums');store.state.patch.keys[0].sound.s.pitch=7
+    expect(store.soundPreview.kit).toBeNull();expect(backend.request).toHaveBeenCalledWith('cancelKitPreview')
+    await store.flushEdits();let finish!:(value:any)=>void
+    const previous=backend.request.getMockImplementation()!
+    backend.request.mockImplementation((method,payload)=>method==='previewKit'?new Promise(resolve=>{finish=resolve}):previous(method,payload))
+    const matching=kits.matchSounds('909')
+    for(let i=0;i<20;++i)await Promise.resolve()
+    expect(store.soundPreview.kit).not.toBeNull();expect(store.soundPreview.ready).toBe(false)
+    kits.cancelSoundSearch();finish(true);await matching
+    expect(store.soundPreview.kit).toBeNull();expect(store.state.patch.keys[0].sound.s.pitch).toBe(7)
+  })
+  it('keeps the current kit name when applying a one-key preview',async()=>{
+    const store=await setup(),kits=await import('./kits');soundBackend();kits.kitState.id='existing';kits.kitState.name='My kit'
+    await kits.matchSounds('Rock kick',48);await kits.applySoundPreview()
+    expect(store.state.patch.keys[0].sound.s.name).toBe('Preview kick');expect(kits.kitState.id).toBe('existing');expect(kits.kitState.name).toBe('My kit')
+  })
+  it('cleans up a failed native audition without changing the document or leaving a matching status',async()=>{
+    const store=await setup(),kits=await import('./kits');soundBackend();const before=clone(store.state.patch)
+    const previous=backend.request.getMockImplementation()!
+    backend.request.mockImplementation((method,payload)=>method==='previewKit'?Promise.reject(Error('Wait for the queued patch')):previous(method,payload))
+    await expect(kits.matchSounds('Rock')).rejects.toThrow('Wait for the queued patch')
+    expect(store.soundPreview.kit).toBeNull();expect(store.state.patch).toEqual(before);expect(store.state.history).toEqual([])
+    expect(kits.kitState.busy).toBe(false);expect(kits.kitState.status).toBe('No preview applied.')
+    expect(backend.request).toHaveBeenCalledWith('cancelKitPreview')
+  })
+  it('does not report a preview applied if the host recalls another patch during Apply',async()=>{
+    const store=await setup(),kits=await import('./kits');soundBackend();await kits.matchSounds('Rock drums')
+    const restored=factory();restored.name='Host recall'
+    backend.request.mockImplementation(async(method)=>method==='setDocument'?{document:restored,revision:9,conflict:true}:true)
+    await kits.applySoundPreview()
+    expect(store.state.patch.name).toBe('Host recall');expect(store.state.history).toEqual([])
+    expect(kits.kitState.status).not.toBe('Applied Rock drums')
+  })
+  it('saves a kit with a stable identity when renamed',async()=>{
+    const store=await setup(),kits=await import('./kits');let revision=1
+    backend.request.mockImplementation(async(method,payload)=>{
+      if(method==='sharedCommit')return{ok:true,fields:payload.map((operation:any)=>({...operation,revision:++revision}))}
+      if(method==='setDocument')return{document:payload.document,revision:++revision,conflict:false}
+      return[]
+    })
+    kits.kitState.name='Dry drums';await kits.saveSoundKit();const id=kits.kitState.id
+    kits.kitState.name='Wet drums';await kits.saveSoundKit()
+    const calls=backend.request.mock.calls.filter(call=>call[0]==='sharedCommit')
+    expect(calls).toHaveLength(2);expect(calls[0][1][0].key).toBe(calls[1][1][0].key)
+    expect(kits.kitState.id).toBe(id)
+    expect(Object.values(store.shared).filter(field=>field.key.startsWith('kit/'))).toHaveLength(1)
+    expect(kits.savedKits.value[0].value.name).toBe('Wet drums')
+  })
+  it('rejects a late semantic sound result after the user edits the instrument',async()=>{
+    const store=await setup(),kits=await import('./kits');let finish!:(value:any)=>void
+    backend.request.mockImplementation((method,payload)=>method==='soundMatch'?new Promise(resolve=>{finish=resolve}):Promise.resolve(method==='setDocument'?{document:payload.document,revision:2,conflict:false}:[]))
+    const matching=kits.matchSounds('Heavy rock')
+    for(let i=0;i<8;++i)await Promise.resolve()
+    const original=store.state.patch.keys[0].sound.path
+    store.state.patch.keys[0].sound.s.pitch=12
+    finish({assignments:[{note:48,asset:{path:'/late-kick.wav',name:'Late kick'}}],sounds:1,limited:false})
+    await matching
+    expect(store.state.patch.keys[0].sound.path).toBe(original)
+    expect(store.state.patch.keys[0].sound.s.pitch).toBe(12)
+    expect(kits.kitState.status).toContain('instrument changed')
+  })
+  it('cancels semantic results when leaving the sound search',async()=>{
+    const store=await setup(),kits=await import('./kits');let finish!:(value:any)=>void
+    backend.request.mockImplementation(method=>method==='soundMatch'?new Promise(resolve=>{finish=resolve}):Promise.resolve([]))
+    const before=clone(store.state.patch),matching=kits.matchSounds('909')
+    for(let i=0;i<8;++i)await Promise.resolve()
+    kits.cancelSoundSearch();finish({assignments:[{note:48,asset:{path:'/909-kick.wav',name:'909'}}],sounds:1,limited:false})
+    await matching;expect(store.state.patch).toEqual(before);expect(kits.kitState.busy).toBe(false)
+  })
+  it('applies a sound kit in one undo step without changing pattern, filter or controller assignments',async()=>{
+    const store=await setup(),{applySoundKit}=await import('./kits'),{captureSoundKit}=await import('./lib/kits')
+    let revision=1
+    backend.request.mockImplementation(async(method,payload)=>method==='setDocument'?{document:payload.document,revision:++revision,conflict:false}:[])
+    const before=clone(store.state.patch),kit=captureSoundKit(before,'New drums','kit-new')
+    kit.keys[0].sound.s.pitch=11;kit.keys[1].sound.s.volume=.27
+    await applySoundKit(kit)
+    expect(store.state.history).toHaveLength(1)
+    expect(store.state.patch.keys[0].sound.s.pitch).toBe(11)
+    expect(store.state.patch.keys[0].parts).toEqual(before.keys[0].parts)
+    expect(store.state.patch.clips).toEqual(before.clips)
+    expect(store.state.patch.keys[0].routes).toEqual(before.keys[0].routes)
+    store.undo();await store.flushEdits(false,0)
+    expect(store.state.patch).toEqual(before)
+  })
   it('tracks only the most recent note-on when enabled and leaves selection pinned otherwise',async()=>{
     const {state,sendMidi}=await setup()
     const notes=state.patch.keys.slice(0,4).map(k=>k.note)

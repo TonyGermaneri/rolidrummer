@@ -25,6 +25,10 @@ public:
  bool apply(std::unique_ptr<drummer::Runtime>, std::optional<uint64_t> expected = {},double activationGrid=0,bool preserveActivation=false);
  bool activationPending() const noexcept{return boundaryRevision.load(std::memory_order_acquire)>activeRevision.load(std::memory_order_acquire);}
  juce::String document();
+ // Kit auditions replace only the live sounds, leaving the saved document intact.
+ uint64_t beginKitPreview();
+ bool previewKit(const juce::var& kit,uint64_t expected,uint64_t ticket);
+ void cancelKitPreview();
  void publishPreview(std::unique_ptr<drummer::Preview>,uint64_t request);
  void stopPreview();
  std::atomic<uint64_t> previewRequest{0};
@@ -36,8 +40,8 @@ public:
  std::atomic<double> hostBpm{120},hostPpq{0};std::atomic<bool> hostPlaying{false},standalonePlaying{false},freePlaying{false};
  std::array<std::atomic<int>,16> contacts{};
  std::array<std::atomic<float>,16> contactSlide{},contactGlide{},contactPressure{};
- struct FingerView { uint64_t owner=0;int channel=0,note=0,zone=0;float slide=0,glide=.5f,pressure=0;bool sustained=false,toggled=false,playing=false;int candidate=-1; };
- struct KeyPattern { int clip=-1,zone=0,candidate=-1;double phase=0;bool known=false,playing=false; };
+ struct FingerView { uint64_t owner=0;int channel=0,note=0,zone=0;float slide=0,glide=.5f,pressure=0;bool sustained=false,toggled=false,playing=false;int candidate=-1;bool queued=false; };
+ struct KeyPattern { int clip=-1,zone=0,candidate=-1;double phase=0;bool known=false,playing=false;double beat=0; };
  struct FingerSnapshot {
   std::array<FingerView,drummer::maxContacts+drummer::Scheduler::maxSustained> fingers{};int count=0;
   std::array<KeyPattern,128> patterns{};
@@ -93,6 +97,8 @@ private:
  std::array<juce::RangedAudioParameter*,5> macroParameters {};
  std::atomic<float>* outputVolume=nullptr;
  std::mutex stateMutex;juce::String saved;
+ uint64_t kitPreviewRequest=0;
+ std::unique_ptr<drummer::Runtime> kitPreviewRestore;
  std::atomic<drummer::Preview*> previewIncoming{nullptr};drummer::Preview* previewActive=nullptr;
  std::array<drummer::Preview*,16> previewRetired{};std::atomic<unsigned> previewRead{0},previewWrite{0};
  std::atomic<bool> previewStop{false};

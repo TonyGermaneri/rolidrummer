@@ -35,6 +35,7 @@ struct Configuration {
     std::vector<Clip> clips;
     std::vector<PatternGroup> groups;
     double launchGrid = .25, switchGrid = .25;
+    double latchGrid = 0; // Quarter-note beats; zero preserves immediate latching.
     float hysteresis = .015f;
     bool hardRelease = false;
     KeyboardMode keyboardMode = KeyboardMode::normal;
@@ -79,6 +80,7 @@ public:
     const std::array<Contact,maxContacts>& contacts() const { return fingers; }
     const std::array<Contact,maxSustained>& sustainedContacts() const { return sustained; }
     bool hasHeldNotes() const noexcept;
+    bool hasPendingLatch(int key) const noexcept { return key>=0&&key<128&&latches[(size_t)key].active; }
     uint32_t evaluations = 0;
     bool overflow = false;
 private:
@@ -93,6 +95,12 @@ private:
     std::array<bool,maxContacts> pedals {};
     int pedalCC = 64, pedalMaster = 0;
     KeyboardMode keyboardMode = KeyboardMode::normal;
+    struct Latch { Contact next;double beat=0;bool active=false,start=true;Event::Type releaseType=Event::killContact; };
+    std::array<Latch,128> latches{};
+    double latchGrid=0;
+    bool physicalKeyDown(int key) const noexcept;
+    bool queueLatch(const Configuration&,const Midi&,double,Sink,void*) noexcept;
+    void applyLatch(const Configuration&,Latch&,int,double,Sink,void*) noexcept;
     Contact& contact(int i) noexcept { return i < maxContacts ? fingers[(size_t)i] : sustained[(size_t)(i-maxContacts)]; }
     bool pedalDown(int channel) const noexcept { return pedals[(size_t)pedalMaster] || pedals[(size_t)channel]; }
     void enforceKeyOwnership(KeyboardMode, int offset, Sink, void*) noexcept;

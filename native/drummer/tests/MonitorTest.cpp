@@ -67,5 +67,22 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;try{
  split->apply(drummer::compileDocument(next),{},.02);splitHead.beat=256./24000;split->processBlock(audio,midi);
  bool afterBoundary=false;while(split->performanceMonitor.pop(event))if(event.type==drummer::PlayedEvent::on){check(std::abs(event.beat-488./24000)<1e-10,"Split callback lost its monitor segment offset");afterBoundary=true;}
  check(afterBoundary&&!split->activationPending(),"Queued pattern did not activate and publish its new hit");
+ // Different pattern lengths repeat independently, and telemetry keeps the
+ // phrase position as well as the short pattern's wrapped local position.
+ auto mixed=std::make_unique<DrummerProcessor>();auto mixedDoc=document();
+ auto shortClip=juce::JSON::parse(R"({"id":"short","name":"One bar","length":8,"loopLength":4,"notes":[{"beat":0,"duration":0.125,"note":36,"velocity":0.8}]})");
+ auto longClip=juce::JSON::parse(R"({"id":"long","name":"Two bars","length":8,"notes":[{"beat":0,"duration":0.125,"note":38,"velocity":0.8}]})");
+ mixedDoc.getDynamicObject()->setProperty("clips",juce::Array<juce::var>{shortClip,longClip});
+ auto mixedKeys=mixedDoc.getProperty("keys",{});for(auto& key:*mixedKeys.getArray()){
+  auto* zone=new juce::DynamicObject;zone->setProperty("upper",1.0);zone->setProperty("clipId",(int)key.getProperty("note",0)==50?"long":"short");key.getDynamicObject()->setProperty("zones",juce::Array<juce::var>{zone});
+ }
+ mixed->apply(drummer::compileDocument(mixedDoc));mixed->prepareToPlay(48000,2400);Head mixedHead;mixed->setPlayHead(&mixedHead);
+ juce::AudioBuffer<float> mixedAudio(2,2400);std::vector<int> shortBeats,longBeats;
+ for(int block=0;block<160;++block){
+  mixedHead.beat=block*.1;midi.clear();if(block==0){midi.addEvent(juce::MidiMessage::noteOn(2,48,(juce::uint8)100),0);midi.addEvent(juce::MidiMessage::noteOn(3,50,(juce::uint8)100),0);}
+  mixed->processBlock(mixedAudio,midi);while(mixed->performanceMonitor.pop(event))if(event.type==drummer::PlayedEvent::on)(event.key==48?shortBeats:longBeats).push_back((int)std::llround(event.beat));
+  if(block==49){check(mixed->readFingers(snapshot),"Mixed-loop telemetry unavailable");check(std::abs(snapshot.patterns[48].phase-1)<1e-8&&std::abs(snapshot.patterns[48].beat-5)<1e-8,"Short-loop marker lost its second pass through the phrase");}
+ }
+ check(shortBeats==std::vector<int>({0,4,8,12})&&longBeats==std::vector<int>({0,8}),"Processor made a short pattern wait for the longer pattern");
  std::cout<<"monitor: bounded FIFO, filtered output, sample timing, note duration, short taps, last/current patterns, seek/tempo, refresh and restart passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -6,7 +6,7 @@ vi.mock('../native/bridge',()=>({native:()=>true,request:fake.request}))
 vi.mock('../store',async()=>{
  const {reactive}=await import('vue')
  fake.state=reactive({patch:{},selected:48,error:'',telemetry:{preview:false}})
- return {flushEdits:fake.flush,saveSharedPatch:fake.save,state:fake.state,replace:fake.replace.mockImplementation(async(patch:any)=>{fake.state.patch=patch}),attempt:async(job:()=>Promise<unknown>)=>{try{return await job()}catch(e){fake.state.error=String(e)}}}
+ return {soundPreview:reactive({kit:null,ready:false}),flushEdits:fake.flush,saveSharedPatch:fake.save,state:fake.state,replace:fake.replace.mockImplementation(async(patch:any)=>{fake.state.patch=patch}),attempt:async(job:()=>Promise<unknown>)=>{try{return await job()}catch(e){fake.state.error=String(e)}}}
 })
 vi.mock('./DataGrid.vue',async()=>{
  const {defineComponent,h}=await import('vue')

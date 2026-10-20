@@ -37,7 +37,7 @@ juce::String mapCacheKey(const juce::String& path, const juce::var& policy) {
         key += instrument ? ":instrument" : ":gm";
         if(patternUsesVendorArticulations(words))key+=":vendor";
     }
-    return digest(key + ":maps-"+juce::String(drumMappingVersion)+":features-" + juce::String(patternFeatureVersion));
+    return digest(key + ":midi-"+juce::String(midiImportVersion)+":maps-"+juce::String(drumMappingVersion)+":features-" + juce::String(patternFeatureVersion));
 }
 juce::var runStatus(sql::Database& db, const juce::String& run) {
     sql::Statement query(db, "SELECT id,source_id,state,next_entry,total,midi_files,accepted,ignored,unsupported,metadata_files,error FROM runs WHERE id=?");
@@ -198,7 +198,7 @@ struct Source {
 PatternLibrary::PatternLibrary(juce::File file) : database(std::move(file)) {
     if (!database.getParentDirectory().createDirectory()) throw std::runtime_error("Cannot create pattern catalog directory");
     sql::Database db(database);
-    if(sql::schemaReady(db,"patterns")){
+    if(sql::schemaReady(db,"patterns",2)){
         sql::Statement version(db,"SELECT value FROM library_meta WHERE key='schema'");
         if(!version.row()||version.integer(0)!=1)throw std::runtime_error("Unsupported pattern catalog version");
         sql::Statement mode(db,"PRAGMA journal_mode");if(mode.row()&&mode.text(0)=="wal")return;
@@ -233,7 +233,10 @@ PatternLibrary::PatternLibrary(juce::File file) : database(std::move(file)) {
     bool mappingVersion=false;
     {sql::Statement columns(db,"PRAGMA table_info(runs)");while(columns.row())mappingVersion=mappingVersion||columns.text(1)=="mapping_version";}
     if(!mappingVersion)db.exec("ALTER TABLE runs ADD COLUMN mapping_version INTEGER NOT NULL DEFAULT 1");
-    sql::sealSchema(db,"patterns");
+    bool importVersion=false;
+    {sql::Statement columns(db,"PRAGMA table_info(runs)");while(columns.row())importVersion=importVersion||columns.text(1)=="import_version";}
+    if(!importVersion)db.exec("ALTER TABLE runs ADD COLUMN import_version INTEGER NOT NULL DEFAULT 2");
+    sql::sealSchema(db,"patterns",2);
     migration.commit();
 }
 
@@ -254,8 +257,8 @@ juce::var PatternLibrary::importSource(const juce::File& input, const LibraryImp
         if (!sqlite3_changes(db.handle)) throw std::runtime_error("This source is being indexed by another instance");
         sql::Statement insertSource(db, "INSERT INTO sources(id,path,last_run) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,last_run=excluded.last_run");
         insertSource.text(1, sourceId); insertSource.text(2, input.getFullPathName()); insertSource.text(3, runId); insertSource.done();
-        sql::Statement insertRun(db, "INSERT OR IGNORE INTO runs(id,source_id,fingerprint,mapping,state,total,mapping_version) VALUES(?,?,?,?,'indexing',?,?)");
-        insertRun.text(1, runId); insertRun.text(2, sourceId); insertRun.text(3, source.fingerprint); insertRun.text(4, serialise(policy)); insertRun.integer(5, source.total);insertRun.integer(6,drumMappingVersion); insertRun.done();
+        sql::Statement insertRun(db, "INSERT OR IGNORE INTO runs(id,source_id,fingerprint,mapping,state,total,mapping_version,import_version) VALUES(?,?,?,?,'indexing',?,?,?)");
+        insertRun.text(1, runId); insertRun.text(2, sourceId); insertRun.text(3, source.fingerprint); insertRun.text(4, serialise(policy)); insertRun.integer(5, source.total);insertRun.integer(6,drumMappingVersion);insertRun.integer(7,midiImportVersion); insertRun.done();
         transaction.commit();
     }
     auto releaseLease = [&] {
@@ -414,10 +417,10 @@ juce::var PatternLibrary::browse(const juce::var& options) const {
 struct PatternReader::Impl {
     sql::Database db;
     sql::Statement query;
-    explicit Impl(const juce::File& file):db(file),query(db,"SELECT p.id,b.channel,b.track,b.mapping,r.data,e.path,b.family,b.role,completed.mapping_version,p.features FROM bindings b JOIN runs completed ON completed.id=b.run_id AND completed.state='complete' "
+    explicit Impl(const juce::File& file):db(file),query(db,"SELECT p.id,b.channel,b.track,b.mapping,r.data,e.path,b.family,b.role,completed.mapping_version,p.features,completed.import_version FROM bindings b JOIN runs completed ON completed.id=b.run_id AND completed.state='complete' "
                             "JOIN patterns p ON p.id=b.pattern_id JOIN payloads r ON r.id=b.payload_id JOIN entries e ON e.run_id=b.run_id AND e.ordinal=b.ordinal WHERE b.id=?") {db.exec("BEGIN");}
 };
-PatternReader::PatternReader(const juce::File& file):impl(std::make_unique<Impl>(file)){}
+PatternReader::PatternReader(const juce::File& file){PatternLibrary migrated(file);impl=std::make_unique<Impl>(file);}
 PatternReader::~PatternReader()=default;
 juce::var PatternLibrary::pattern(const juce::String& bindingId) const {return PatternReader(database).pattern(bindingId);}
 juce::var PatternReader::pattern(const juce::String& bindingId) {
@@ -427,8 +430,15 @@ juce::var PatternReader::pattern(const juce::String& bindingId) {
     const auto bytes = query.blob(4);
     const auto path = query.text(5);
     juce::MemoryInputStream stream(bytes, false);
-    auto result = analyzePattern(importMidi(readMidi(stream), path, (int) query.integer(1), (int) query.integer(2)), path, juce::JSON::parse(query.text(3)),(int)query.integer(8),false);
+    const auto midi=readMidi(stream);
+    auto result = analyzePattern(importMidi(midi, path, (int) query.integer(1), (int) query.integer(2),(int)query.integer(10)), path, juce::JSON::parse(query.text(3)),(int)query.integer(8),false);
     if (get(result, "id").toString() != query.text(0)) throw std::runtime_error("Cached pattern identity no longer matches its mapping");
+    // Preserve historical IDs/measurements while correcting the playable span
+    // of an old part padded by another track. No source reimport is required.
+    if(query.integer(10)<midiImportVersion){
+        const auto current=importMidi(midi,path,(int)query.integer(1),(int)query.integer(2));
+        if(number(current,"length",0)<number(result,"length",0))set(result,"loopLength",get(current,"length"));
+    }
     set(result, "family", query.text(6)); set(result, "libraryBinding", bindingId);
     // Recall the committed measurements rather than refitting floating-point
     // summaries on a potentially different CPU. Alias role remains explicit.

@@ -97,7 +97,8 @@ juce::var inspectMidi(const juce::File& file) {
     return inspectMidi(readMidi(stream));
 }
 
-juce::var importMidi(const juce::MidiFile& midi, const juce::String& source, int channel, int track) {
+juce::var importMidi(const juce::MidiFile& midi, const juce::String& source, int channel, int track, int version) {
+    if(version<2||version>midiImportVersion)throw std::runtime_error("Unsupported MIDI import version");
     const int ppq = midi.getTimeFormat();
     if (channel < -1 || channel > 16 || track < -1 || track >= midi.getNumTracks()) throw std::runtime_error("Invalid MIDI track or channel selection");
     auto info = inspectMidi(midi);
@@ -114,10 +115,18 @@ juce::var importMidi(const juce::MidiFile& midi, const juce::String& source, int
     }
     juce::MidiMessageSequence selected;
     double end = 0;
-    for (int t = 0; t < midi.getNumTracks(); ++t) for (int i = 0; i < midi.getTrack(t)->getNumEvents(); ++i) {
-        const auto& m = midi.getTrack(t)->getEventPointer(i)->message;
-        end = std::max(end, m.getTimeStamp() / ppq);
-        if ((track == -1 || track == t) && (channel == 0 || m.getChannel() == channel) && (m.isNoteOn() || m.isNoteOff())) selected.addEvent(m);
+    for (int t = 0; t < midi.getNumTracks(); ++t) {
+        double trackEnd=0;bool hasSelectedNotes=false;
+        for (int i = 0; i < midi.getTrack(t)->getNumEvents(); ++i) {
+            const auto& m = midi.getTrack(t)->getEventPointer(i)->message;
+            trackEnd=std::max(trackEnd,m.getTimeStamp()/ppq);
+            if ((track == -1 || track == t) && (channel == 0 || m.getChannel() == channel) && (m.isNoteOn() || m.isNoteOff())) {
+                selected.addEvent(m);hasSelectedNotes=hasSelectedNotes||m.isNoteOn();
+            }
+        }
+        // An unrelated track (including a long conductor track) must not pad
+        // a shorter imported part. Preserve the selected tracks' own rests/EOT.
+        if(version==2||hasSelectedNotes)end=std::max(end,trackEnd);
     }
     selected.updateMatchedPairs();
     juce::Array<juce::var> notes;

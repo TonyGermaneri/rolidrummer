@@ -2,6 +2,7 @@
 #include <drummer/PatternAnalysis.h>
 #include <drummer/MidiImport.h>
 #include <drummer/Json.h>
+#include <juce_cryptography/juce_cryptography.h>
 #include "../src/LibrarySqlite.h"
 #include <iostream>
 #include <future>
@@ -50,6 +51,44 @@ int main() { try {
     check(notes.getArray()->size() == 1, "MIDI note count changed");
     check(std::abs(number((*notes.getArray())[0], "beat", 0) - .0125) < 1e-12, "Human timing changed");
     check(number(clip, "length", 0) == 8, "Trailing silence lost");
+    {
+        juce::MidiFile midi;midi.setTicksPerQuarterNote(960);
+        juce::MidiMessageSequence shortPart,longPart,conductor;
+        shortPart.addEvent(juce::MidiMessage::noteOn(10,36,(juce::uint8)100),0);shortPart.addEvent(juce::MidiMessage::noteOff(10,36),120);shortPart.addEvent(juce::MidiMessage::endOfTrack(),3840);
+        longPart.addEvent(juce::MidiMessage::noteOn(11,42,(juce::uint8)100),0);longPart.addEvent(juce::MidiMessage::noteOff(11,42),120);longPart.addEvent(juce::MidiMessage::endOfTrack(),7680);
+        conductor.addEvent(juce::MidiMessage::tempoMetaEvent(500000),0);conductor.addEvent(juce::MidiMessage::endOfTrack(),15360);
+        midi.addTrack(shortPart);midi.addTrack(longPart);midi.addTrack(conductor);
+        check(number(importMidi(midi,"Mixed.mid",10),"length",0)==4,"Short part inherited another track's loop length");
+        check(number(importMidi(midi,"Mixed.mid",11),"length",0)==8,"Long part lost its own loop length");
+        check(number(importMidi(midi,"Mixed.mid",0,0),"length",0)==4,"Selected track inherited unrelated empty bars");
+        check(number(importMidi(midi,"Mixed.mid",0),"length",0)==8,"Conductor track padded the combined pattern");
+        check(number(importMidi(midi,"Mixed.mid",10,-1,2),"length",0)==16,"Historical MIDI import semantics changed");
+        // A historical catalog pins its old parser; importing again publishes
+        // corrected lengths without breaking a saved historical binding.
+        Fixture f;const auto source=f.root.getChildFile("parts");source.createDirectory();const auto path=source.getChildFile("Mixed.mid");
+        juce::MemoryOutputStream output;check(midi.writeTo(output),"Cannot create mixed-loop fixture");const auto payload=output.getMemoryBlock();path.replaceWithData(payload.getData(),payload.getSize());
+        const auto database=f.root.getChildFile("historical.sqlite");PatternLibrary originalCatalog(database);
+        const auto old=analyzePattern(importMidi(midi,path.getFullPathName(),10,-1,2),path.getFullPathName());
+        const auto oldId=get(old,"id").toString(),payloadId=juce::SHA256(payload).toHexString();
+        {
+            sql::Database writer(database);
+            writer.exec("INSERT INTO runs(id,source_id,fingerprint,mapping,state,total,mapping_version,import_version) VALUES('old-run','old-source','old','{}','complete',1,2,2)");
+            sql::Statement bytes(writer,"INSERT INTO payloads VALUES(?,?)");bytes.text(1,payloadId);bytes.blob(2,payload);bytes.done();
+            sql::Statement pattern(writer,"INSERT INTO patterns VALUES(?,?,10,-1,'{}',16,4,4,0,0,1,?)");pattern.text(1,oldId);pattern.text(2,payloadId);pattern.text(3,juce::JSON::toString(get(old,"features"),true));pattern.done();
+            sql::Statement entry(writer,"INSERT INTO entries VALUES('old-run',0,?,'')");entry.text(1,path.getFullPathName());entry.done();
+            sql::Statement binding(writer,"INSERT INTO bindings VALUES('old-binding','old-run',0,?,'old-description','','groove',?,10,-1,'{}')");binding.text(1,oldId);binding.text(2,payloadId);binding.done();
+            writer.exec("ALTER TABLE runs DROP COLUMN import_version;UPDATE catalog_schema SET version=1 WHERE component='patterns'");
+        }
+        PatternLibrary catalog(database);
+        const auto recalled=catalog.pattern("old-binding");
+        check(number(recalled,"length",0)==16&&number(recalled,"loopLength",0)==4,"Historical identity or corrected playable loop was lost");
+        catalog.importSource(source);
+        bool shortFound=false;const auto currentRows=get(catalog.browse(),"rows");for(const auto& row:*currentRows.getArray()){
+            const auto current=catalog.pattern(get(row,"id").toString());
+            if((int)get(current,"channel")==10){check(number(current,"length",0)==4,"New catalog import kept the old padded loop");shortFound=true;}
+        }
+        check(shortFound&&number(catalog.pattern("old-binding"),"length",0)==16,"Reimport invalidated historical bindings or lost the short part");
+    }
     auto padded = bytes;
     padded.append("vendor trailer", 14);
     check(get(parse(padded), "notes").getArray()->size() == 1, "Vendor trailer caused a valid SMF track to be rejected");

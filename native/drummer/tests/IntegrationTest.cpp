@@ -21,6 +21,12 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   player.prepareToPlay(48000,256);Head head;check(render(player,head,true)>.1,"Restored external sample is silent");return 0;
  }
  auto doc=drummer::defaultDocument();auto runtime=drummer::compileDocument(doc);check(runtime->config.clips.size()==3,"Factory patterns missing");
+ {
+  check(runtime->config.latchGrid==4,"Default latch quantization is not one bar");
+  auto quantized=doc.clone();quantized.getDynamicObject()->setProperty("latchBars",2);quantized.getDynamicObject()->setProperty("neural",juce::JSON::parse(R"({"version":1,"numerator":7,"denominator":8})"));
+  check(drummer::compileDocument(quantized)->config.latchGrid==7,"Latch bars ignored the patch's 7/8 meter");
+  quantized.getDynamicObject()->setProperty("latchQuantize",false);check(drummer::compileDocument(quantized)->config.latchGrid==0,"Latch quantization bypass was ignored");
+ }
  // Master settings migrate dry and survive native patch/session compilation.
  {
   check(runtime->performance->fx.cutoff==20000 && runtime->performance->fx.sources[0]==-1,"Legacy master defaults changed the sound");
@@ -107,7 +113,7 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
  // Every mode gives a key one zone/owner, in both audible output and editor telemetry.
  {
   for(const char* mode:{"normal","hold","toggle"}){
-   auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);patch.getDynamicObject()->setProperty("launchGrid",0);patch.getDynamicObject()->setProperty("switchGrid",0);
+   auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);patch.getDynamicObject()->setProperty("latchQuantize",false);patch.getDynamicObject()->setProperty("launchGrid",0);patch.getDynamicObject()->setProperty("switchGrid",0);
    auto key=(*patch.getProperty("keys",{}).getArray())[0].clone();auto settings=key.getProperty("sound",{}).getProperty("s",{});
    settings.getDynamicObject()->setProperty("mode","hold");settings.getDynamicObject()->setProperty("delayMix",0);settings.getDynamicObject()->setProperty("reverbMix",0);
    key.getDynamicObject()->setProperty("routes",juce::JSON::parse(R"([{"source":1,"target":"pan","min":-1,"max":1,"curve":1,"smoothing":0}])"));
@@ -158,7 +164,7 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
   legacy.getDynamicObject()->setProperty("keyboardMode","invalid");
   check(juce::JSON::parse(drummer::compileDocument(legacy)->json).getProperty("keyboardMode",{}).toString()=="normal","Invalid keyboard mode was not canonicalized");
   for(const char* mode:{"hold","toggle"}){
-   DrummerProcessor player;auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);
+   DrummerProcessor player;auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);patch.getDynamicObject()->setProperty("latchQuantize",false);
    patch.getDynamicObject()->setProperty("launchGrid",0);patch.getDynamicObject()->setProperty("switchGrid",0);
    player.apply(drummer::compileDocument(patch));player.prepareToPlay(48000,256);Head head;head.playing=false;player.setPlayHead(&head);
    juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer midi;DrummerProcessor::FingerSnapshot snapshot;
@@ -225,7 +231,7 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
  // A software Hold/Toggle latch produces the same samples as a physical hold until pedal-up.
  {
   auto modeRender=[&](const char* mode,int block){
-   DrummerProcessor player;auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);
+   DrummerProcessor player;auto patch=doc.clone();patch.getDynamicObject()->setProperty("keyboardMode",mode);patch.getDynamicObject()->setProperty("latchQuantize",false);
    player.apply(drummer::compileDocument(patch));player.prepareToPlay(48000,2048);Head head;head.playing=false;player.setPlayHead(&head);
    juce::AudioBuffer<float> audio(2,2048);juce::MidiBuffer midi;std::vector<float> result;
    const bool normal=std::string(mode)=="normal";

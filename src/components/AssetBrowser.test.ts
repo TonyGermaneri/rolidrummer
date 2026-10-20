@@ -8,6 +8,7 @@ vi.mock('../store', async () => {
   fake.state = reactive({ patch: {}, error: '' }); fake.shared = reactive({})
   return {
     state: fake.state, shared: fake.shared, refreshShared: async () => {}, writeShared: fake.write,
+    soundPreview: reactive({kit:null,ready:false}),
     attempt: async (job: () => Promise<unknown>) => { try { return await job() } catch (error) { fake.state.error = String(error) } },
   }
 })
@@ -24,6 +25,7 @@ vi.mock('../canvas/treeGraph.js', () => ({ TreeGraph: class {
   destroy() { this.destroyed = true }
 } }))
 import AssetBrowser from './AssetBrowser.vue'
+import {factoryAssets} from '../model'
 let cleanup: (() => void)[] = []
 beforeEach(() => {
   vi.useFakeTimers(); vi.stubGlobal('document', { activeElement: null })
@@ -41,6 +43,16 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup.forEach(fn => fn()); cleanup = []; vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals() })
 async function render(patterns = false) { const view = await mount(AssetBrowser, { patterns }); cleanup.push(view.unmount); return view }
+it('assigns a selected browser sound directly to the sidebar target keywave',async()=>{
+ const view=await mount(AssetBrowser,{assignTo:50,soundOnly:true});cleanup.push(view.unmount)
+ const asset=factoryAssets().find(asset=>asset.name==='Snare')!
+ const grid=find(view.root,n=>n.tag==='grid-contract')
+ grid.props.onPick(asset);await settle()
+ await event(find(view.root,n=>n.tag==='button'&&n.textContent.includes('ASSIGN TO')),'click')
+ expect(fake.state.patch.keys.find((key:any)=>key.note===50).sound.s.name).toBe('Snare')
+ expect(fake.state.selected).toBe(50)
+ expect(fake.state.patch.keys.find((key:any)=>key.note===50).parts).toEqual([42])
+})
 const directory = (root: any) => find(root, n => n.props['aria-label'] === 'Library directory')
 
 describe('browser component contracts', () => {

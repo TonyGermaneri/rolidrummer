@@ -67,7 +67,7 @@ juce::var defaultDocument(){
   keys.add(object({{"note",get(v,"note")},{"name",get(v,"name")},{"parts",get(v,"parts")},{"zoneSource",2},{"zones",zones},{"routes",get(v,"routes")},{"mpeDefaultsVersion",1},{"sound",object({{"path",get(v,"source")},{"s",settings}})}}));
  }
  juce::Array<juce::var> cc;for(int n:{107,109,111,113,114})cc.add(n);
- return object({{"version",1},{"id","builtin:factory"},{"name",get(data,"name")},{"keys",keys},{"clips",get(data,"clips")},{"templateZones",zones},{"launchGrid",.25},{"switchGrid",.25},{"hardRelease",false},{"sustainCC",64},{"keyboardMode","normal"},{"volume",.8},{"bpm",120.},{"globalCC",cc},{"globalRoutes",juce::Array<juce::var>()}});
+ return object({{"version",1},{"id","builtin:factory"},{"name",get(data,"name")},{"keys",keys},{"clips",get(data,"clips")},{"templateZones",zones},{"launchGrid",.25},{"switchGrid",.25},{"hardRelease",false},{"sustainCC",64},{"keyboardMode","normal"},{"latchQuantize",true},{"latchBars",1},{"volume",.8},{"bpm",120.},{"globalCC",cc},{"globalRoutes",juce::Array<juce::var>()}});
 }
 std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  auto doc=input.clone();
@@ -98,6 +98,10 @@ std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  c.keyboardMode=mode=="toggle"?KeyboardMode::toggle:mode=="hold"?KeyboardMode::hold:KeyboardMode::normal;
  doc.getDynamicObject()->setProperty("keyboardMode",c.keyboardMode==KeyboardMode::toggle?"toggle":c.keyboardMode==KeyboardMode::hold?"hold":"normal");
  c.hysteresis=(float)number(doc,"hysteresis",.015,0,.1);c.masterChannel=(int)number(doc,"masterChannel",0,0,15);
+ const bool latchQuantize=(bool)get(doc,"latchQuantize",true);const int latchBars=(int)number(doc,"latchBars",1,0,16);
+ const auto intentMeter=get(doc,"neural");const double latchBar=number(intentMeter,"numerator",4,1,64)*4/number(intentMeter,"denominator",4,1,32);
+ c.latchGrid=latchQuantize?latchBars*latchBar:0;
+ doc.getDynamicObject()->setProperty("latchQuantize",latchQuantize);doc.getDynamicObject()->setProperty("latchBars",latchBars);
  std::map<juce::String,int> clipIndex;std::map<juce::String,int> contentIndex;
  std::set<juce::String> boundClips,allClipIds;
  if(auto keys=get(doc,"keys");auto* list=keys.getArray())for(const auto& key:*list)
@@ -111,9 +115,9 @@ std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  if(auto value=get(doc,"clips");auto* list=value.getArray())for(const auto& item:*list){
   auto id=get(item,"id").toString();if(id.isEmpty() || !allClipIds.insert(id).second)throw std::runtime_error("Pattern IDs must be unique");
   if(!boundClips.count(id))continue; // Library choices are retained in the patch, but only bound patterns need a bus.
-  auto identity=juce::JSON::toString(get(item,"notes"))+":"+get(item,"length").toString()+":"+get(item,"origin",0).toString();
+  auto identity=juce::JSON::toString(get(item,"notes"))+":"+get(item,"loopLength",get(item,"length")).toString()+":"+get(item,"origin",0).toString();
   if(contentIndex.count(identity)){clipIndex[id]=contentIndex[identity];continue;}
-  Clip clip;clip.id=(uint64_t)juce::SHA256(identity.toUTF8()).toHexString().substring(0,16).getHexValue64();if(!clip.id)clip.id=1;clip.length=number(item,"length",4,.001,100000);clip.origin=number(item,"origin",0,-100000,100000);
+  Clip clip;clip.id=(uint64_t)juce::SHA256(identity.toUTF8()).toHexString().substring(0,16).getHexValue64();if(!clip.id)clip.id=1;const double sourceLength=number(item,"length",4,.001,100000);clip.length=number(item,"loopLength",sourceLength,.001,sourceLength);clip.origin=number(item,"origin",0,-100000,100000);
   if(auto value=get(item,"notes");auto* notes=value.getArray())for(const auto& n:*notes){
    if(clip.notes.size()>=100000)throw std::runtime_error("Pattern exceeds 100000 notes");
    clip.notes.push_back({number(n,"beat",0,0,clip.length),number(n,"duration",.1,.00001,100000),(int)number(n,"note",36,0,127),(float)number(n,"velocity",1,0,1)});

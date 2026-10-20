@@ -8,13 +8,15 @@ import { SharedView } from '../lib/sharedView'
 import { state, shared, writeShared, attempt, refreshShared } from '../store'
 import { request, native } from '../native/bridge'
 import { currentTheme } from '../theme/current'
-import { begin, htmlDrag } from '../drag'
+import { begin, htmlDrag, drop } from '../drag'
+import {rememberSoundRoot} from '../kits'
+import {midiNoteName} from '../lib/format'
 import { factoryAssets } from '../model'
 import { preview, audition, stopPreview } from '../preview'
 
 interface Navigation { path: string; query: string; view: string }
 interface Arrangement { camera: unknown; places: Record<string, number[]>; open: string[] }
-const props = withDefaults(defineProps<{ patterns?: boolean; patches?: (Asset & {keyCount:number;patternCount:number})[]; currentId?:string; disabled?:boolean }>(),{patterns:false})
+const props = withDefaults(defineProps<{ patterns?: boolean; patches?: (Asset & {keyCount:number;patternCount:number})[]; currentId?:string; disabled?:boolean;assignTo?:number;soundOnly?:boolean }>(),{patterns:false})
 const emit=defineEmits<{loadPatch:[id:string]}>()
 const isPatches=computed(()=>props.patches!==undefined)
 const kind = computed(() => isPatches.value?'patches':props.patterns ? 'patterns' : 'sounds')
@@ -72,7 +74,7 @@ async function navigate(next: string) {
   const active = navigation, ticket = loadId + 1
   clearTimeout(viewTimer)
   active?.begin()
-  try { if (await load(next)) remember() }
+  try { if (await load(next)) {remember();if(!props.patterns&&!isPatches.value)await rememberSoundRoot(next)} }
   catch (error) {
     // A failed directory read must not leave remote navigation deferred forever.
     if (active === navigation && ticket === loadId) active?.cancel()
@@ -80,7 +82,7 @@ async function navigate(next: string) {
   }
 }
 async function choose() { const ticket = bootId; const folder = await request<string | null>('chooseFolder'); if (folder && !disposed && ticket === bootId) await navigate(folder) }
-function use(asset: Asset) { chosen.value = asset;if(isPatches.value){if(!props.disabled)emit('loadPatch',asset.id);return} if (asset.folder) void attempt(() => navigate(asset.path)) }
+function use(asset: Asset) { chosen.value = asset;if(isPatches.value){if(!props.disabled)emit('loadPatch',asset.id);return} if (asset.folder) void attempt(() => navigate(asset.path));else if(props.assignTo!==undefined)void attempt(()=>drop(asset,false,`key:${props.assignTo}`,props.soundOnly)) }
 function remember() {
   if (remote || disposed) return
   navigation?.begin()
@@ -201,13 +203,13 @@ onBeforeUnmount(() => {if(preview.id)void attempt(stopPreview); disposed = true;
   <div class="segmented"><button :class="{active:view==='grid'}" @click="view='grid'">Grid</button><button :class="{active:view==='graph'}" @click="view='graph'">Graph</button></div>
  </div>
  <div class="browser-body">
-  <DataGrid v-if="view==='grid'" :rows="visible" :columns="columns" :chosen="chosen||undefined" :view-state="gridState" @interaction="gridView?.begin()" @view="saveGrid" @pick="chosen=$event" @use="use" @drag="(asset:any,event:any)=>!isPatches&&begin(asset,patterns,event)" @cell="(column:string,asset:Asset)=>isPatches?(column==='load'&&use(asset)):(column==='preview'&&attempt(()=>audition(asset,patterns)))" @key="(event:any,asset:Asset)=>{if(!isPatches&&(event.key||event.NativeEvent?.key)===' '&&asset){event.preventDefault();attempt(()=>audition(asset,patterns))}}"/>
+  <DataGrid v-if="view==='grid'" :rows="visible" :columns="columns" :chosen="chosen||undefined" :view-state="gridState" @interaction="gridView?.begin()" @view="saveGrid" @pick="chosen=$event" @use="use" @drag="(asset:any,event:any)=>!isPatches&&begin(asset,patterns,event,soundOnly)" @cell="(column:string,asset:Asset)=>isPatches?(column==='load'&&use(asset)):(column==='preview'&&attempt(()=>audition(asset,patterns)))" @key="(event:any,asset:Asset)=>{if(!isPatches&&(event.key||event.NativeEvent?.key)===' '&&asset){event.preventDefault();attempt(()=>audition(asset,patterns))}}"/>
   <div v-else ref="box" class="graph-box" @pointerdown.capture="touchGraph" @wheel.capture.passive="touchGraph">
-   <div v-for="one in labels" :key="one.asset.id" class="graph-asset" :style="{left:`${one.x}px`,top:`${one.y}px`,opacity:one.dim?.25:1}"><button v-if="!isPatches&&!one.asset.folder" class="preview-button" :aria-label="`${preview.id===one.asset.id?'Stop':'Preview'} ${one.asset.name}`" @pointerdown.stop @click.stop="attempt(()=>audition(one.asset,patterns))">{{preview.id===one.asset.id?'■':'▶'}}</button><button class="graph-label" :class="{'patch-chosen':isPatches&&chosen?.id===one.asset.id}" :draggable="!isPatches&&!one.asset.folder" @dragstart="!isPatches&&htmlDrag($event,one.asset,patterns)" @click="chosen=one.asset" @dblclick="use(one.asset)" @keydown.enter.prevent="use(one.asset)">{{one.asset.folder?'▸ ':''}}{{one.asset.name}}</button></div>
+   <div v-for="one in labels" :key="one.asset.id" class="graph-asset" :style="{left:`${one.x}px`,top:`${one.y}px`,opacity:one.dim?.25:1}"><button v-if="!isPatches&&!one.asset.folder" class="preview-button" :aria-label="`${preview.id===one.asset.id?'Stop':'Preview'} ${one.asset.name}`" @pointerdown.stop @click.stop="attempt(()=>audition(one.asset,patterns))">{{preview.id===one.asset.id?'■':'▶'}}</button><button class="graph-label" :class="{'patch-chosen':isPatches&&chosen?.id===one.asset.id}" :draggable="!isPatches&&!one.asset.folder" @dragstart="!isPatches&&htmlDrag($event,one.asset,patterns,soundOnly)" @click="chosen=one.asset" @dblclick="use(one.asset)" @keydown.enter.prevent="use(one.asset)">{{one.asset.folder?'▸ ':''}}{{one.asset.name}}</button></div>
   </div>
   <div v-if="busy" class="loading">{{isPatches?'Updating patches…':'Reading directory…'}}</div>
  </div>
  <footer v-if="isPatches" class="browser-footer"><span>{{visible.length}} patches · Double-click or press Enter to load</span><button class="ssb-button" :disabled="!chosen||disabled" @click="chosen&&use(chosen)">{{chosen?`LOAD ${chosen.name}`:'SELECT A PATCH'}}</button></footer>
- <footer v-else class="browser-footer"><span>{{visible.length}} items · {{patterns?'Drag a MIDI file to a zone':'Drag a sound to a key'}} · ▶ to listen · Double-click folders to open</span><button v-if="preview.id" @click="attempt(stopPreview)">{{preview.loading?'Loading…':'■ Stop preview'}}</button><button v-if="chosen&&!chosen.folder" draggable="true" @dragstart="htmlDrag($event,chosen!,patterns)">{{chosen.name}} ↗</button><span v-if="!native()">Native app required for folders</span></footer>
+ <footer v-else class="browser-footer"><span>{{visible.length}} items · {{patterns?'Drag a MIDI file to a zone':'Drag a sound to a key'}} · ▶ to listen · Double-click folders to open</span><button v-if="assignTo!==undefined" class="assign-sound" :disabled="!chosen||chosen.folder" @click="chosen&&use(chosen)">ASSIGN TO {{midiNoteName(assignTo)}}</button><button v-if="preview.id" @click="attempt(stopPreview)">{{preview.loading?'Loading…':'■ Stop preview'}}</button><button v-if="chosen&&!chosen.folder" draggable="true" @dragstart="htmlDrag($event,chosen!,patterns,soundOnly)">{{chosen.name}} ↗</button><span v-if="!native()">Native app required for folders</span></footer>
 </section>
 </template>

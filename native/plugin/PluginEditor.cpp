@@ -5,6 +5,7 @@
 #include <drummer/NeuralIndex.h>
 #include <drummer/PatchResolver.h>
 #include <drummer/PatternFamilies.h>
+#include <drummer/SoundMatcher.h>
 namespace {
 juce::var answer(juce::var result){auto*o=new juce::DynamicObject;o->setProperty("ok",true);o->setProperty("result",result);return o;}
 juce::var failure(const juce::String& error){auto*o=new juce::DynamicObject;o->setProperty("ok",false);o->setProperty("error",error);return o;}
@@ -15,7 +16,7 @@ DrummerEditor::DrummerEditor(DrummerProcessor&p):AudioProcessorEditor(p),plugin(
  .withNativeFunction("rdRequest",[this](const auto&args,auto complete){request(args,complete);})){
  addAndMakeVisible(browser);setResizable(true,false);addAndMakeVisible(resizeBorder);addAndMakeVisible(resizeCorner);resizeBorder.setBorderThickness(juce::BorderSize<int>(12));resizeCorner.setColour(juce::ResizableWindow::backgroundColourId,background);setResizeLimits(900,600,2600,1600);setSize(plugin.editorWidth,plugin.editorHeight);browser.goToURL(juce::WebBrowserComponent::getResourceProviderRoot());startTimerHz(30);
 }
-DrummerEditor::~DrummerEditor(){stopTimer();plugin.stopPreview();}
+DrummerEditor::~DrummerEditor(){stopTimer();plugin.stopPreview();plugin.cancelKitPreview();}
 void DrummerEditor::paint(juce::Graphics& g){g.fillAll(background);}
 void DrummerEditor::resized(){
  // Reserve a native margin and an unobstructed, fully clickable resize grip.
@@ -37,12 +38,13 @@ void DrummerEditor::request(const juce::Array<juce::var>&args,Complete complete)
   if(colour.length()!=7||colour[0]!='#'||colour.substring(1).containsOnly("0123456789abcdefABCDEF")==false){complete(failure("Invalid theme colour"));return;}
   background=juce::Colour::fromString("ff"+colour.substring(1));resizeCorner.setColour(juce::ResizableWindow::backgroundColourId,background);repaint();resizeCorner.repaint();complete(answer(true));return;
  }
- if(method=="ready"){pageReady=true;auto* o=new juce::DynamicObject;o->setProperty("document",juce::JSON::parse(plugin.document()));o->setProperty("standalone",plugin.wrapperType==juce::AudioProcessor::wrapperType_Standalone);o->setProperty("revision",(juce::int64)plugin.stateRevision.load());o->setProperty("activationPending",plugin.activationPending());complete(answer(o));return;}
+ if(method=="ready"){plugin.cancelKitPreview();pageReady=true;auto* o=new juce::DynamicObject;o->setProperty("document",juce::JSON::parse(plugin.document()));o->setProperty("standalone",plugin.wrapperType==juce::AudioProcessor::wrapperType_Standalone);o->setProperty("revision",(juce::int64)plugin.stateRevision.load());o->setProperty("activationPending",plugin.activationPending());complete(answer(o));return;}
  if(method=="monitorKey"){monitoredKey=std::clamp((int)payload,0,127);sentPattern.clear();complete(answer(true));return;}
  if(method=="midi"){if(auto* bytes=payload.getArray();bytes&&bytes->size()>=3)plugin.screenMidi.push({(uint8_t)(int)(*bytes)[0],(uint8_t)(int)(*bytes)[1],(uint8_t)(int)(*bytes)[2],3});complete(answer(true));return;}
  if(method=="transport"){plugin.standalonePlaying=(bool)payload;complete(answer(true));return;}
  if(method=="parameter"){auto id=payload.getProperty("id",{}).toString();if(auto*param=plugin.parameters.getParameter(id)){param->beginChangeGesture();param->setValueNotifyingHost(param->convertTo0to1((float)(double)payload.getProperty("value",0)));param->endChangeGesture();}complete(answer(true));return;}
  if(method=="stopPreview"){plugin.stopPreview();complete(answer(true));return;}
+ if(method=="cancelKitPreview"){plugin.cancelKitPreview();complete(answer(true));return;}
  if(method=="libraryImport"||method=="libraryCancel"||method=="libraryIndex"||method=="libraryFamilyRefresh"){
   try{
    if(!plugin.library)throw std::runtime_error("Pattern library is unavailable");
@@ -74,10 +76,11 @@ void DrummerEditor::request(const juce::Array<juce::var>&args,Complete complete)
   });return;
  }
  const auto previewSerial=method=="preview"?++plugin.previewRequest:0;
+ const auto kitSerial=method=="previewKit"?plugin.beginKitPreview():0;
  const auto previewDocument=method=="preview"?plugin.document():juce::String();
  auto* p=&plugin;auto life=std::weak_ptr<int>(plugin.life);juce::Component::SafePointer<DrummerEditor> safe(this);
- auto& queue=(method=="librarySearch"||method=="libraryResolve"||method=="libraryBrowse"||method.startsWith("libraryFamily"))?plugin.neuralJobs:plugin.jobs;
- queue.addJob([p,life,safe,method,payload,complete,previewSerial,previewDocument]{
+ auto& queue=(method=="soundMatch"||method=="librarySearch"||method=="libraryResolve"||method=="libraryBrowse"||method.startsWith("libraryFamily"))?plugin.neuralJobs:plugin.jobs;
+ queue.addJob([p,life,safe,method,payload,complete,previewSerial,previewDocument,kitSerial]{
   juce::var result;std::shared_ptr<std::unique_ptr<drummer::Runtime>> built;std::shared_ptr<std::unique_ptr<drummer::Preview>> audition;
   try{
    if(method=="preview"){
@@ -89,6 +92,8 @@ void DrummerEditor::request(const juce::Array<juce::var>&args,Complete complete)
     audition=std::make_shared<std::unique_ptr<drummer::Preview>>(std::make_unique<drummer::Preview>(drummer::compileDocument(doc),pattern,p->previewRate.load(),p->previewBlock.load()));result=answer(true);
    }
    else if(method=="setDocument"){built=std::make_shared<std::unique_ptr<drummer::Runtime>>(drummer::compileDocument(payload.getProperty("document",payload)));result=answer(true);}
+   else if(method=="previewKit")result=answer(p->previewKit(payload.getProperty("kit",{}),(uint64_t)(juce::int64)payload.getProperty("revision",-1),kitSerial));
+   else if(method=="soundMatch")result=answer(drummer::matchSoundKit(drummer::dataDirectory().getChildFile("sound-vectors.sqlite"),payload));
    else if(method=="listDirectory")result=answer(drummer::listDirectory(juce::File(payload.getProperty("path",{}).toString()),(bool)payload.getProperty("patterns",false)));
    else if(method=="waveform")result=answer(drummer::waveform(payload));
    else if(method=="inspectMidi")result=answer(drummer::inspectMidi(juce::File(payload.toString())));
@@ -108,7 +113,7 @@ void DrummerEditor::request(const juce::Array<juce::var>&args,Complete complete)
     const auto directory=drummer::dataDirectory();
     auto bytes=[](const juce::File& file){return file.getSize()+file.getSiblingFile(file.getFileName()+"-wal").getSize()+file.getSiblingFile(file.getFileName()+"-shm").getSize();};
     juce::Array<juce::var> databases;
-    for(const auto& name:{"shared.sqlite","library.sqlite"}){const auto file=directory.getChildFile(name);databases.add(drummer::json::object({{"name",name},{"path",file.getFullPathName()},{"bytes",(juce::int64)bytes(file)}}));}
+    for(const auto& name:{"shared.sqlite","library.sqlite","sound-vectors.sqlite"}){const auto file=directory.getChildFile(name);databases.add(drummer::json::object({{"name",name},{"path",file.getFullPathName()},{"bytes",(juce::int64)bytes(file)}}));}
     const auto sounds=directory.getChildFile("assets").findChildFiles(juce::File::findFiles,false);
     juce::int64 soundBytes=0;for(const auto& file:sounds)soundBytes+=file.getSize();
     result=answer(drummer::json::object({{"directory",directory.getFullPathName()},{"databases",databases},{"sounds",(int)sounds.size()},{"soundBytes",soundBytes},
@@ -148,6 +153,7 @@ void DrummerEditor::timerCallback(){
    f->setProperty("owner",juce::String((juce::int64)view.owner));f->setProperty("sustained",view.sustained);f->setProperty("toggled",view.toggled);f->setProperty("playing",view.playing);
    f->setProperty("channel",view.channel);f->setProperty("note",view.note);f->setProperty("zone",view.zone);
    f->setProperty("candidate",view.candidate);
+   f->setProperty("queued",view.queued);
    f->setProperty("slide",view.slide);f->setProperty("glide",view.glide);f->setProperty("pressure",view.pressure);fingers.add(juce::var(f));
   }
   o->setProperty("fingers",fingers);
@@ -163,13 +169,13 @@ void DrummerEditor::timerCallback(){
   const auto* runtime=snapshot.runtime;
   auto version=juce::String::toHexString(snapshot.patternHash.data(),(int)snapshot.patternHash.size(),0);
   auto identity=version+":"+juce::String((juce::int64)snapshot.epoch)+":"+juce::String(monitoredKey)+":"+juce::String(pattern.clip)+":"+juce::String(pattern.known?1:0);
-  auto* position=new juce::DynamicObject;position->setProperty("key",monitoredKey);position->setProperty("phase",pattern.phase);position->setProperty("playing",pattern.playing);position->setProperty("zone",pattern.zone);position->setProperty("candidate",pattern.candidate);position->setProperty("identity",identity);
+  auto* position=new juce::DynamicObject;position->setProperty("key",monitoredKey);position->setProperty("phase",pattern.phase);position->setProperty("beat",pattern.beat);position->setProperty("playing",pattern.playing);position->setProperty("zone",pattern.zone);position->setProperty("candidate",pattern.candidate);position->setProperty("identity",identity);
   o->setProperty("patternPosition",position);
   if(identity!=sentPattern){
    sentPattern=identity;auto* data=new juce::DynamicObject;data->setProperty("identity",identity);data->setProperty("key",monitoredKey);data->setProperty("known",pattern.known);data->setProperty("name","Silent zone");data->setProperty("length",4.0);
    juce::Array<juce::var> notes;
    if(runtime&&pattern.known&&pattern.clip>=0&&pattern.clip<(int)runtime->config.clips.size()){
-    const auto& clip=runtime->config.clips[(size_t)pattern.clip];data->setProperty("name",runtime->clipNames[(size_t)pattern.clip]);data->setProperty("length",clip.length);
+    const auto& clip=runtime->config.clips[(size_t)pattern.clip];data->setProperty("name",runtime->clipNames[(size_t)pattern.clip]);data->setProperty("length",clip.length);data->setProperty("origin",clip.origin);
     int count=0;for(const auto& note:clip.notes)if(runtime->config.keys[(size_t)monitoredKey].parts[(size_t)note.note]){
      ++count;if(notes.size()>=8192)continue;
      auto* n=new juce::DynamicObject;n->setProperty("beat",note.beat);n->setProperty("duration",note.duration);n->setProperty("note",note.note);n->setProperty("velocity",note.velocity);notes.add(n);

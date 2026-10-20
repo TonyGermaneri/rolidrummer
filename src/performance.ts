@@ -2,10 +2,10 @@ import { reactive, ref, onMounted, onBeforeUnmount } from 'vue'
 
 export interface RollNote { beat:number;duration:number;note:number;velocity:number }
 export interface PlayedNote extends RollNote { key:number;owner:string;token:string;end:number }
-export interface PatternView { identity:string;key:number;known:boolean;name:string;length:number;notes:RollNote[];totalNotes?:number }
-export interface PatternPosition { identity:string;key:number;phase:number;playing:boolean;zone:number;candidate:number }
+export interface PatternView { identity:string;key:number;known:boolean;name:string;length:number;notes:RollNote[];totalNotes?:number;origin?:number }
+export interface PatternPosition { identity:string;key:number;phase:number;playing:boolean;zone:number;candidate:number;beat?:number }
 export interface PlayedEvent { type:number;epoch:number;beat:number;duration:number;key:number;note:number;velocity:number;owner:string;token:string }
-export const performanceView=reactive({epoch:-1,beat:0,bpm:120,received:0,dropped:0,notes:[] as PlayedNote[],patterns:{} as Record<number,{pattern:PatternView;position:PatternPosition;received:number}>})
+export const performanceView=reactive({epoch:-1,beat:0,bpm:120,received:0,dropped:0,notes:[] as PlayedNote[],hits:{} as Record<number,{when:number;velocity:number}>,patterns:{} as Record<number,{pattern:PatternView;position:PatternPosition;received:number}>})
 export const historyLimit=8192
 const now=()=>typeof performance==='undefined'?Date.now():performance.now()
 let patternVersion=''
@@ -14,7 +14,7 @@ export function acceptPerformance(data:{performance?:{epoch:number;beat:number;b
  const frame=data.performance
  const received=now()
  if(frame&&Number.isFinite(frame.beat)&&frame.epoch>=performanceView.epoch){
-  if(frame.epoch!==performanceView.epoch){clearPerformance();performanceView.epoch=frame.epoch;performanceView.patterns={}}
+  if(frame.epoch!==performanceView.epoch){clearPerformance();performanceView.hits={};performanceView.epoch=frame.epoch;performanceView.patterns={}}
   performanceView.beat=frame.beat;performanceView.bpm=frame.bpm;performanceView.received=received;performanceView.dropped=frame.dropped
   // Index only potentially active notes. Dense output must not scan the entire
   // retained history once for every note-off in a telemetry batch.
@@ -28,6 +28,8 @@ export function acceptPerformance(data:{performance?:{epoch:number;beat:number;b
    if(event.type===0){
     if(!Number.isInteger(event.note)||event.note<0||event.note>127||!Number.isFinite(event.duration)||event.duration<=0)continue
     performanceView.notes.push({...event,duration:event.duration,end:event.beat+event.duration})
+    const age=Math.max(0,frame.beat-event.beat)*60000/frame.bpm
+    if(age<150)performanceView.hits[event.key]={when:received-age,velocity:event.velocity}
     index(performanceView.notes[performanceView.notes.length-1])
    }else {
     const ending=event.type===1?tokens.get(event.token):event.type===2?owners.get(event.owner):event.type===3?performanceView.notes:undefined
@@ -54,3 +56,8 @@ export function useRollClock(){
  return animationTime
 }
 export function elapsedBeats(time:number,received:number,bpm:number){return Math.min(.1,Math.max(0,(time-received)/1000))*bpm/60}
+export function keyHitLevels(time:number){
+ const levels=new Map<number,number>()
+ for(const [key,hit] of Object.entries(performanceView.hits)){const age=Math.max(0,time-hit.when);if(age<150)levels.set(Number(key),(1-age/150)*Math.max(.25,hit.velocity))}
+ return levels
+}

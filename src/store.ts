@@ -2,10 +2,13 @@ import { reactive, watch } from 'vue'
 import { factory, normalize, clone, type Patch } from './model'
 import { request, native, onNative } from './native/bridge'
 import { acceptPerformance } from './performance'
-export interface Finger {owner?:string;sustained?:boolean;toggled?:boolean;playing?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
+import { withSoundKit, type SoundKit } from './lib/kits'
+export const soundPreview = reactive({ kit: null as SoundKit | null, ready: false })
+let soundPreviewGeneration = 0, documentConflicts = 0
+export interface Finger {owner?:string;sustained?:boolean;toggled?:boolean;playing?:boolean;queued?:boolean;channel:number;note:number;zone:number;slide:number;glide:number;pressure:number;candidate?:number}
 export interface Playhead {id:number;note:number;pos:number;dur:number;velocity:number;grains:boolean}
 export interface GrainMark {voice:number;when:number;pos:number;len:number;dur:number;pan:number;gain:number;reverse:boolean}
-export const state = reactive({ patch: factory(), selected: 48, trackKeywave: false, lastTouchedKey: -1, tab: 'Key', settingsSection: 'libraries', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })
+export const state = reactive({ patch: factory(), selected: 48, trackKeywave: false, lastTouchedKey: -1, tab: 'Keywave', settingsSection: 'libraries', status: '', error: '', ready: false, standalone: false, saving: false, learn: -1, bindSource: -1, telemetry: { bpm: 120, ppq: 0, playing: false, freePlaying: false, revision: 0, voices: 0, peak: 0, clips: 0, overflow: false, macros: [0,0,0,0,0], output: .8, contacts: [] as number[], fingers: [] as Finger[], playheads: [] as Playhead[], grainMarks: [] as GrainMark[], audioTime: 0, slideChannel: -1, slideValue: 0, preview: false, program: -1, programFailed: false, programUnassigned: false, activationPending: false }, history: [] as string[], future: [] as string[] })
 let applying = false, lastSaved = '', lastCheckpoint = '', inFlight = '', generation = 0, nativeRevision = 0, loading = false, legacyIdentityName = ''
 let timer: ReturnType<typeof setTimeout> | undefined, draining: Promise<void> | undefined
 type Pending = { document: Patch; generation: number; activationGrid: number; preserveActivation: boolean }
@@ -13,12 +16,46 @@ let inFlightBoundary = false
 let pending: Pending | undefined
 export function report(e: unknown) { state.error = e instanceof Error ? e.message : String(e) }
 export async function attempt<T>(job: () => Promise<T>): Promise<T | undefined> { try { return await job() } catch (e) { report(e) } }
+export async function cancelSoundPreview() {
+ ++soundPreviewGeneration
+ const active = Boolean(soundPreview.kit)
+ soundPreview.kit = null; soundPreview.ready = false
+ if (active && native()) await request('cancelKitPreview')
+}
+export async function previewSoundKit(kit: SoundKit, guard = () => true) {
+ await flushEdits()
+ if (!guard()) return false
+ // Validate without changing the editable/saved document.
+ withSoundKit(state.patch, kit)
+ const ticket = ++soundPreviewGeneration
+ soundPreview.kit = clone(kit); soundPreview.ready = false
+ try {
+  const accepted = await request<boolean>('previewKit', { kit: clone(kit), revision: nativeRevision })
+  if (ticket !== soundPreviewGeneration) return false
+  if (!accepted || !guard()) { await cancelSoundPreview(); return false }
+  soundPreview.ready = true
+  return true
+ } catch (error) {
+  if (ticket !== soundPreviewGeneration) return false
+  await cancelSoundPreview(); throw error
+ }
+}
+export async function commitSoundPreview() {
+ if (!soundPreview.ready || !soundPreview.kit) return false
+ const kit = clone(soundPreview.kit), conflicts = documentConflicts
+ // Keep the audition audible while its permanent runtime is prepared.
+ ++soundPreviewGeneration; soundPreview.kit = null; soundPreview.ready = false
+ try { state.patch = withSoundKit(state.patch, kit); await flushEdits(true, 0) }
+ catch (error) { if (native()) await request('cancelKitPreview'); throw error }
+ return conflicts === documentConflicts
+}
 function adoptLegacyIdentity(){
  if(state.patch.id||!legacyIdentityName)return
  const matches=Object.values(shared).filter(field=>field.key.startsWith('patch/')&&field.value?.id&&field.value.name===legacyIdentityName)
  if(matches.length===1)state.patch.id=matches[0].value.id
 }
 function adopt(document: Patch,keepIdentityName=false) {
+ void cancelSoundPreview().catch(report)
  applying = true
  try { legacyIdentityName=document.id?'':keepIdentityName&&legacyIdentityName?legacyIdentityName:document.name;state.patch = normalize(clone(document));adoptLegacyIdentity();lastSaved = JSON.stringify(state.patch); lastCheckpoint = lastSaved; if(!state.patch.keys.some(k=>k.note===state.selected))state.selected=state.patch.keys[0]?.note??48 } finally { applying = false }
 }
@@ -29,6 +66,7 @@ export async function init() {
 }
 watch(() => state.patch, () => {
  if (!state.ready || applying) return
+ void cancelSoundPreview().catch(report)
  ++generation
  clearTimeout(timer)
  timer = setTimeout(() => void attempt(flushEdits), 200)
@@ -59,6 +97,7 @@ async function drain() {
   nativeRevision = ack.revision
   if (typeof ack.activationPending === 'boolean') state.telemetry.activationPending = ack.activationPending
   if (ack.conflict) {
+   ++documentConflicts
    clearTimeout(timer); timer = undefined; pending = undefined; ++generation
    adopt(ack.document); state.history = []; state.future = []
    state.status = 'The host restored a different patch. Its current state is now loaded.'
@@ -93,6 +132,7 @@ export async function replace(p: Patch, activation: 'bar' | 'immediate' = 'immed
  await flushEdits(true,activation==='bar'?numerator*4/denominator:0)
 }
 export function undo(redo = false) {
+ void cancelSoundPreview().catch(report)
  const from = redo ? state.future : state.history, to = redo ? state.history : state.future
  if (!from.length) return
  clearTimeout(timer); timer = undefined

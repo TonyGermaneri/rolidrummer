@@ -1,6 +1,7 @@
 // @vitest-environment ./src/testing/environment.ts
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { factory, clone } from '../model'
+import { factory, clone, factoryAssets } from '../model'
+import {htmlDrag,htmlDrop} from '../drag'
 import { event, find, mount, nodes, settle } from '../testing/componentHost'
 
 const backend = vi.hoisted(() => ({ request: vi.fn(), midi: vi.fn(), state: null as any }))
@@ -41,20 +42,43 @@ afterEach(() => { cleanup.forEach(fn => fn()); cleanup = []; finishMidiImport(fa
 async function render(component: any, props = {}) { const view = await mount(component, props); cleanup.push(view.unmount); return view.root }
 
 describe('keywave piano roll contracts',()=>{
+ it('preserves drum filters and mappings through a sound-only drag from a kit or sidebar',async()=>{
+  const key=backend.state.patch.keys[0],parts=clone(key.parts),routes=clone(key.routes),zones=clone(key.zones)
+  const asset=factoryAssets().find(asset=>asset.name==='Snare')!;let payload=''
+  htmlDrag({dataTransfer:{setData:(_type:string,value:string)=>{payload=value}}} as any,asset,false,true)
+  htmlDrop({preventDefault(){},dataTransfer:{getData:()=>payload}} as any,`key:${key.note}`);await settle()
+  expect(key.sound.s.name).toBe('Snare');expect(key.parts).toEqual(parts);expect(key.routes).toEqual(routes);expect(key.zones).toEqual(zones)
+ })
+ it('exposes enabled-by-default latch quantization, instant bypass and bar counts',async()=>{
+  const root=await render(Seaboard,{base:36})
+  const toggle=find(root,n=>n.props['aria-label']==='Quantize latch and unlatch')
+  expect(toggle.props['aria-pressed']).toBe(true)
+  await event(toggle,'click');expect(backend.state.patch.latchQuantize).toBe(false)
+  const bars=find(root,n=>n.props['aria-label']==='Latch quantization bars')
+  bars.options.forEach(option=>{option.selected=option.value===4});await event(bars,'change');expect(backend.state.patch.latchBars).toBe(4)
+  bars.options.forEach(option=>{option.selected=option.value===0});await event(bars,'change');expect(backend.state.patch.latchBars).toBe(0)
+ })
+ it('lights up the source keywave for scheduled pattern notes',async()=>{
+  const root=await render(Seaboard,{base:36})
+  acceptPerformance({performance:{epoch:4,beat:1,bpm:120,dropped:0,events:[{type:0,epoch:4,beat:1,duration:.01,key:48,note:36,velocity:1,owner:'played',token:'hit'}]}});await settle()
+  expect(find(root,n=>n.props['data-playing-key']===48)).toBeDefined()
+ })
  it('splits waveform and pattern preview, showing the actual filtered variation and frozen last marker',async()=>{
   backend.state.ready=true
   const key=backend.state.patch.keys.find((k:any)=>k.note===48)
   const root=await render(SoundPanel,{sound:key.sound,note:48})
   expect(find(root,n=>n.props.class==='scope-pair')).toBeDefined()
   expect(backend.request).toHaveBeenCalledWith('monitorKey',48)
-  const position={identity:'test:1:48:2',key:48,zone:1,candidate:2,phase:2,playing:true}
+  const position={identity:'test:1:48:2',key:48,zone:1,candidate:2,phase:2,beat:6,playing:true}
   acceptPerformance({pattern:{identity:position.identity,key:48,known:true,name:'Live variation',length:4,notes:[{beat:1,duration:.25,note:36,velocity:1}]},patternPosition:position})
   await settle()
   expect(root.textContent).toContain('PLAYINGLive variation')
-  expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(500)
-  acceptPerformance({patternPosition:{...position,phase:2.5,playing:false}});await settle()
+  expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(750)
+  expect(root.textContent).toContain('↻ ×2')
+  expect(find(root,n=>n.props.role==='img'&&n.props.title==='Repeats every 4 beats · showing 8 beats').props['aria-label']).toBe('2 drum notes, playing')
+  acceptPerformance({patternPosition:{...position,phase:2.5,beat:6.5,playing:false}});await settle()
   expect(root.textContent).toContain('LASTLive variation')
-  expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(625)
+  expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(812.5)
  })
  it('shows a filtered mini preview on each key zone and exposes the Track toggle',async()=>{
   const key=backend.state.patch.keys.find((k:any)=>k.note===48)

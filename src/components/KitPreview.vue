@@ -1,0 +1,9 @@
+<script setup lang="ts">
+import {state,soundPreview,attempt} from '../store'
+import {kitState,applySoundPreview,cancelSoundSearch} from '../kits'
+import {midiNoteName} from '../lib/format'
+</script>
+<template><section v-if="soundPreview.kit" class="kit-preview" aria-label="Kit binding preview" aria-live="polite"><header><div><b>{{soundPreview.ready?'PREVIEW':'PREPARING PREVIEW…'}}</b><span>{{soundPreview.kit.name}}</span></div><div class="preview-actions"><button class="apply-kit" :disabled="!soundPreview.ready||kitState.busy||state.saving" @click="attempt(applySoundPreview)">APPLY KIT</button><button @click="cancelSoundSearch">CANCEL</button></div></header><p>Play the keywaves to audition. Apply keeps these sounds.</p><ul aria-label="Preview bindings"><li v-for="binding in soundPreview.kit.keys" :key="binding.note"><b>{{midiNoteName(binding.note)}}</b><span>{{binding.sound.s.name||binding.sound.path.split('/').pop()}}</span></li></ul></section></template>
+<style scoped>
+.kit-preview{border:1px solid var(--c-primary);background:var(--panel-lo);padding:9px;min-height:0;flex-shrink:0}header,header>div,.preview-actions{display:flex;align-items:center;gap:8px}header{justify-content:space-between;flex-wrap:wrap}header>div:first-child{min-width:0;flex-wrap:wrap}header b{color:var(--c-primary);font:10px monospace;letter-spacing:.07em}header span{font-size:11px;overflow-wrap:anywhere}.preview-actions button{font:10px monospace;padding:6px 9px}.apply-kit{border-color:var(--c-primary);color:var(--c-primary)}p{font:10px/1.4 sans-serif;color:var(--text-dim);margin:7px 0}ul{padding:0;margin:0;list-style:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:3px 12px;max-height:120px;overflow:auto}li{display:flex;gap:8px;align-items:baseline;min-width:0;font:10px/1.6 monospace}li b{font-weight:400;color:var(--text-dim);width:28px;flex-shrink:0}li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+</style>

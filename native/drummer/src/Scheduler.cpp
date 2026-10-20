@@ -63,13 +63,15 @@ void prepareClip(Clip& clip) {
     }
     std::sort(clip.timeline.begin(),clip.timeline.end(),[](const auto&a,const auto&b){if(a.beat!=b.beat)return a.beat<b.beat;return a.off>b.off;});
 }
-void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};wasPlaying = false;expected = 0;pendingOffCount=0;keyboardMode=KeyboardMode::normal; }
+void Scheduler::reset() noexcept { fingers = {};sustained = {};pedals = {};latches={};latchGrid=0;wasPlaying = false;expected = 0;pendingOffCount=0;keyboardMode=KeyboardMode::normal; }
 bool Scheduler::hasHeldNotes() const noexcept {
+    for(const auto& latch:latches)if(latch.active)return true;
     for (const auto& f : fingers) if (f.held) return true;
     for (const auto& f : sustained) if (f.held) return true;
     return false;
 }
 void Scheduler::reconfigure(const Configuration& previous,const Configuration& next,double beat,Sink sink,void* ctx) noexcept {
+    for(auto& latch:latches)if(latch.active&&!next.keys[(size_t)latch.next.key].enabled)latch.active=false;
     auto identity=[](const Configuration& cfg,int clip){return clip>=0&&clip<(int)cfg.clips.size()?cfg.clips[(size_t)clip].id:uint64_t(0);};
     for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if((!f.down&&!f.held)||f.suppressed||f.key<0||f.key>=128)continue;
         const auto& old=previous.keys[(size_t)f.key];const auto& key=next.keys[(size_t)f.key];
@@ -77,6 +79,7 @@ void Scheduler::reconfigure(const Configuration& previous,const Configuration& n
         auto oldContact=f;oldContact.zone=oldZone;
         const auto oldId=wasHeld&&old.enabled?identity(previous,selectedClip(previous,old,oldContact)):0;
         if(!key.enabled){f.clip=f.wantedClip=-1;continue;} // process emits the owner's release.
+        if(!wasHeld&&hasPendingLatch(f.key)&&latches[(size_t)f.key].next.owner==f.owner)continue;
         bool sameLayout=old.enabled&&old.zoneCount==key.zoneCount&&old.zoneSource==key.zoneSource;
         for(int zone=0;sameLayout&&zone<key.zoneCount;++zone)sameLayout=old.zones[(size_t)zone].upper==key.zones[(size_t)zone].upper;
         f.held=wasHeld||f.down;if(!wasHeld){f.opens=beat;f.intent=intentTarget(f.values);f.intentBeat=beat;f.nextIntent=beat+intentTick;}
@@ -111,6 +114,40 @@ void Scheduler::release(Contact& f,int offset,Event::Type type,Sink sink,void* c
     if(f.held){Event e;e.type=type;e.offset=offset;e.owner=f.owner;e.key=f.key;e.channel=f.channel;e.values=f.values;e.values.lift=f.releaseVelocity;sink(ctx,e);}
     f.held=false;f.toggled=false;
 }
+bool Scheduler::physicalKeyDown(int key) const noexcept {
+    for(const auto& f:fingers)if(f.down&&!f.suppressed&&f.key==key)return true;
+    return false;
+}
+bool Scheduler::queueLatch(const Configuration& cfg,const Midi& m,double beat,Sink sink,void* ctx) noexcept {
+    if(keyboardMode==KeyboardMode::normal||cfg.latchGrid<=0||!cfg.keys[m.a].enabled)return false;
+    auto& f=fingers[(size_t)(m.status&15)];const auto& key=cfg.keys[m.a];
+    auto values=f.values;values.strike=m.b/127.f;values.lift=0;
+    const int zone=zoneAt(key,source(values,key.zoneSource));auto& latch=latches[m.a];
+    const Contact* owner=nullptr;for(int i=0;i<maxContacts+maxSustained;++i){const auto& old=contact(i);if(old.held&&old.key==m.a&&(!owner||old.owner>owner->owner))owner=&old;}
+    const bool playing=latch.active?latch.start:owner!=nullptr;
+    const int playingZone=latch.active?latch.next.zone:owner?owner->zone:-1;
+    const bool start=keyboardMode!=KeyboardMode::toggle||!playing||playingZone!=zone;
+    const bool cancel=latch.active&&((!start&&!owner)||(start&&owner&&owner->zone==zone));
+    if(f.held)lift(f,m.offset,sink,ctx);
+    f={};f.down=true;f.key=m.a;f.channel=m.status&15;f.owner=++generation;f.values=values;f.zone=f.wanted=zone;
+    f.intent=intentTarget(values);f.intentBeat=beat;f.nextIntent=beat+intentTick;f.changedAt=beat;
+    f.clip=f.wantedClip=chooseClip(cfg,key,zone,f.intent,-1);
+    latch={f,boundary(beat,cfg.latchGrid),!cancel,start,Event::killContact};
+    return true;
+}
+void Scheduler::applyLatch(const Configuration& cfg,Latch& latch,int offset,double beat,Sink sink,void* ctx) noexcept {
+    const auto queued=latch.next;latch.active=false;
+    for(int i=0;i<maxContacts+maxSustained;++i){auto& old=contact(i);if(old.held&&old.key==queued.key){old.suppressed=old.down;release(old,offset,latch.start?Event::killContact:latch.releaseType,sink,ctx);}}
+    Contact* physical=nullptr;for(auto& f:fingers)if(f.owner==queued.owner&&f.down&&!f.suppressed){physical=&f;break;}
+    if(!latch.start){if(physical)physical->suppressed=true;return;}
+    auto next=physical?*physical:queued;next.down=physical!=nullptr;next.held=true;next.suppressed=false;next.toggled=keyboardMode==KeyboardMode::toggle;
+    const auto& key=cfg.keys[(size_t)next.key];next.zone=next.wanted=zoneAt(key,source(next.values,key.zoneSource));next.intent=intentTarget(next.values);
+    next.clip=next.wantedClip=chooseClip(cfg,key,next.zone,next.intent,-1);next.opens=next.switches=next.changedAt=next.intentBeat=beat;next.nextIntent=beat+intentTick;
+    if(physical){*physical=next;return;}
+    auto slot=std::find_if(sustained.begin(),sustained.end(),[](const auto& f){return !f.held;});
+    if(slot==sustained.end()){slot=std::min_element(sustained.begin(),sustained.end(),[](const auto& a,const auto& b){return a.owner<b.owner;});release(*slot,offset,Event::releaseContact,sink,ctx);}
+    *slot=next;
+}
 void Scheduler::lift(Contact& f,int offset,Sink sink,void* ctx) noexcept {
     f.down=false;
     if(!f.held)return;
@@ -128,17 +165,23 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
     auto& f=fingers[(size_t)ch];
     Event e; e.offset=m.offset;e.channel=ch;e.owner=f.owner;e.key=f.key;e.values=f.values;
     if(op==0xb0 && (m.a==120 || m.a==123)) {
-        if(ch==cfg.masterChannel){e.type=Event::panic;sink(ctx,e);fingers={};sustained={};pedals={};pendingOffCount=0;}
+        if(ch==cfg.masterChannel){e.type=Event::panic;sink(ctx,e);fingers={};sustained={};pedals={};latches={};pendingOffCount=0;}
         else {const auto type=m.a==120?Event::killContact:Event::releaseContact;
             release(f,m.offset,type,sink,ctx);f.down=false;pedals[(size_t)ch]=false;
             for(auto& held:sustained)if(held.channel==ch)release(held,m.offset,type,sink,ctx);
+            for(auto& latch:latches)if(latch.active&&latch.next.channel==ch)latch.active=false;
         }
         return;
     }
     if(op==0xb0 && m.a==pedalCC) {
         pedals[(size_t)ch]=m.b>=64;
-        if(m.b<64)for(auto& held:sustained)
-            if(held.held && (ch==cfg.masterChannel || held.channel==ch) && !pedalDown(held.channel))release(held,m.offset,Event::releaseContact,sink,ctx);
+        if(m.b<64){
+            for(auto& latch:latches)if(latch.active&&latch.start&&(ch==cfg.masterChannel||latch.next.channel==ch)&&!physicalKeyDown(latch.next.key)&&!pedalDown(latch.next.channel))latch.active=false;
+            for(auto& held:sustained)if(held.held&&(ch==cfg.masterChannel||held.channel==ch)&&!pedalDown(held.channel)&&!physicalKeyDown(held.key)){
+                if(keyboardMode!=KeyboardMode::normal&&cfg.latchGrid>0)latches[(size_t)held.key]={held,boundary(beat,cfg.latchGrid),true,false,Event::releaseContact};
+                else release(held,m.offset,Event::releaseContact,sink,ctx);
+            }
+        }
         return;
     }
     // CC74 is per-channel note expression, never a global controller or a
@@ -148,6 +191,7 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
         return;
     }
     if(op==0x90 && m.b>0) {
+        if(queueLatch(cfg,m,beat,sink,ctx))return;
         const auto& k=cfg.keys[m.a];
         auto values=f.values;values.strike=m.b/127.f;values.lift=0;
         const int zone=zoneAt(k,source(values,k.zoneSource));
@@ -173,7 +217,7 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
         return;
     }
     if(op==0x80 || (op==0x90 && m.b==0)) {
-        if(f.key==m.a){f.releaseVelocity=m.b/127.f;lift(f,m.offset,sink,ctx);}
+        if(f.key==m.a){f.releaseVelocity=m.b/127.f;lift(f,m.offset,sink,ctx);if(latches[m.a].active&&latches[m.a].next.owner==f.owner)latches[m.a].next=f;}
         return;
     }
     if(f.held)advanceIntent(cfg.keys[(size_t)f.key],f,beat,bpm);
@@ -182,7 +226,7 @@ void Scheduler::input(const Configuration& cfg,const Midi& m,double beat,double 
     else if(op==0xa0 && f.key==m.a) f.values.press=m.b/127.f;
     else if(op==0xb0 && m.a==74) f.values.slide=m.b/127.f;
     else return;
-    if(!f.held) return; // Pre-note expression remains available for the next contact.
+    if(!f.held){if(f.key>=0&&latches[(size_t)f.key].active&&latches[(size_t)f.key].next.owner==f.owner)latches[(size_t)f.key].next=f;return;} // Keep queued/pre-note expression.
     const auto& k=cfg.keys[(size_t)f.key];
     if(k.intentSlewMs<=0)advanceIntent(k,f,beat,bpm);
     choose(cfg,k,f,beat);
@@ -201,11 +245,16 @@ void Scheduler::process(const Configuration& cfg,Clock clock,int frames,const Mi
         // Turning off a software latch releases only lifted keys; a real pedal still holds its owners.
         for(auto& f:sustained)if(!pedalDown(f.channel))release(f,0,Event::releaseContact,sink,ctx);
         keyboardMode=cfg.keyboardMode;
+        for(auto& f:fingers)if(f.down&&!f.held&&!f.suppressed&&hasPendingLatch(f.key)){
+            const auto& key=cfg.keys[(size_t)f.key];f.held=key.enabled;f.opens=boundary(clock.ppq,cfg.launchGrid);f.zone=f.wanted=zoneAt(key,source(f.values,key.zoneSource));f.clip=f.wantedClip=chooseClip(cfg,key,f.zone,f.intent,-1);
+        }
+        latches={};
         for(int i=0;i<maxContacts+maxSustained;++i)contact(i).toggled=false;
         enforceKeyOwnership(keyboardMode,0,sink,ctx);
     }
     const double step=clock.bpm/(60*clock.sampleRate),end=clock.ppq+frames*step;
     const bool discontinuity=clock.discontinuity || (wasPlaying && clock.playing && std::abs(clock.ppq-expected)>step*2);
+    if(latchGrid!=cfg.latchGrid||discontinuity){for(auto& latch:latches)if(latch.active)latch.beat=boundary(clock.ppq,cfg.latchGrid);latchGrid=cfg.latchGrid;}
     if((wasPlaying && !clock.playing) || discontinuity){
         panic();
         for(int i=0;i<maxContacts+maxSustained;++i)if(auto& f=contact(i);f.held){f.opens=boundary(clock.ppq,cfg.launchGrid);f.switches=f.opens;f.intentBeat=clock.ppq;f.nextIntent=clock.ppq+intentTick;f.changedAt=clock.ppq;}
@@ -224,6 +273,12 @@ void Scheduler::process(const Configuration& cfg,Clock clock,int frames,const Mi
         // Transitions precede MIDI at the same sample, just as they precede a
         // coincident onset. No hit is needed to make a quantized switch happen.
         int nextTransition=frames,nextIntent=frames;
+        if(clock.playing)for(auto& latch:latches)if(latch.active){
+            const double position=(latch.beat-clock.ppq)/step;
+            const int at=position>=frames-.5?frames:position<=cursor+.5?cursor:std::max(cursor,(int)std::llround(position));
+            if(at==cursor)applyLatch(cfg,latch,cursor,clock.ppq+cursor*step,sink,ctx);
+            else nextTransition=std::min(nextTransition,at);
+        }
         for(int i=0;i<maxContacts+maxSustained;++i){auto& f=contact(i);if(!f.held)continue;
             const auto& key=cfg.keys[(size_t)f.key];
             if(!key.enabled){release(f,cursor,Event::releaseContact,sink,ctx);continue;}

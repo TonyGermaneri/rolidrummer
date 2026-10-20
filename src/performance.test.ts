@@ -1,10 +1,17 @@
 import {beforeEach,describe,expect,it} from 'vitest'
-import {acceptPerformance,performanceView,elapsedBeats,historyLimit,type PlayedEvent} from './performance'
-import {patternGeometry,liveRectangle,pitchRange} from './lib/pianoRoll'
+import {acceptPerformance,performanceView,elapsedBeats,historyLimit,keyHitLevels,type PlayedEvent} from './performance'
+import {patternGeometry,liveRectangle,pitchRange,patternDisplaySpan,repeatedPatternSpan} from './lib/pianoRoll'
+import {factory} from './model'
 const hit=(overrides:Partial<PlayedEvent>={}):PlayedEvent=>({type:0,epoch:1,beat:2,duration:1,key:48,note:36,velocity:.8,owner:'a',token:'t',...overrides})
 const frame=(events:PlayedEvent[],beat=3,epoch=1)=>acceptPerformance({performance:{events,beat,epoch,bpm:120,dropped:0}})
 beforeEach(()=>{performanceView.epoch=-1;performanceView.notes=[];performanceView.patterns={}})
 describe('live drum monitoring',()=>{
+ it('flashes the source keywave for short scheduled hits and expires the flash without another MIDI event',()=>{
+  frame([hit({beat:3,duration:.001,key:48})],3)
+  expect(keyHitLevels(performanceView.received).get(48)).toBe(.8)
+  expect(keyHitLevels(performanceView.received+100).get(48)).toBeCloseTo(.8/3)
+  expect(keyHitLevels(performanceView.received+160).has(48)).toBe(false)
+ })
  it('retains independent source keywaves and ends all owners of a shared scheduled note',()=>{
   frame([hit(),hit({owner:'b',key:49}),hit({token:'other',owner:'b',note:38})])
   frame([hit({type:1,beat:2.5})])
@@ -37,6 +44,18 @@ describe('live drum monitoring',()=>{
  })
 })
 describe('piano roll geometry',()=>{
+ it('tiles a shorter pattern across the longer phrase without stretching timing or note length',()=>{
+  const geometry=patternGeometry([hit({beat:1,duration:.25})],4,[36],8)
+  expect(geometry.count).toBe(2)
+  expect(geometry.paths.join('')).toContain('M125 ')
+  expect(geometry.paths.join('')).toContain('M625 ')
+  expect(geometry.paths.join('')).toContain('h31.25')
+  expect(repeatedPatternSpan(3,4)).toBe(6)
+  const patch=factory();patch.clips.push({id:'unbound',name:'Unbound song',length:1000,notes:[]})
+  expect(patternDisplaySpan(patch)).toBe(8)
+  expect(patternGeometry([],4,[],100000).count).toBe(0)
+  expect(patternGeometry([hit({beat:0})],.001,undefined,100).truncated).toBe(true)
+ })
  it('filters MIDI drum pitches for each keywave and wraps note tails across a loop boundary',()=>{
   const notes=[hit({beat:3.5,duration:1}),hit({note:38,beat:1})]
   const geometry=patternGeometry(notes,4,[36])

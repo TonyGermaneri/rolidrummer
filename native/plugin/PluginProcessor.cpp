@@ -23,6 +23,7 @@ bool DrummerProcessor::apply(std::unique_ptr<drummer::Runtime> r, std::optional<
  if(preserveActivation&&activationGrid==0&&activationPending())activationGrid=queuedActivationGrid;
  r->activationGrid=queuedActivationGrid=activationGrid;
  engine.preparePerformance(r->performance);
+ ++kitPreviewRequest;kitPreviewRestore.reset();
  r->revision=stateRevision.load()+1;
  saved=r->json;
  const auto revision=r->revision;
@@ -32,6 +33,46 @@ bool DrummerProcessor::apply(std::unique_ptr<drummer::Runtime> r, std::optional<
  return true;
 }
 juce::String DrummerProcessor::document(){std::lock_guard guard(stateMutex);return saved;}
+uint64_t DrummerProcessor::beginKitPreview(){std::lock_guard guard(stateMutex);return ++kitPreviewRequest;}
+bool DrummerProcessor::previewKit(const juce::var& kit,uint64_t expected,uint64_t ticket){
+ juce::String committed;
+ {
+  std::lock_guard guard(stateMutex);
+  if(expected!=stateRevision.load()||ticket!=kitPreviewRequest)return false;
+  if(activationPending())throw std::runtime_error("Wait for the queued patch to start before previewing a kit.");
+  committed=saved;
+ }
+ auto candidate=juce::JSON::parse(committed);
+ const auto assignments=kit.getProperty("keys",{});
+ if((int)kit.getProperty("version",0)!=1||!assignments.isArray()||assignments.getArray()->isEmpty())throw std::runtime_error("This is not a supported sound kit.");
+ std::array<bool,128> assigned{};
+ auto keys=candidate.getProperty("keys",{});
+ for(const auto& assignment:*assignments.getArray()){
+  const auto value=assignment.getProperty("note",{});const double number=(double)value;
+  const auto sound=assignment.getProperty("sound",{});
+  if(!value.isInt()&&!value.isInt64()&&!value.isDouble())throw std::runtime_error("Invalid preview keywave.");
+  if(!std::isfinite(number)||number<0||number>127||std::floor(number)!=number)throw std::runtime_error("Invalid preview keywave.");
+  const int note=(int)number;
+  if(assigned[(size_t)note]||!sound.getProperty("path",{}).isString()||!sound.getProperty("s",{}).isObject())throw std::runtime_error("Invalid preview sound.");
+  assigned[(size_t)note]=true;bool found=false;
+  for(auto& key:*keys.getArray())if((int)key.getProperty("note",-1)==note){key.getDynamicObject()->setProperty("sound",sound.clone());found=true;break;}
+  if(!found)throw std::runtime_error("The preview keywave is no longer assigned.");
+ }
+ // Prepare both directions off audio; Cancel never needs to load a sample.
+ auto restore=drummer::compileDocument(juce::JSON::parse(committed));
+ auto audition=drummer::compileDocument(candidate);
+ std::lock_guard guard(stateMutex);
+ if(expected!=stateRevision.load()||ticket!=kitPreviewRequest)return false;
+ engine.preparePerformance(restore->performance);engine.preparePerformance(audition->performance);
+ restore->revision=audition->revision=expected;
+ kitPreviewRestore=std::move(restore);
+ if(auto* old=incoming.exchange(audition.release()))delete old;
+ return true;
+}
+void DrummerProcessor::cancelKitPreview(){
+ std::lock_guard guard(stateMutex);++kitPreviewRequest;
+ if(kitPreviewRestore)if(auto* old=incoming.exchange(kitPreviewRestore.release()))delete old;
+}
 void DrummerProcessor::prepareToPlay(double sr,int max){rate=sr;previewRate=sr;previewBlock=max;stopPreview();engine.prepare(sr,max);rightScratch.resize((size_t)std::max(max,1));scheduler.reset();standalonePpq=0;monitorBeat=monitorSegment=0;++monitorEpoch;lastPatterns={};publishFingers();wasHostPlaying=false;freePlaying=false;activationScheduled=activationClockKnown=false;}
 bool DrummerProcessor::isBusesLayoutSupported(const BusesLayout&l)const{return l.getMainOutputChannelSet()==juce::AudioChannelSet::stereo()||l.getMainOutputChannelSet()==juce::AudioChannelSet::mono();}
 void DrummerProcessor::renderTo(int end){if(end<=rendered)return;engine.process(outputL+rendered,outputR+rendered,end-rendered,nullptr,0,{clock.bpm,clock.ppq+(rendered-eventBase)*clock.bpm/(60*rate),clock.playing});rendered=end;}
@@ -167,7 +208,7 @@ bool DrummerProcessor::readFingers(FingerSnapshot& out) noexcept {
 }
 void DrummerProcessor::rememberPattern(const drummer::Contact& f,double beat,bool playing) noexcept {
  if(!active||f.key<0||f.key>=128)return;
- auto& pattern=lastPatterns[(size_t)f.key];pattern={f.clip,f.zone,-1,0,true,playing};
+ auto& pattern=lastPatterns[(size_t)f.key];pattern={f.clip,f.zone,-1,0,true,playing,beat};
  const auto& key=active->config.keys[(size_t)f.key];const int group=key.zones[(size_t)std::clamp(f.zone,0,key.zoneCount-1)].group;
  if(key.intentEnabled&&group>=0&&group<(int)active->config.groups.size()){const auto& choices=active->config.groups[(size_t)group];for(int i=0;i<choices.count;++i)if(choices.candidates[(size_t)i].clip==f.clip){pattern.candidate=i;break;}}
  if(f.clip>=0&&f.clip<(int)active->config.clips.size()){const auto& clip=active->config.clips[(size_t)f.clip];pattern.phase=std::fmod(beat-clip.origin,clip.length);if(pattern.phase<0)pattern.phase+=clip.length;}
@@ -181,9 +222,13 @@ void DrummerProcessor::publishFingers() noexcept {
  fingerSnapshot.patterns=lastPatterns;
  fingerSnapshot.runtime=active;if(active)fingerSnapshot.patternHash=active->patternHash;
  fingerSnapshot.beat=monitorBeat;fingerSnapshot.bpm=hostBpm.load();fingerSnapshot.epoch=monitorEpoch;
-
+ std::array<int,128> shown;shown.fill(-1);
  auto append=[&](const drummer::Contact& f,bool sustained){
-  auto& view=fingerSnapshot.fingers[(size_t)fingerSnapshot.count++];view={f.owner,f.channel,f.key,f.zone,f.values.slide,f.values.glide,f.values.press,sustained,f.toggled,f.held};
+  const bool playing=f.held&&standalonePpq+1e-9>=f.opens;
+  int index=shown[(size_t)f.key];
+  if(index>=0&&(fingerSnapshot.fingers[(size_t)index].playing||!playing))return;
+  if(index<0){index=fingerSnapshot.count++;shown[(size_t)f.key]=index;}
+  auto& view=fingerSnapshot.fingers[(size_t)index];view={f.owner,f.channel,f.key,f.zone,f.values.slide,f.values.glide,f.values.press,sustained,f.toggled,playing};view.queued=scheduler.hasPendingLatch(f.key);
   if(f.key>=0&&f.key<128)view.candidate=lastPatterns[(size_t)f.key].candidate;
  };
  for(const auto& f:scheduler.contacts())if(f.down&&!f.suppressed)append(f,false);

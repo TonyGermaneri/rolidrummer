@@ -232,7 +232,70 @@ void intentTests(){
  scheduler.process(config,{0,120,48000,true},128,strike,2,Capture::take,&out);
  check(scheduler.contacts()[1].clip==0&&scheduler.contacts()[2].clip==1,"Strike did not establish initial variation intent");
 }
+void unequalLoopTests(){
+ auto run=[](int block){
+  Configuration config;config.launchGrid=0;
+  config.clips={{{},1,4,0,{{0,.1,36,1},{1,.1,36,.8f},{3.5,.1,36,.6f}}},{{},2,8,0,{{0,.1,42,1},{4,.1,42,.8f},{7.5,.1,42,.6f}}}};
+  for(auto& clip:config.clips)prepareClip(clip);
+  for(int i=0;i<2;++i){auto& key=config.keys[(size_t)(60+i)];key.enabled=true;key.parts[i?42:36]=true;key.zoneCount=1;key.zones[0]={1,i};}
+  Scheduler scheduler;Capture capture;std::vector<std::tuple<int,int,float>> hits;
+  constexpr int total=16*24000;
+  for(int start=0;start<total;start+=block){
+   capture.events.clear();Midi gates[]={{0,0x91,60,127},{0,0x92,61,127}};
+   scheduler.process(config,{start/24000.,120,48000,true},std::min(block,total-start),gates,start==0?2:0,Capture::take,&capture);
+   for(const auto& event:capture.events)if(event.type==Event::hit)hits.emplace_back(start+event.offset,event.key,event.velocity);
+  }
+  return hits;
+ };
+ const auto expected=run(257);
+ for(int block:{1,64,2048})check(run(block)==expected,"Mixed-length loops depend on the host block size");
+ std::vector<int> shortHits,longHits;for(const auto& [sample,key,velocity]:expected)(key==60?shortHits:longHits).push_back(sample);
+ check(shortHits==std::vector<int>({0,24000,84000,96000,120000,180000,192000,216000,276000,288000,312000,372000}),"Short pattern waited for the longer loop instead of repeating");
+ check(longHits==std::vector<int>({0,96000,180000,192000,288000,372000}),"Long pattern was shortened by another keywave");
+}
+void quantizedLatchTests(){
+ auto c=fixture();c.keyboardMode=KeyboardMode::toggle;c.launchGrid=c.switchGrid=0;c.latchGrid=4;
+ Scheduler scheduler;Capture capture;
+ auto step=[&](double beat,int frames,std::initializer_list<Midi> input){capture.events.clear();std::vector<Midi> messages(input);scheduler.process(c,{beat,120,48000,true},frames,messages.data(),(int)messages.size(),Capture::take,&capture);};
+ step(1,24000,{{0,0x91,60,100},{10,0x81,60,64}});
+ check(scheduler.hasPendingLatch(60)&&playing(scheduler,60)==0,"A quantized short touch latched before its bar boundary");
+ step(2,48000,{});check(playing(scheduler,60)==0,"Queued latch started before the boundary callback");
+ step(4,24000,{});check(!scheduler.hasPendingLatch(60)&&playing(scheduler,60)==1,"Lifted queued touch did not latch on the next bar");
+ step(5,24000,{{0,0x92,60,100},{10,0x82,60,64}});
+ check(scheduler.hasPendingLatch(60)&&playing(scheduler,60)==1,"Queued unlatch cut off the current pattern");
+ step(6,48000,{});step(8,1,{});check(playing(scheduler,60)==0&&!scheduler.hasPendingLatch(60),"Queued unlatch missed its bar boundary");
+ // Two presses before the boundary cancel the pending state change.
+ scheduler.reset();step(1,24000,{{0,0x91,60,100},{1,0x81,60,64},{2,0x92,60,100},{3,0x82,60,64}});
+ check(!scheduler.hasPendingLatch(60)&&playing(scheduler,60)==0,"Double press did not cancel a queued latch");
+ // Instant bypass and Normal mode keep their immediate behavior.
+ c.latchGrid=0;scheduler.reset();step(1,128,{{0,0x91,60,100}});check(playing(scheduler,60)==1,"Instant latch still waited for a bar");
+ c.keyboardMode=KeyboardMode::normal;c.latchGrid=4;scheduler.reset();step(1,128,{{0,0x91,60,100},{1,0x81,60,64}});check(!scheduler.hasHeldNotes(),"Latch quantization changed Normal key release");
+ // Different-zone replacement retains the old owner until the boundary and
+ // switches atomically, with one playing owner for that key.
+ c.keyboardMode=KeyboardMode::toggle;scheduler.reset();step(0,24000,{{0,0x91,60,100},{10,0x81,60,64}});
+ step(1,24000,{{0,0xb2,74,100},{0,0x92,60,100},{10,0x82,60,64}});check(playing(scheduler,60)==1,"Queued zone replacement lost its current owner");
+ step(2,48000,{});step(4,1,{});check(playing(scheduler,60)==1,"Queued zone replacement created duplicate owners");
+ bool upper=false;for(const auto& f:scheduler.sustainedContacts())if(f.held&&f.key==60)upper=f.zone==2;check(upper,"Queued replacement did not adopt the new zone");
+ // Panic always clears current and pending owners immediately.
+ step(4+1./24000,128,{{0,0x91,61,100},{1,0xb0,123,0}});check(!scheduler.hasHeldNotes()&&!scheduler.hasPendingLatch(61),"Panic left a queued latch");
+}
+std::vector<std::tuple<int,int,int,uint64_t,int>> quantizedLatchRender(int block){
+ auto c=fixture();c.keyboardMode=KeyboardMode::toggle;c.latchGrid=4;c.launchGrid=c.switchGrid=0;
+ Scheduler scheduler;Capture capture;std::vector<std::tuple<int,int,int,uint64_t,int>> events;
+ const std::vector<Midi> input={{24000,0x91,60,100},{24100,0x81,60,64},{120000,0x92,60,100},{120100,0x82,60,64},{144000,0x93,61,100},{144100,0x83,61,64},{168000,0xb4,74,100},{168000,0x94,60,100},{168100,0x84,60,64},{216000,0xb5,74,100},{216000,0x95,60,100},{216100,0x85,60,64},{240000,0xb0,64,0}};
+ size_t next=0;constexpr int total=13*24000;
+ for(int start=0;start<total;start+=block){
+  const int frames=std::min(block,total-start);std::vector<Midi> messages;
+  while(next<input.size()&&input[next].offset<start+frames){auto midi=input[next++];midi.offset-=start;messages.push_back(midi);}
+  capture.events.clear();scheduler.process(c,{start/24000.,120,48000,true},frames,messages.data(),(int)messages.size(),Capture::take,&capture);
+  for(const auto& event:capture.events)events.emplace_back(start+event.offset,(int)event.type,event.key,event.owner,event.drumNote);
+ }
+ check(!scheduler.hasHeldNotes(),"Quantized render left a held or queued note after pedal release");return events;
+}
 int main() {try {
+ quantizedLatchTests();
+ const auto quantized=quantizedLatchRender(257);for(int block:{1,64,2048})check(quantizedLatchRender(block)==quantized,"Quantized latch/unlatch timing depends on host buffer size");
+ unequalLoopTests();
  sustainTests();
  singleZoneTests();
  keyboardModeTests();
