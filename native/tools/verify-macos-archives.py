@@ -56,7 +56,7 @@ def verify(directory, require_notarized=False):
                 raise RuntimeError(f'{kind}: archive and bundle versions do not match')
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(bundle)], check=True)
             if require_notarized:
-                subprocess.run(['xcrun', 'stapler', 'validate', str(bundle)], check=True)
+                subprocess.run([str(TOOLS / 'macos-ticket.sh'), 'validate', str(bundle)], check=True)
             bundles.append(bundle)
             report.append({'format': kind, 'archive': archive.name, 'version': meta['CFBundleShortVersionString'],
                            'singleBundleRoot': True, 'extractedSignature': True, 'finderPackage': True,

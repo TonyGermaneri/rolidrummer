@@ -35,7 +35,14 @@ elif tool=="xcrun" and args[:2]==["stapler","staple"]:
     state["staples"][bundle]=count
     if count<=int(os.environ.get("FAIL_STAPLES","0")):
         print("ticket not yet available",file=sys.stderr)
-        status=1
+        status=int(os.environ.get("STAPLE_STATUS","68"))
+elif tool=="xcrun" and args[:2]==["stapler","validate"]:
+    bundle=args[-1]
+    count=state["validations"].get(bundle,0)+1
+    state["validations"][bundle]=count
+    if count<=int(os.environ.get("FAIL_VALIDATIONS","0")):
+        print('NSURLErrorDomain Code=-1005 "The network connection was lost."',file=sys.stderr)
+        status=int(os.environ.get("VALIDATE_STATUS","68"))
 elif tool=="sleep":
     state["delays"].append(int(args[0]))
 path.write_text(json.dumps(state))
@@ -49,7 +56,7 @@ class NotarizationTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.folder = Path(self.temp.name)
         self.state_path = self.folder / "state.json"
-        self.state_path.write_text(json.dumps({"calls": [], "staples": {}, "delays": []}))
+        self.state_path.write_text(json.dumps({"calls": [], "staples": {}, "validations": {}, "delays": []}))
         commands = self.folder / "commands"
         commands.mkdir()
         for tool in ("xcrun", "sleep", "ditto", "spctl", "codesign"):
@@ -84,6 +91,11 @@ class NotarizationTest(unittest.TestCase):
     def state(self):
         return json.loads(self.state_path.read_text())
 
+    def run_ticket(self, action):
+        return subprocess.run(["/bin/bash", str(ROOT / "native/tools/macos-ticket.sh"),
+                               action, self.bundles[0]], env=self.env,
+                              capture_output=True, text=True, timeout=30)
+
     def test_delayed_tickets_retry_each_bundle_then_package(self):
         self.env["FAIL_STAPLES"] = "2"
         result = self.run_script()
@@ -114,10 +126,43 @@ class NotarizationTest(unittest.TestCase):
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ticket not yet available", result.stderr)
-        self.assertEqual(self.state()["staples"], {self.bundles[0]: 6})
-        self.assertEqual(self.state()["delays"], [15, 30, 45, 60, 60])
+        self.assertEqual(self.state()["staples"], {self.bundles[0]: 12})
+        self.assertEqual(self.state()["delays"], [15, 30, 45] + [60] * 8)
         self.assertFalse(self.out.exists())
         self.assertFalse(list(self.folder.glob("rolidrummer-notarize-*")))
+
+    def test_ticket_delivery_can_recover_after_the_previous_retry_limit(self):
+        self.env["FAIL_STAPLES"] = "7"
+        result = self.run_ticket("staple")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.state()["staples"], {self.bundles[0]: 8})
+        self.assertEqual(self.state()["delays"], [15, 30, 45] + [60] * 4)
+
+    def test_validation_retries_cloudkit_connection_loss(self):
+        self.env["FAIL_VALIDATIONS"] = "2"
+        result = self.run_ticket("validate")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.state()["validations"], {self.bundles[0]: 3})
+        self.assertEqual(self.state()["delays"], [15, 30])
+        self.assertIn("Code=-1005", result.stderr)
+
+    def test_validation_connection_failure_is_bounded_and_still_fatal(self):
+        self.env["FAIL_VALIDATIONS"] = "99"
+        result = self.run_ticket("validate")
+        self.assertEqual(result.returncode, 68)
+        self.assertEqual(self.state()["validations"], {self.bundles[0]: 12})
+        self.assertEqual(self.state()["delays"], [15, 30, 45] + [60] * 8)
+
+    def test_invalid_or_revoked_tickets_fail_without_retrying(self):
+        self.env["FAIL_VALIDATIONS"] = "99"
+        for status in (65, 66, 77):
+            with self.subTest(status=status):
+                self.env["VALIDATE_STATUS"] = str(status)
+                before = len(self.state()["calls"])
+                result = self.run_ticket("validate")
+                self.assertEqual(result.returncode, status)
+                self.assertEqual(len(self.state()["calls"]), before + 1)
+                self.assertFalse(self.state()["delays"])
 
     def test_rejected_submission_never_staples_or_packages(self):
         self.env["FAIL_SUBMIT"] = "1"

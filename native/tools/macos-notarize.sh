@@ -112,24 +112,13 @@ xcrun notarytool submit "$archive" ${notary_args[@]+"${notary_args[@]}"} --wait 
 #
 # The ticket is attached to each bundle so it verifies with no network at all. Without stapling,
 # a machine that is offline the first time it sees the plugin cannot check it and refuses.
-# Apple says "Accepted" before every server stapler asks has the ticket: a staple tried at once can
-# fail with the ticket simply not there yet (v0.6.1's did, where v0.6.0's same build had not). So
-# each is tried again over a few minutes, and if it still fails, stapler's own words are shown.
-staple() {
-    local bundle="$1" out="" attempt
-    for attempt in 1 2 3 4 5 6; do
-        out="$(xcrun stapler staple "$bundle" 2>&1)" && return 0
-        [ "$attempt" -lt 6 ] && sleep $((attempt < 4 ? attempt * 15 : 60))
-    done
-    echo "FAILED"
-    printf '%s\n' "$out" | sed 's/^/    /' >&2
-    return 1
-}
+# Apple can accept a submission before ticket propagation completes. CloudKit
+# can also drop connections while delivering tickets. The shared helper retries
+# these failures for both stapling and the later fresh-extraction validation.
 echo
 for bundle in "${bundles[@]}"; do
-    printf '  staple %-26s ' "$(basename "$bundle")"
-    staple "$bundle" || exit 1
-    echo "ok"
+    printf '  staple %s\n' "$(basename "$bundle")"
+    "$tools/macos-ticket.sh" staple "$bundle"
 done
 
 echo
