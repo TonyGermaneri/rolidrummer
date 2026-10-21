@@ -103,7 +103,12 @@ async function save(){
   await flushEdits()
   if(stamp!==intent()||origin!==source())throw Error('The search changed before saving. Save the current groove again.')
   applying=true
-  try{const result=await saveSharedPatch(false,{newPatch:true,name:draft.query.trim()});if(!result.ok)throw Error('Could not save the patch. Try again.');draft.source=source();await flushEdits();state.status=`Saved “${result.name}”`}
+  try{
+   const result=await saveSharedPatch(false,{newPatch:true,name:draft.query.trim()});if(!result.ok)throw Error('Could not save the patch. Try again.');draft.source=source();await flushEdits();state.status=`Saved “${result.name}”`
+   // A saved groove keeps its search as a family (searching alone never registers one).
+   const neural=state.patch.neural
+   if(neural&&!neural.familyBuildId)try{await request('libraryFamilyRegister',{...clone(neural),origin:'saved'})}catch(error){state.status=`Saved “${result.name}” · its family was not registered: ${error instanceof Error?error.message:String(error)}`}
+  }
   finally{applying=false}
  }finally{saving.value=false}
 }

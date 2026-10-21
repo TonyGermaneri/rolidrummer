@@ -179,8 +179,19 @@ it('resolves a dirty search before saving an independent named patch',async()=>{
  expect(fake.replace).toHaveBeenCalledWith(expect.objectContaining({neural:expect.objectContaining({query:'Heavy Rock',seed:'812',autoMode:true})}),'bar')
  expect(fake.save).toHaveBeenCalledWith(false,{newPatch:true,name:'Heavy Rock'})
  expect(fake.flush).toHaveBeenCalledTimes(2)
+ expect(fake.request).toHaveBeenCalledWith('libraryFamilyRegister',expect.objectContaining({query:'Heavy Rock',numerator:4,denominator:4,feel:'straight',origin:'saved'}))
  await vi.advanceTimersByTimeAsync(350)
  expect(fake.request.mock.calls.filter(call=>call[0]==='libraryResolve')).toHaveLength(1)
+})
+
+it('registers a family only when a searched groove is saved, not while searching',async()=>{
+ ready();autoResults();const {root}=await render(true)
+ input(root,'Filter indexed patterns','Heavy');await vi.advanceTimersByTimeAsync(350);input(root,'Filter indexed patterns','Heavy Rock');await vi.advanceTimersByTimeAsync(350)
+ expect(fake.request.mock.calls.filter(call=>call[0]==='libraryResolve')).toHaveLength(2)
+ expect(fake.request.mock.calls.some(call=>call[0]==='libraryFamilyRegister')).toBe(false)
+ fake.state.patch={...fake.state.patch,neural:{...fake.state.patch.neural,familyId:'family-rock',familyBuildId:'build-1'}}
+ await event(find(root,n=>n.props['aria-label']==='Save search as patch'),'click')
+ expect(fake.save).toHaveBeenCalled();expect(fake.request.mock.calls.some(call=>call[0]==='libraryFamilyRegister')).toBe(false)
 })
 
 it('restores saved Auto intent without rerunning or replacing its embedded notes',async()=>{

@@ -15,6 +15,8 @@ public:
     explicit PatternFamilies(juce::File database);
     juce::var registerFamily(const juce::var& options) const;
     juce::var update(const juce::var& operation) const;
+    // {revision,familyIds}: forgets the families and their decisions.
+    juce::var remove(const juce::var& operation) const;
     juce::var reconcile(NeuralIndex&,const NeuralBuildOptions& options={}) const;
     juce::var status() const;
     juce::var members(const juce::var& options) const;

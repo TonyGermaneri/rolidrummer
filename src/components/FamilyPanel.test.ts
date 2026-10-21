@@ -19,13 +19,15 @@ beforeEach(()=>{
   if(method==='libraryFamilySuggestions')return {rows:fake.hidden?[]:[suggestion],buildId:'build-1',offset:payload.offset,more:payload.offset===0}
   if(method==='libraryFamilyUpdate')return {revision:++revision,family:{...rock,name:payload.name??rock.name}}
   if(method==='libraryFamilyDecision'){fake.hidden=true;return {revision:++revision,family:payload.action==='accept'?{...bossa,name:payload.name}:rock}}
+  if(method==='libraryFamilyRemove')return {revision:++revision,removed:payload.familyIds.length}
+  if(method==='libraryFamilyRefresh')return {state:'queued',running:true}
   throw Error(`Unexpected family request ${method}`)
  })
 })
 afterEach(()=>{cleanup.forEach(fn=>fn());cleanup=[];vi.unstubAllGlobals()})
 function status(patch:Partial<FamilyStatus>={}):FamilyStatus{return {revision:3,buildId:'build-1',indexId:'index-1',policyVersion:4,state:'complete',stale:false,families:[rock],suggestions:1,...patch}}
-async function render(value=status()){
- const resolve=vi.fn(),refresh=vi.fn(),props={status:value,onResolve:resolve,onRefresh:refresh}
+async function render(value=status(),progress?:Record<string,unknown>){
+ const resolve=vi.fn(),refresh=vi.fn(),props={status:value,progress,onResolve:resolve,onRefresh:refresh}
  const view=await mount(FamilyPanel,props);cleanup.push(view.unmount)
  return {...view,resolve,refresh,props,open:()=>event(find(view.root,n=>n.tag==='details'),'toggle',{target:{open:true}})}
 }
@@ -105,9 +107,10 @@ it('merges only into compatible families and persists dismissal separately',asyn
  expect(fake.request).toHaveBeenCalledWith('libraryFamilyDecision',expect.objectContaining({action:'dismiss',revision:5}))
 })
 
-it('blocks resolution during matching and reports revision conflicts with a refresh',async()=>{
- const view=await render(status({stale:true}));await view.open()
- expect(find(view.root,n=>n.tag==='button'&&n.textContent==='RESOLVE FAMILY').props.disabled).toBe(true)
+it('resolves from the last matched membership during matching and reports revision conflicts with a refresh',async()=>{
+ const view=await render(status({stale:true,staleReason:'matching'}),{state:'building',stage:'families',running:true,completed:2,groups:5});await view.open()
+ expect(find(view.root,n=>n.tag==='summary').textContent).toContain('Matching updates… 2/5')
+ expect(find(view.root,n=>n.tag==='button'&&n.textContent==='RESOLVE FAMILY').props.disabled).toBe(false)
  const original=fake.request.getMockImplementation()!;fake.request.mockImplementation((method,payload)=>method==='libraryFamilyUpdate'?Promise.reject(Error('Another instance changed the families')):original(method,payload))
  await event(find(view.root,n=>n.tag==='button'&&n.textContent==='Include'),'click')
  expect(fake.error).toContain('Another instance changed');expect(view.refresh).toHaveBeenCalled()
@@ -130,4 +133,33 @@ it('does not follow a late mutation with new requests after unmount',async()=>{
  view.unmount();cleanup=[];finish({revision:4,family:bossa});await settle()
  expect(fake.request).toHaveBeenCalledTimes(before)
  expect(nodes(view.root,n=>n.tag==='article')).toHaveLength(0)
+})
+
+it('says what out-of-date membership waits for and matches on request',async()=>{
+ const summary=(view:{root:any})=>find(view.root,n=>n.tag==='summary').textContent
+ const idle=await render(status({stale:true,staleReason:'matching'}),{state:'complete',stage:'ready',running:false})
+ expect(summary(idle)).toContain('Out of date');expect(summary(idle)).not.toContain('Matching updates')
+ await event(find(idle.root,n=>n.tag==='button'&&n.textContent==='MATCH NOW'),'click')
+ expect(fake.request).toHaveBeenCalledWith('libraryFamilyRefresh');expect(idle.refresh).toHaveBeenCalled()
+ const failed=await render(status({stale:true,staleReason:'matching'}),{state:'failed',stage:'families',running:false,error:'database is locked'})
+ expect(summary(failed)).toContain('Matching failed');expect(nodes(failed.root,n=>n.tag==='button'&&n.textContent==='MATCH NOW')).toHaveLength(0)
+ await failed.open();expect(failed.root.textContent).toContain('Matching failed: database is locked')
+ const search=await render(status({stale:true,staleReason:'search'}),{state:'complete',running:false})
+ expect(summary(search)).toContain('Waiting for search to be refreshed');expect(nodes(search.root,n=>n.tag==='button'&&n.textContent==='MATCH NOW')).toHaveLength(0)
+ const another=await render(status({stale:true,staleReason:'matching'}),{state:'busy',stage:'families',running:true})
+ expect(summary(another)).toContain('Another instance is matching')
+})
+
+it('removes a family, or every family searches registered, only after confirmation',async()=>{
+ const searched={...rock,id:'family-heavy',name:'heavy',query:'heavy'},saved={...searched,id:'family-saved',name:'Saved',query:'Saved',origin:'saved' as const}
+ const edited={...searched,id:'family-edited',name:'edited',query:'edited',decisions:1},accepted={...searched,id:'family-accepted',name:'accepted',query:'accepted',suggested:true}
+ const view=await render(status({families:[rock,searched,saved,edited,accepted]}));await view.open()
+ const bulk=()=>find(view.root,n=>n.tag==='button'&&String(n.textContent).includes('SEARCH FAMILIES')||n.textContent==='CONFIRM REMOVE 2')
+ expect(view.root.textContent).toContain('2 families were registered by searches')
+ await event(bulk(),'click');expect(fake.request.mock.calls.some(call=>call[0]==='libraryFamilyRemove')).toBe(false)
+ await event(bulk(),'click')
+ expect(fake.request).toHaveBeenLastCalledWith('libraryFamilyRemove',{familyIds:['family-rock','family-heavy'],revision:3})
+ await event(find(view.root,n=>n.tag==='button'&&n.textContent==='REMOVE'),'click')
+ await event(find(view.root,n=>n.tag==='button'&&n.textContent==='CONFIRM REMOVE'),'click')
+ expect(fake.request).toHaveBeenLastCalledWith('libraryFamilyRemove',{familyIds:['family-rock'],revision:4})
 })

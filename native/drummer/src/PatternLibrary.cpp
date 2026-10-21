@@ -465,7 +465,9 @@ std::shared_ptr<LibraryService> LibraryService::acquire(const juce::File& file) 
     auto service = std::shared_ptr<LibraryService>(new LibraryService(file)); slot = service;
     const auto status=service->neural->status();
     if(get(status,"readyIndexId").toString().isNotEmpty()){
-        if((bool)get(status,"preparationNeeded"))service->buildNeuralIndex();
+        // An import that finished without its search index (closed or paused
+        // mid-preparation) leaves families waiting on search: resume that first.
+        if((bool)get(status,"preparationNeeded")||(bool)get(status,"stale"))service->buildNeuralIndex();
         else if((bool)get(service->families->status(),"stale"))service->refreshFamilies();
     }
     return service;
@@ -508,7 +510,7 @@ void LibraryService::launch(std::function<void()> operation,bool familyRefresh) 
     publish(object({{"state", "queued"}}));
     try {
         worker = std::thread([this, operation = std::move(operation)] {
-            bool successful=true;
+            bool successful=true;int contended=0;
             try { if(operation)operation(); }
             catch (const std::exception& error) {successful=false;publish(object({{"state", cancelRequested.load() ? "paused" : "failed"}, {"error", error.what()}})); }
             for(;;){
@@ -520,7 +522,15 @@ void LibraryService::launch(std::function<void()> operation,bool familyRefresh) 
                         if(state=="busy"){publish(result);juce::Thread::sleep(250);}
                         std::lock_guard lock(workerMutex);familiesRequested=true;
                     }
-                }catch(const std::exception& error){successful=false;publish(object({{"state",cancelRequested.load()?"paused":"failed"},{"stage","families"},{"error",error.what()}}));}
+                }catch(const std::exception& error){
+                    // Another instance holding the catalog's write lock past the busy
+                    // timeout is transient: wait and match again rather than stop.
+                    const juce::String message=error.what();
+                    if(!cancelRequested.load()&&(message.contains("database is locked")||message.contains("database table is locked"))&&++contended<=30){
+                        publish(object({{"state","busy"},{"stage","families"},{"error",""}}));juce::Thread::sleep(1000);std::lock_guard lock(workerMutex);familiesRequested=true;continue;
+                    }
+                    successful=false;publish(object({{"state",cancelRequested.load()?"paused":"failed"},{"stage","families"},{"error",error.what()}}));
+                }
             }
         });
     } catch (...) { running = false; throw; }

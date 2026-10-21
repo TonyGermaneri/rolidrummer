@@ -95,5 +95,34 @@ int main(int argc,char** argv){try{
  check(encode(initialResolved)==encode(resolveNeuralPatch(catalog,index,base,pinnedOptions)),"Committed family/index resolution changed after imports and display-name edits");
  const auto genericOptions=object({{"query","4/4"},{"indexId",get(index.status(),"readyIndexId")}});const auto generic=resolveNeuralPatch(catalog,index,base,genericOptions);families.registerFamily(get(generic,"neural"));families.reconcile(index);
  check(get(get(resolveNeuralPatch(catalog,index,base,genericOptions),"neural"),"familyBuildId").toString().isNotEmpty(),"A structural musical query cannot register and resolve its family");
- std::cout<<"families: pinned GPU affinities, identities, growth, deduplication, meter, manual decisions, immutable history, ambiguity, novel names, merge/dismiss, cancellation and concurrent publication passed\n";return 0;
+ // Matching is incremental: a registration computes only the new family, and the
+ // result equals a build from nothing. While it is pending, searches still resolve.
+ {
+  const auto readyBuild=get(families.status(),"buildId").toString();
+  const auto added=families.registerFamily(object({{"query","Four on the Floor"},{"numerator",4},{"denominator",4},{"feel","straight"}}));const auto addedId=get(added,"id").toString();
+  check((bool)get(families.status(),"stale")&&get(families.status(),"staleReason").toString()=="matching","A registration did not report pending matching");
+  check(get(get(resolveNeuralPatch(catalog,index,base,genericOptions),"neural"),"familyBuildId").toString()==readyBuild,"Pending matching broke resolution of a matched family");
+  const auto unmatched=resolveNeuralPatch(catalog,index,base,object({{"query","Four on the Floor"},{"indexId",get(index.status(),"readyIndexId")}}));check(get(get(unmatched,"neural"),"familyBuildId").toString().isEmpty()&&get(unmatched,"clips").getArray()->size()>0,"A family not matched yet did not resolve as a plain search");
+  const auto incremental=families.reconcile(index);const int registered=get(families.status(),"families").getArray()->size();
+  check(get(incremental,"state").toString()=="complete"&&(int)get(incremental,"computed")==1&&(int)get(incremental,"reused")==registered-1,"A registration rematched unchanged families");
+  auto dump=[&]{sql::Database reader(db);juce::String text;const auto build=get(families.status(),"buildId").toString();
+   for(const auto* query:{"SELECT family_id||pattern_id||binding_id||state,score FROM family_members WHERE build_id=? ORDER BY family_id,pattern_id","SELECT family_id||members||'/'||ambiguous,threshold FROM family_summaries WHERE build_id=? ORDER BY family_id","SELECT data,quality FROM family_suggestions WHERE build_id=? ORDER BY id","SELECT suggestion_id||pattern_id,0 FROM family_suggestion_members WHERE build_id=? ORDER BY suggestion_id,pattern_id"}){sql::Statement rows(reader,query);rows.text(1,build);while(rows.row())text<<rows.text(0)<<" "<<juce::String(rows.real(1),17)<<"\n";}
+   return text;};
+  const auto incrementalRows=dump();
+  {sql::Database writer(db);const auto build=get(families.status(),"buildId").toString();for(const auto* table:{"family_groups","family_members","family_summaries","family_suggestions","family_suggestion_members","family_build_decisions"}){sql::Statement clear(writer,("DELETE FROM "+juce::String(table)+" WHERE build_id=?").toRawUTF8());clear.text(1,build);clear.done();}
+   sql::Statement row(writer,"DELETE FROM family_builds WHERE id=?");row.text(1,build);row.done();writer.exec("DELETE FROM family_candidate_sets;DELETE FROM family_candidate_groups;DELETE FROM family_candidate_members;DELETE FROM family_cohorts;DELETE FROM family_cohort_patterns;DELETE FROM family_cohort_indexes");}
+  const auto scratch=families.reconcile(index);check(get(scratch,"state").toString()=="complete"&&(int)get(scratch,"reused")==0,"Cleared matching caches were still used");
+  check(dump()==incrementalRows&&incrementalRows.isNotEmpty(),"Incremental matching differs from a build from nothing");
+  {sql::Database reader(db);sql::Statement dead(reader,"SELECT COUNT(*) FROM family_builds WHERE state!='complete'");dead.row();check(dead.integer(0)==0,"Abandoned family builds were kept");
+   sql::Statement old(reader,"SELECT COUNT(*) FROM family_suggestions WHERE build_id!=(SELECT ready_build FROM family_meta WHERE id=1)");old.row();check(old.integer(0)==0,"Suggestions of superseded builds were kept");}
+  // Saving keeps a family a search registered, without rematching; removal forgets it.
+  const auto matchingBefore=get(families.status(),"matchingRevision");
+  families.registerFamily(object({{"query","Four on the Floor"},{"numerator",4},{"denominator",4},{"feel","straight"},{"origin","saved"}}));
+  bool saved=false;const auto kept=families.status();for(const auto& family:*get(kept,"families").getArray())if(get(family,"id").toString()==addedId)saved=get(family,"origin").toString()=="saved";
+  check(saved&&get(families.status(),"matchingRevision")==matchingBefore&&!(bool)get(families.status(),"stale"),"Saving a registered family rematched it or lost its provenance");
+  check((int)get(families.remove(object({{"revision",get(families.status(),"revision")},{"familyIds",juce::Array<juce::var>{addedId}}})),"removed")==1,"Family removal failed");
+  const auto left=families.status();for(const auto& family:*get(left,"families").getArray())check(get(family,"id").toString()!=addedId,"A removed family remained registered");
+  check((bool)get(families.status(),"stale"),"Removing a family did not rematch the others");check(get(families.reconcile(index),"state").toString()=="complete"&&!(bool)get(families.status(),"stale"),"Matching after a removal did not publish");
+ }
+ std::cout<<"families: pinned GPU affinities, identities, growth, deduplication, meter, manual decisions, immutable history, ambiguity, novel names, merge/dismiss, cancellation, concurrent publication, incremental matching, pending resolution, pruning, provenance and removal passed\n";return 0;
  }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
