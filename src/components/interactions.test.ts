@@ -35,7 +35,7 @@ beforeEach(() => {
   backend.state.ready=false;backend.state.trackKeywave=false;performanceView.patterns={};performanceView.notes=[];performanceView.epoch=-1
   backend.state.telemetry.contacts = []; backend.state.telemetry.fingers = []; backend.state.telemetry.macros = [0, 0, 0, 0, 0]
   backend.state.telemetry.touches=[]
-  backend.state.telemetry.pendingLatches=[]
+  backend.state.telemetry.pendingLatches=[];backend.state.telemetry.ppq=0
   backend.request.mockReset().mockImplementation(async (method:string)=>method==='waveform'?{peaks:[],duration:.5}:true); backend.midi.mockReset()
   vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
   vi.stubGlobal('document', { activeElement: null })
@@ -45,6 +45,19 @@ afterEach(() => { cleanup.forEach(fn => fn()); cleanup = []; finishMidiImport(fa
 async function render(component: any, props = {}) { const view = await mount(component, props); cleanup.push(view.unmount); return view.root }
 
 describe('keywave piano roll contracts',()=>{
+ it('shows the current song phase on unplayed zones and follows manual edits across toms',async()=>{
+  backend.state.telemetry.ppq=5.25
+  const key=backend.state.patch.keys.find((k:any)=>k.name==='Mid tom')
+  const root=await render(ZoneEditor,{zones:key.zones,scope:String(key.note)})
+  const markers=nodes(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport'))
+  expect(markers).toHaveLength(3);for(const marker of markers)expect(marker.props.x1).toBe(656.25)
+  key.zones[1].clipId='factory-2';key.zones[0].upper=.3;await settle()
+  for(const tom of backend.state.patch.keys.filter((k:any)=>['High tom','Mid tom','Low tom'].includes(k.name))){expect(tom.zones[1].clipId).toBe('factory-2');expect(tom.zones[0].upper).toBe(.3)}
+  expect(backend.state.patch.keys[0].zones[0].upper).toBe(.22)
+  backend.state.telemetry.ppq=6;await settle()
+  for(const marker of nodes(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')))expect(marker.props.x1).toBe(750)
+ })
+
  it('shows distinct queued start/stop indicators on parallel and origin keys even after the finger has lifted',async()=>{
   backend.state.telemetry.fingers=[];backend.state.telemetry.pendingLatches=[{note:64,origin:48,action:'start'}]
   const root=await render(Seaboard,{base:36})
@@ -55,7 +68,7 @@ describe('keywave piano roll contracts',()=>{
   backend.state.telemetry.pendingLatches=[{note:64,origin:48,action:'stop'}];await settle()
   expect(nodes(root,n=>n.props['data-queued-action']==='stop')).toHaveLength(2)
   expect(find(root,n=>n.props['data-queued-key']===48).props.class).toContain('latch-stop')
-  backend.state.telemetry.pendingLatches=[];await settle()
+  backend.state.telemetry.pendingLatches=[];backend.state.telemetry.ppq=0;await settle()
   expect(nodes(root,n=>n.props['data-queued-key']!==undefined)).toHaveLength(0)
   expect(find(root,n=>n.props['data-drop']==='key:48').props.class).not.toContain('queued')
  })
@@ -137,22 +150,26 @@ describe('keywave piano roll contracts',()=>{
   acceptPerformance({performance:{epoch:4,beat:1,bpm:120,dropped:0,events:[{type:0,epoch:4,beat:1,duration:.01,key:48,note:36,velocity:1,owner:'played',token:'hit'}]}});await settle()
   expect(find(root,n=>n.props['data-playing-key']===48)).toBeDefined()
  })
- it('splits waveform and pattern preview, showing the actual filtered variation and frozen last marker',async()=>{
+ it('splits waveform and pattern preview, showing the actual filtered variation and continuously phased muted marker',async()=>{
   backend.state.ready=true
   const key=backend.state.patch.keys.find((k:any)=>k.note===48)
   const root=await render(SoundPanel,{sound:key.sound,note:48})
   expect(find(root,n=>n.props.class==='scope-pair')).toBeDefined()
   expect(backend.request).toHaveBeenCalledWith('monitorKey',48)
   const position={identity:'test:1:48:2',key:48,zone:1,candidate:2,phase:2,beat:6,playing:true}
+  backend.state.telemetry.ppq=6
   acceptPerformance({pattern:{identity:position.identity,key:48,known:true,name:'Live variation',length:4,notes:[{beat:1,duration:.25,note:36,velocity:1}]},patternPosition:position})
   await settle()
   expect(root.textContent).toContain('PLAYINGLive variation')
   expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(750)
   expect(root.textContent).toContain('↻ ×2')
   expect(find(root,n=>n.props.role==='img'&&n.props.title==='Repeats every 4 beats · showing 8 beats').props['aria-label']).toBe('2 drum notes, playing')
+  backend.state.telemetry.ppq=6.5
   acceptPerformance({patternPosition:{...position,phase:2.5,beat:6.5,playing:false}});await settle()
   expect(root.textContent).toContain('LASTLive variation')
   expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(812.5)
+  backend.state.telemetry.ppq=7;await settle()
+  expect(find(root,n=>n.tag==='line'&&String(n.props.class).includes('pattern-transport')).props.x1).toBe(875)
  })
  it('shows a filtered mini preview on each key zone and exposes the Track toggle',async()=>{
   const key=backend.state.patch.keys.find((k:any)=>k.note===48)
@@ -326,7 +343,7 @@ describe('Seaboard component interaction contracts', () => {
     await settle()
     for(const finger of fingers)expect(find(root,n=>n.props['data-touch']===finger.props['data-touch'])).toBe(finger)
     expect(nodes(root,n=>n.props['data-finger']!==undefined)).toHaveLength(4)
-    backend.state.telemetry.pendingLatches=[];await settle()
+    backend.state.telemetry.pendingLatches=[];backend.state.telemetry.ppq=0;await settle()
     expect(nodes(root,n=>n.props['data-finger']!==undefined)).toHaveLength(4)
     expect(nodes(root,n=>n.props['data-echo']!==undefined)).toHaveLength(0)
   })

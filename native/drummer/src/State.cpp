@@ -1,4 +1,5 @@
 #include <drummer/State.h>
+#include <drummer/TomPatterns.h>
 #include <FactoryData.h>
 #include <drummer/Assets.h>
 #include <mutex>
@@ -113,6 +114,7 @@ std::unique_ptr<Runtime> compileDocument(const juce::var& input){
  const auto intentMeter=get(doc,"neural");const double latchBar=number(intentMeter,"numerator",4,1,64)*4/number(intentMeter,"denominator",4,1,32);
  c.latchGrid=latchQuantize?latchBars*latchBar:0;
  doc.getDynamicObject()->setProperty("latchQuantize",latchQuantize);doc.getDynamicObject()->setProperty("latchBars",latchBars);
+ synchronizeTomZones(doc);
  std::map<juce::String,int> clipIndex;std::map<juce::String,int> contentIndex;
  std::set<juce::String> boundClips,allClipIds;
  if(auto keys=get(doc,"keys");auto* list=keys.getArray())for(const auto& key:*list)

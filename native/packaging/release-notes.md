@@ -1,33 +1,25 @@
-# Roli Drummer 0.7.5
+# Roli Drummer 0.7.6
 
-Pattern families keep up with searching. Before, every search registered its query as a family and started rematching the whole catalog. A pending match then made the next search fail with "Family membership is updating", and Settings could show "Matching updates…" indefinitely.
+Patterns follow the shared song position, and corresponding tom zones share a complete source performance so tom rolls stay together.
 
-- Searching no longer registers a family. Saving a searched groove with SAVE does, so each search runs once and starts no catalog work.
-- Matching is incremental. A new family or decision recomputes only the families it affects; name suggestions reuse one catalog scan per search index. A match that a later change makes obsolete stops at once instead of finishing first. Memberships, ambiguity and suggestions are identical to 0.7.4's.
-- Searches never fail while matching catches up: a family resolves from its last confirmed membership, and a family not matched yet resolves as a plain search.
-- The Pattern families summary says what out-of-date membership is waiting for: "Matching updates… n/m" only while matching runs, otherwise "Matching failed", "Matching paused", "Waiting for search to be refreshed" or "Out of date", with MATCH NOW. Settings offers RETRY FAMILIES after a failure. Matching that only waited for another instance's database lock is retried automatically.
-- Startup rebuilds a search index that an interrupted import left behind the catalog. Before, family matching waited on it indefinitely.
-- Remove forgets a family and its decisions. Remove search families clears the families earlier versions registered from searches, if they were never saved, renamed, edited or accepted from a suggestion. Those near-duplicates also made each other's patterns ambiguous. Both actions need a second click to confirm.
-- Abandoned matching builds and superseded suggestions are deleted instead of accumulating in the library database.
+- Host song position is now respected even when the host omits its playing flag. With a stationary stopped cursor, local playback anchors to that song position and keeps advancing while keys are muted; moving the cursor reanchors it. Running transport remains authoritative.
+- Keys unmute the current pattern phase at their configured launch or latch boundary. They do not establish a new clip origin. Each pattern repeats at its own loop length, and zone changes retain the shared song phase.
+- Piano-roll markers keep following song position while muted, including zones that have not been played yet. Queued starts are shown as pending until their unmute boundary.
+- Semantic matching selects each tom zone once for the whole tom group. High, mid and low tom keys use that same source pattern while keeping their individual MIDI note filters, sounds and expression routes. Generated tom patterns also preserve the complete roll.
+- Tom zones use a fixed source performance; independent pressure/glide candidate selection cannot split the roll into unrelated patterns. Pressure and glide still shape each sound. Other drum parts and mixed drum-note masks retain independent matching.
+- Manual tom pattern drops, zone edits, boundaries and locks apply across the tom group. Recalled patches with different tom matrices adopt the lowest-pitched locked tom's layout, or the lowest-pitched tom's layout when none is locked. Auto matching unlocks and resolves the group together.
 
-After updating, the first match processes every registered family once. Later changes are incremental.
-
-The macOS downloads contain universal Apple Silicon and Intel AU, VST3 and standalone builds. The AU archive is **RoliDrummer.component-v0.7.5.zip**, containing the **RoliDrummer.component** bundle. The original notarized archives are published directly, with checks for clean extraction, macOS package recognition, signatures and stapled tickets.
+The macOS downloads contain universal Apple Silicon and Intel AU, VST3 and standalone builds. The AU archive is **RoliDrummer.component-v0.7.6.zip**, containing the **RoliDrummer.component** bundle. The original notarized archives are published directly, with checks for clean extraction, macOS package recognition, signatures and stapled tickets.
 
 Neural indexing and search require macOS 13.4 or later. Your personal MIDI library is not included. Use a portable **.rolidrummer** export to transfer a prepared patch with its patterns, mappings and sounds.
 
 ## Validation
 
-Local validation passed 194 frontend tests and all 22 native suites. The family suite adds checks for these cases:
+Local validation passed 198 frontend tests and all 22 native suites, plus the production editor build, universal bundle checks and AU initialization on Apple Silicon and Intel.
 
-- a registration recomputes only its own family;
-- an incremental build equals one from nothing;
-- resolution works while matching is pending;
-- dead builds and old suggestions are pruned;
-- saved provenance is kept;
-- a removed family is gone.
+Song-position regressions cover 21 processor cases across Normal, Hold and Toggle, buffer sizes of 64, 257 and 2,048 samples, mid-song entry, a stationary stopped song cursor, and advancing host PPQ without a playing flag. Existing seek, tempo-change, unequal-loop and transport regressions also pass.
 
-On a synthetic 15,000-pattern catalog, 0.7.4 and 0.7.5 produced byte-identical memberships and suggestions. Rematching after one new family took 4.2 s instead of 13.5 s in a fresh command-line process. About 3.9 s of that is the cold model load, which the instrument keeps loaded.
+Tom-roll tests verify exact filtered MIDI output when entering midway through a phrase, original and generated patterns, registered and unregistered family searches, CPU/GPU agreement, group locks and saved-patch migration. Song-position and tom suites also pass under Intel translation. Frontend tests cover continuously moving muted markers and synchronized manual tom edits and drops.
 
 Release CI repeats the frontend and native suites, Apple auval, VST3 pluginval at strictness 5, universal bundle checks, Developer ID signing and Apple notarization before publishing.
 

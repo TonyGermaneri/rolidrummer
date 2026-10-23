@@ -252,7 +252,14 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
  // Stopped-host keys use the same shared musical clock, at the host's exact
  // tempo (including changes while stopped), retaining it if tempo is omitted.
  auto stoppedRender=[](int block,bool stopped){
-  DrummerProcessor player;player.prepareToPlay(48000,2048);Head head;player.setPlayHead(&head);
+  DrummerProcessor player;
+  // Isolate clock/voice timing from freely ringing per-sound reverb tails.
+  auto dry=drummer::defaultDocument();auto keys=dry.getProperty("keys",{});
+  for(auto& key:*keys.getArray()){
+   auto sound=key.getProperty("sound",{}),settings=sound.getProperty("s",{});settings.getDynamicObject()->setProperty("reverbMix",0.);settings.getDynamicObject()->setProperty("delayMix",0.);
+   auto routes=key.getProperty("routes",{});for(auto& route:*routes.getArray())if(route.getProperty("target",{}).toString()=="reverbMix"||route.getProperty("target",{}).toString()=="delayMix"){route.getDynamicObject()->setProperty("min",0.);route.getDynamicObject()->setProperty("max",0.);}
+  }
+  player.apply(drummer::compileDocument(dry));player.prepareToPlay(48000,2048);Head head;player.setPlayHead(&head);
   juce::AudioBuffer<float> audio(2,2048);juce::MidiBuffer midi;std::vector<float> result;
   struct Input{int at;juce::MidiMessage message;};
   const Input events[]={
@@ -263,7 +270,7 @@ int main(int argc,char**argv){juce::ScopedJuceInitialiser_GUI gui;try{
    {65000,juce::MidiMessage::noteOff(3,50)},
    {85000,juce::MidiMessage::noteOn(2,48,(juce::uint8)110)},
    {100000,juce::MidiMessage::allNotesOff(1)}};
-  size_t event=0;double beat=0;
+  size_t event=0;double beat=3;
   for(int start=0;start<144000;){
    int next=144000;for(int edge:{24000,36000,48000,72000,96000})if(edge>start){next=edge;break;}
    const int n=std::min(block,next-start);audio.setSize(2,n,false,false,true);midi.clear();

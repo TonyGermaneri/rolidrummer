@@ -4,9 +4,16 @@ const fake = vi.hoisted(() => ({ state: { patch: undefined as unknown as Patch, 
 vi.mock('./store', () => ({ state: fake.state, attempt: (job: () => Promise<unknown>) => job() }))
 vi.mock('./midiImport', () => ({ importPattern: fake.importPattern }))
 import { drop } from './drag'
+import {isTomKey} from './lib/tomPatterns'
 beforeEach(() => { fake.state.patch = factory(); fake.importPattern.mockReset() })
 const disk: Asset = { id: '/test/groove.mid', path: '/test/groove.mid', name: 'groove.mid', folder: false, size: 200 }
 describe('pattern assignment', () => {
+ it('applies a manually dropped tom roll to the matching zone of every tom only',async()=>{
+  const patch=fake.state.patch,toms=patch.keys.filter(isTomKey),other=clone(patch.keys[0].zones),clip=patch.clips[2]
+  await drop({id:clip.id,path:clip.id,name:clip.name,folder:false,size:3},true,`zone:${toms[1].note}:1`)
+  for(const key of toms)expect(key.zones[1].clipId).toBe(clip.id)
+  expect(patch.keys[0].zones).toEqual(other)
+ })
  it('assigns internal library clips without trying to open their IDs as files', async () => {
   const clip = fake.state.patch.clips[2]
   await drop({ id: clip.id, path: clip.id, name: clip.name, folder: false, size: 3 }, true, 'zone:template:0')

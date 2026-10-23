@@ -11,6 +11,7 @@ constexpr int maxPhysicalTouches = maxContacts * 2; // Hardware and editor input
 constexpr int maxRuntimeClips = 2048;
 constexpr int maxCandidates = 16;
 constexpr int intentDimensions = 4;
+constexpr bool isTomNote(int note) noexcept {return note==41||note==43||note==45||note==47||note==48||note==50;}
 using PatternIntent = std::array<float,intentDimensions>;
 struct Note { double beat = 0, duration = .1; int note = 36; float velocity = 1; };
 struct ClipEvent { double beat=0; int note=0; int64_t cycleShift=0; bool off=false; };

@@ -96,7 +96,7 @@ private:
  float* outputL=nullptr;float* outputR=nullptr;int rendered=0,eventBase=0;double rate=48000,standalonePpq=0;
  drummer::Clock clock;
  double monitorBeat=0,monitorSegment=0;uint64_t monitorEpoch=0;
- bool wasHostPlaying=false;
+ bool wasHostPlaying=false,hostBeatKnown=false;double lastHostBeat=0;
  std::array<juce::RangedAudioParameter*,5> macroParameters {};
  std::atomic<float>* outputVolume=nullptr;
  std::mutex stateMutex;juce::String saved;

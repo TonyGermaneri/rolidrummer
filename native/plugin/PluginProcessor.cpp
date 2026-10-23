@@ -73,7 +73,7 @@ void DrummerProcessor::cancelKitPreview(){
  std::lock_guard guard(stateMutex);++kitPreviewRequest;
  if(kitPreviewRestore)if(auto* old=incoming.exchange(kitPreviewRestore.release()))delete old;
 }
-void DrummerProcessor::prepareToPlay(double sr,int max){rate=sr;previewRate=sr;previewBlock=max;stopPreview();engine.prepare(sr,max);rightScratch.resize((size_t)std::max(max,1));scheduler.reset();standalonePpq=0;monitorBeat=monitorSegment=0;++monitorEpoch;lastPatterns={};publishFingers();wasHostPlaying=false;freePlaying=false;activationScheduled=activationClockKnown=false;}
+void DrummerProcessor::prepareToPlay(double sr,int max){rate=sr;previewRate=sr;previewBlock=max;stopPreview();engine.prepare(sr,max);rightScratch.resize((size_t)std::max(max,1));scheduler.reset();standalonePpq=0;monitorBeat=monitorSegment=0;++monitorEpoch;lastPatterns={};publishFingers();wasHostPlaying=false;hostBeatKnown=false;lastHostBeat=0;freePlaying=false;activationScheduled=activationClockKnown=false;}
 bool DrummerProcessor::isBusesLayoutSupported(const BusesLayout&l)const{return l.getMainOutputChannelSet()==juce::AudioChannelSet::stereo()||l.getMainOutputChannelSet()==juce::AudioChannelSet::mono();}
 void DrummerProcessor::renderTo(int end){if(end<=rendered)return;engine.process(outputL+rendered,outputR+rendered,end-rendered,nullptr,0,{clock.bpm,clock.ppq+(rendered-eventBase)*clock.bpm/(60*rate),clock.playing});rendered=end;}
 void DrummerProcessor::emit(void*ctx,const drummer::Event&e){auto&p=*static_cast<DrummerProcessor*>(ctx);p.renderTo(e.offset+p.eventBase);
@@ -130,7 +130,13 @@ void DrummerProcessor::processBlock(juce::AudioBuffer<float>&buffer,juce::MidiBu
  else if(auto*head=getPlayHead())if(auto pos=head->getPosition()){
   if(auto bpm=pos->getBpm();bpm&&std::isfinite(*bpm)&&*bpm>0)clock.bpm=*bpm;
   transportPlaying=pos->getIsPlaying();
-  if(transportPlaying)if(auto ppq=pos->getPpqPosition();ppq&&std::isfinite(*ppq))clock.ppq=*ppq;
+  if(auto ppq=pos->getPpqPosition();ppq&&std::isfinite(*ppq)){
+   // A stopped transport still has a song cursor. Anchor free playback there
+   // on first observation or a seek; a stationary cursor must not freeze it.
+   // Some AU hosts supply advancing PPQ without a transport-state callback.
+   if(transportPlaying||!hostBeatKnown||std::abs(*ppq-lastHostBeat)>1e-10)clock.ppq=*ppq;
+   lastHostBeat=*ppq;hostBeatKnown=true;
+  }
  }
  clock.discontinuity=transportPlaying&&!wasHostPlaying;wasHostPlaying=transportPlaying;
  const double initialStep=clock.bpm/(60*rate);
@@ -187,7 +193,7 @@ void DrummerProcessor::processBlock(juce::AudioBuffer<float>&buffer,juce::MidiBu
   schedule(n-switchAt,input.data()+before,count-before);
  }else schedule(n,input.data(),count);
  renderTo(n);
- monitorBeat=monitorSegment;standalonePpq=clock.ppq+(n-eventBase)*clock.bpm/(60*rate);activationExpected=standalonePpq;activationClockKnown=true;hostBpm=clock.bpm;
+ monitorBeat=monitorSegment;standalonePpq=clock.ppq+(n-eventBase)*clock.bpm/(60*rate);hostPpq=standalonePpq;activationExpected=standalonePpq;activationClockKnown=true;hostBpm=clock.bpm;
  unsigned pw=previewWrite.load(std::memory_order_relaxed);
  if(pw-previewRead.load(std::memory_order_acquire)+2<=previewRetired.size()){
   auto retirePreview=[&](drummer::Preview* old){if(old){previewRetired[pw%previewRetired.size()]=old;previewWrite.store(++pw,std::memory_order_release);}};
@@ -216,9 +222,15 @@ void DrummerProcessor::rememberPattern(const drummer::Contact& f,double beat,boo
  if(f.clip>=0&&f.clip<(int)active->config.clips.size()){const auto& clip=active->config.clips[(size_t)f.clip];pattern.phase=std::fmod(beat-clip.origin,clip.length);if(pattern.phase<0)pattern.phase+=clip.length;}
 }
 void DrummerProcessor::publishFingers() noexcept {
- for(auto& pattern:lastPatterns)pattern.playing=false;
- for(const auto& f:scheduler.contacts())if(f.held&&!f.suppressed)rememberPattern(f,standalonePpq,true);
- for(const auto& f:scheduler.sustainedContacts())if(f.held)rememberPattern(f,standalonePpq,true);
+ for(auto& pattern:lastPatterns){
+  pattern.playing=false;
+  if(pattern.known&&active&&pattern.clip>=0&&pattern.clip<(int)active->config.clips.size()){
+   const auto& clip=active->config.clips[(size_t)pattern.clip];pattern.beat=standalonePpq;
+   pattern.phase=std::fmod(standalonePpq-clip.origin,clip.length);if(pattern.phase<0)pattern.phase+=clip.length;
+  }
+ }
+ for(const auto& f:scheduler.contacts())if(f.held&&!f.suppressed)rememberPattern(f,standalonePpq,standalonePpq+1e-9>=f.opens);
+ for(const auto& f:scheduler.sustainedContacts())if(f.held)rememberPattern(f,standalonePpq,standalonePpq+1e-9>=f.opens);
  if(fingerBusy.test_and_set(std::memory_order_acquire))return;
  fingerSnapshot.count=0;fingerSnapshot.touchSerial=scheduler.touchSerial();fingerSnapshot.touchNote=scheduler.lastTouchNote();
  fingerSnapshot.touchCount=0;for(const auto& touch:scheduler.physicalTouches())if(touch.down)fingerSnapshot.touches[(size_t)fingerSnapshot.touchCount++]=touch;

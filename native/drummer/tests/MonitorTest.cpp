@@ -5,8 +5,8 @@
 namespace {
 void check(bool condition,const char* message){if(!condition)throw std::runtime_error(message);}
 struct Head:juce::AudioPlayHead {
- double beat=0,bpm=120;
- juce::Optional<PositionInfo> getPosition() const override {PositionInfo p;p.setBpm(bpm);p.setPpqPosition(beat);p.setIsPlaying(true);return p;}
+ double beat=0,bpm=120;bool playing=true;
+ juce::Optional<PositionInfo> getPosition() const override {PositionInfo p;p.setBpm(bpm);p.setPpqPosition(beat);p.setIsPlaying(playing);return p;}
 };
 juce::var document(){
  auto doc=drummer::defaultDocument();auto* root=doc.getDynamicObject();root->setProperty("launchGrid",0);root->setProperty("switchGrid",0);root->setProperty("hardRelease",true);
@@ -43,7 +43,7 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;try{
  check(std::any_of(events.begin(),events.end(),[](const auto& e){return e.type==drummer::PlayedEvent::ownerOff&&std::abs(e.beat-128./24000)<1e-10;}),"Hard release missing from live roll");
  DrummerProcessor::FingerSnapshot snapshot;check(player->readFingers(snapshot),"Pattern snapshot unavailable");
  check(snapshot.patterns[48].known&&!snapshot.patterns[48].playing&&snapshot.patterns[50].playing,"Last/current pattern lifecycle is incorrect");
- check(std::abs(snapshot.patterns[48].phase-128./24000)<1e-10,"Short tap did not freeze its last transport position");
+ check(std::abs(snapshot.patterns[48].phase-256./24000)<1e-10,"Muted pattern stopped following the shared song position");
  check(snapshot.runtime&&snapshot.runtime->clipNames[0]=="Monitor groove","Snapshot did not retain its immutable pattern catalog");
  const auto epoch=snapshot.epoch;double previousBeat=snapshot.beat;
  // Host seeks affect pattern phase, but never move the rolling history backwards.
@@ -84,5 +84,38 @@ int main(){juce::ScopedJuceInitialiser_GUI gui;try{
   if(block==49){check(mixed->readFingers(snapshot),"Mixed-loop telemetry unavailable");check(std::abs(snapshot.patterns[48].phase-1)<1e-8&&std::abs(snapshot.patterns[48].beat-5)<1e-8,"Short-loop marker lost its second pass through the phrase");}
  }
  check(shortBeats==std::vector<int>({0,4,8,12})&&longBeats==std::vector<int>({0,8}),"Processor made a short pattern wait for the longer pattern");
+ // Keys unmute a continuously phased pattern; they never create a clip origin.
+ // Cover an already-running song, a stopped edit cursor, and AU hosts that
+ // advance PPQ but omit the transport-state callback. All must agree exactly.
+ auto songRender=[](int block,const juce::String& mode,int hostKind){
+  auto player=std::make_unique<DrummerProcessor>();auto doc=document();auto* o=doc.getDynamicObject();
+  o->setProperty("launchGrid",1.);o->setProperty("switchGrid",1.);o->setProperty("keyboardMode",mode);o->setProperty("latchBars",1);
+  o->setProperty("clips",juce::JSON::parse(R"([{"id":"song","name":"Song phase","length":4,"notes":[{"beat":0.125,"duration":0.1,"note":36,"velocity":0.8},{"beat":1.25,"duration":0.1,"note":36,"velocity":0.8},{"beat":2.5,"duration":0.1,"note":36,"velocity":0.8},{"beat":3.75,"duration":0.1,"note":36,"velocity":0.8}]}])"));
+  auto keys=doc.getProperty("keys",{});for(auto& key:*keys.getArray())key.getDynamicObject()->setProperty("zones",juce::JSON::parse(R"([{"upper":1,"clipId":"song"}])"));
+  player->apply(drummer::compileDocument(doc));player->prepareToPlay(48000,2048);Head head;head.playing=hostKind==0;player->setPlayHead(&head);
+  std::vector<int> hits;juce::MidiBuffer midi;juce::AudioBuffer<float> audio(2,2048);
+  for(int at=0;at<96000;at+=block){
+   const int size=std::min(block,96000-at);audio.setSize(2,size,false,false,true);midi.clear();
+   head.beat=10.2+(hostKind==2?0:at/24000.);
+   if(at<=137&&137<at+size)midi.addEvent(juce::MidiMessage::noteOn(2,48,(juce::uint8)100),137-at);
+   if(mode!="normal"&&at<=138&&138<at+size)midi.addEvent(juce::MidiMessage::noteOff(2,48),138-at);
+   player->processBlock(audio,midi);
+   check(std::abs(player->hostPpq.load()-(10.2+(at+size)/24000.))<1e-8,"Host song position was replaced by an instance-relative clock");
+   drummer::PlayedEvent event;while(player->performanceMonitor.pop(event))if(event.type==drummer::PlayedEvent::on)hits.push_back((int)std::llround(event.beat*24000));
+   DrummerProcessor::FingerSnapshot view;check(player->readFingers(view),"Song-phase snapshot unavailable");
+   if(view.patterns[48].known){
+    double phase=std::fmod(10.2+(at+size)/24000.,4.);
+    check(std::abs(std::remainder(view.patterns[48].phase-phase,4.))<1e-8,"Pattern phase restarted at a key press or latch");
+    const double opens=mode=="normal"?11.:12.;
+    if(10.2+(at+size)/24000.<opens)check(!view.patterns[48].playing,"Queued pattern was displayed as already unmuted");
+   }
+  }
+  const std::vector<int> expected=mode=="normal"?std::vector<int>{37200,46200,73200}:std::vector<int>{46200,73200};
+  check(hits==expected,"Quantized unmute restarted the clip or played the wrong song beats");return hits;
+ };
+ for(const auto* mode:{"normal","hold","toggle"}){
+  const auto expected=songRender(257,mode,0);
+  for(int hostKind:{0,1,2})for(int block:{64,2048})check(songRender(block,mode,hostKind)==expected,"Song-position unmute depends on host callback or buffer size");
+ }
  std::cout<<"monitor: bounded FIFO, filtered output, sample timing, note duration, short taps, last/current patterns, seek/tempo, refresh and restart passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

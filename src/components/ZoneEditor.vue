@@ -7,6 +7,7 @@ import { maxZones, minZoneWidth, setBoundary, splitZone, removeZone } from '../l
 import {performanceView,useRollClock,elapsedBeats} from '../performance'
 import PatternRoll from './PatternRoll.vue'
 import {patternDisplaySpan} from '../lib/pianoRoll'
+import {synchronizeTomZones} from '../lib/tomPatterns'
 const props = defineProps<{ zones: Zone[]; scope: string; compact?: boolean }>()
 const selected = ref(0)
 const key=computed(()=>props.scope==='template'?undefined:state.patch.keys.find(k=>k.note===Number(props.scope)))
@@ -14,7 +15,8 @@ const time=useRollClock()
 const displayLength=computed(()=>patternDisplaySpan(state.patch))
 function actual(zone:number){const view=key.value&&performanceView.patterns[key.value.note];return view?.pattern.known&&view.position.zone===zone?view:undefined}
 function preview(zone:number){const view=actual(zone);if(view)return view.pattern;const candidate=liveCandidate(zone);const clip=state.patch.clips.find(clip=>clip.id===(props.zones[zone].candidates?.[candidate]?.clipId??props.zones[zone].clipId));return clip?{...clip,length:clip.loopLength??clip.length}:undefined}
-function phase(zone:number){const view=actual(zone);return view?(view.position.beat===undefined?view.position.phase:view.position.beat-(view.pattern.origin??0))+(view.position.playing?elapsedBeats(time.value,view.received,performanceView.bpm):0):undefined}
+function phase(zone:number){return (state.telemetry.ppq??0)-(preview(zone)?.origin??0)+elapsedBeats(time.value,performanceView.received,performanceView.bpm)}
+watch(()=>JSON.stringify([key.value?.zones,key.value?.zoneSource,key.value?.neuralLock]),()=>{if(key.value)synchronizeTomZones(state.patch,key.value)})
 function manual(){if(state.patch.neural&&key.value)key.value.neuralLock=true}
 function liveCandidate(zone:number){return state.telemetry.fingers?.find(f=>f.note===Number(props.scope)&&f.zone===zone&&(f.candidate??-1)>=0)?.candidate??-1}
 watch(() => props.zones.length, count => { selected.value = Math.min(selected.value, count - 1) })

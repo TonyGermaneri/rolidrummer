@@ -4,6 +4,7 @@
 #include <drummer/PatternFamilies.h>
 #include <drummer/RhythmSpace.h>
 #include <drummer/Scheduler.h>
+#include <drummer/TomPatterns.h>
 #include <drummer/Json.h>
 #include "PartQuery.h"
 #include <juce_cryptography/juce_cryptography.h>
@@ -137,10 +138,17 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
     SemanticAffinities familyContext;
     if(familyBound)familyContext=index.affinities(query,indexId.toString(),(bool)get(options,"cpu",false));
     measured.intentMilliseconds=juce::Time::getMillisecondCounterHiRes()-started;
+    std::set<int> tomParts;int tomCount=0;bool tomLocked=false;
+    for(const auto& key:*get(input,"keys").getArray())if(isTomKey(key)){
+        ++tomCount;const auto parts=PartQuery::mask(get(key,"parts"));tomParts.insert(parts.begin(),parts.end());
+        tomLocked=tomLocked||(!autoMode&&(bool)get(key,"neuralLock",false));
+    }
+    auto locked=[&](const juce::var& key){return !autoMode&&((bool)get(key,"neuralLock",false)||(tomCount>1&&tomLocked&&isTomKey(key)));};
+    auto selectionParts=[&](const juce::var& key){return tomCount>1&&isTomKey(key)?tomParts:PartQuery::mask(get(key,"parts"));};
     std::map<std::set<int>,std::map<juce::String,juce::var>> partPools;
     if(familyBound){
         const double begin=juce::Time::getMillisecondCounterHiRes();
-        for(const auto& key:*get(input,"keys").getArray())if(autoMode||!(bool)get(key,"neuralLock",false)){const auto mask=PartQuery::mask(get(key,"parts"));if(!mask.empty())partPools.try_emplace(mask);}
+        for(const auto& key:*get(input,"keys").getArray())if(!locked(key)){const auto mask=selectionParts(key);if(!mask.empty())partPools.try_emplace(mask);}
         if(!partPools.empty()){
             juce::Array<juce::var> masks;for(const auto& [parts,unused]:partPools){juce::Array<juce::var> notes;for(int note:parts)notes.add(note);masks.add(notes);}
             const auto selection=families.selection(index,object({{"query",query},{"indexId",indexId},{"partMasks",masks},{"numerator",numerator},{"denominator",denominator},{"feel",selectedFeel?"triplet":"straight"},{"phraseBars",phraseBars},{"familyId",get(familySelection,"familyId")},{"familyBuildId",get(familySelection,"familyBuildId")},{"cpu",get(options,"cpu",false)}}),&familyContext);
@@ -187,10 +195,17 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
         const auto left=hash(seed+":generation-key:"+get(a,"note").toString()),right=hash(seed+":generation-key:"+get(b,"note").toString());
         return left!=right?left<right:(int)get(a,"note")<(int)get(b,"note");
     });
+    juce::var sharedToms,sharedTomResolution;
     for (auto& key : keyOrder) {
-        if (!autoMode && (bool) get(key, "neuralLock", false)) continue;
+        if (locked(key)) continue;
         if(autoMode)set(key,"neuralLock",false);
-        const auto parts=PartQuery::mask(get(key,"parts"));
+        const bool groupedTom=tomCount>1&&isTomKey(key);
+        if(groupedTom&&sharedToms.isObject()){
+            for(const char* field:{"zones","zoneSource","rhythmSpace","patternIntent"})set(key,field,get(sharedToms,field).clone());
+            auto info=sharedTomResolution.clone();set(info,"key",get(key,"note"));resolved.add(info);++changed;continue;
+        }
+        const auto parts=selectionParts(key);
+        const auto seedKey=groupedTom?juce::String("toms"):get(key,"note").toString();
         if (parts.empty()) continue;
         std::vector<Candidate> steady, fill;
         const double bar = numerator * 4.0 / denominator;
@@ -232,7 +247,7 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
             if(autoMode){
                 // Rank inside each musical region so an original-only seed
                 // also changes the performance without mixing region roles.
-                const auto context=seed+":"+get(key,"note").toString()+":"+region+":";
+                const auto context=seed+":"+seedKey+":"+region+":";
                 std::sort(choices.begin(),choices.end(),[&](const Candidate& a,const Candidate& b){
                     const auto left=get(a.row,"patternId").toString(),right=get(b.row,"patternId").toString();
                     const auto lh=hash(context+left),rh=hash(context+right);
@@ -254,7 +269,7 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
             std::sort(selected.begin(),selected.end(),order);
             if(regionVariations){
                 PatternVariationOptions settings;settings.count=regionVariations;settings.numerator=numerator;settings.denominator=denominator;settings.phraseBars=phraseBars;settings.role=region;settings.feel=selectedFeel?"triplet":"straight";
-                settings.seed=seed+":"+get(key,"note").toString()+":"+region;settings.parts.assign(parts.begin(),parts.end());
+                settings.seed=seed+":"+seedKey+":"+region;settings.parts.assign(parts.begin(),parts.end());
                 std::vector<juce::var> parents;for(const auto& candidate:selected)parents.push_back(prepared.at(get(candidate.row,"patternId").toString()));
                 for(const auto& child:generatePatternVariations(parents,settings)){
                     const auto id=get(child,"id").toString();prepared.insert_or_assign(id,child);
@@ -273,7 +288,7 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
             // A small library may fit entirely inside the candidate budget.
             // Rotate its variation axis too, so rerolls still change gesture
             // selection instead of changing only a displayed primary clip.
-            const size_t rotation=autoMode?static_cast<juce::uint32>(hash(seed+":"+get(key,"note").toString()+":"+region+":navigation").substring(0,8).getHexValue32())%selected.size():0;
+            const size_t rotation=autoMode?static_cast<juce::uint32>(hash(seed+":"+seedKey+":"+region+":navigation").substring(0,8).getHexValue32())%selected.size():0;
             for(size_t i=0;i<selected.size();++i){const auto& candidate=selected[i];const auto id=get(candidate.row,"patternId").toString();
                 const double activity=high>low?(candidate.part.density-low)/(high-low):.5;
                 result.candidates.add(object({{"clipId",id},{"position",juce::Array<juce::var>{quantize(activity),quantize(candidate.part.accents),quantize(selected.size()>1?((i+rotation)%selected.size())/double(selected.size()-1):.5),quantize(candidate.part.velocity)}},{"libraryBinding",get(candidate.row,"id")},{"generated",get(candidate.row,"generated",false)}}));
@@ -305,8 +320,12 @@ juce::var resolveNeuralPatch(PatternLibrary& library, NeuralIndex& index, const 
                              {"sparseDensity", sparseGroup.density}, {"steadyDensity", steadyGroup.density}, {"fillDensity", fillGroup.density},
                              {"fillFallback", fallback}, {"grooveCandidates", (int) steady.size()}, {"fillCandidates", (int) fill.size()}}));
         if (fallback) warnings.add(object({{"key", get(key, "note")}, {"reason", "No compatible fill contains this drum part; high slide keeps its steady groove"}}));
+        if(groupedTom){
+            sharedToms=key.clone();sharedTomResolution=resolved.getLast().clone();
+        }
         ++changed;
     }
+    synchronizeTomZones(document);
     if (!changed) throw std::runtime_error("No unlocked keys have drum parts covered by this query");
     const double documentStart=juce::Time::getMillisecondCounterHiRes();
     measured.selectionMilliseconds=documentStart-started-measured.intentMilliseconds-measured.partCandidateMilliseconds-measured.clipLoadMilliseconds;

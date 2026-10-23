@@ -2,6 +2,7 @@ import {defaultSettings,migratePresetSettings,type SoundSettings} from './types'
 import {normalizeFx,type MasterFx} from './masterFx'
 import factoryData from './data/factoryKit.json'
 import {compactKeyNotes} from './lib/keyMapping'
+import {synchronizeTomZones} from './lib/tomPatterns'
 export interface PatternCandidate{clipId:string;position:[number,number,number,number];generated?:boolean;libraryBinding?:string}
 export interface PatternIntentSettings{enabled:boolean;weights:[number,number,number,number];smoothingMs:number;minimumDwell:number;transitionPenalty:number}
 export interface Zone{upper:number;clipId:string;role?:'sparse'|'steady'|'fill';candidates?:PatternCandidate[]}
@@ -9,7 +10,7 @@ export interface Route{source:number;target:string;min:number;max:number;curve:n
 export interface Sound{path:string;asset?:string;missing?:string;s:SoundSettings & {reverse:boolean}}
 export interface Key{note:number;name:string;parts:number[];sound:Sound;zones:Zone[];zoneSource:number;routes:Route[];mpeDefaultsVersion?:number;neuralLock?:boolean;patternIntent?:PatternIntentSettings;rhythmSpace?:{version:number;precision?:number;mean:number[];scale:number[];eigenvalues:number[];components:number[][]}}
 export interface PatternGeneration{version:number;method:string;seed:string;attempt:number;parents:string[];fragmentParents:number[];unitBeats:number;role:string;feel:string;densityBounds:[number,number];preserveAnchors:boolean;preserveFinalBeat:boolean}
-export interface Clip{id:string;name:string;path?:string;channel?:number;track?:number;length:number;loopLength?:number;notes:{beat:number;duration:number;note:number;velocity:number}[];generation?:PatternGeneration}
+export interface Clip{id:string;name:string;path?:string;channel?:number;track?:number;length:number;loopLength?:number;origin?:number;notes:{beat:number;duration:number;note:number;velocity:number}[];generation?:PatternGeneration}
 export interface NeuralResolution{version:1;autoMode?:boolean;managedClipIds?:string[];patchId:string;familyId?:string;familyPolicyVersion?:number;familyBuildId?:string;familyRevision?:number;query:string;interpretedQuery?:string;queryVersion?:number;phraseBars?:number;variationCount?:number;generationVersion?:number;generatedCount?:number;indexId:string;libraryRevision:number;modelVersion:string;preprocessingVersion:number;featureVersion:number;resolverVersion:number;seed:string;numericPrecision?:number;numerator:number;denominator:number;feel:'straight'|'triplet';keys:{key:number;sparse:string;steady:string;fill:string;sparseDensity:number;steadyDensity:number;fillDensity:number;fillFallback:boolean;grooveCandidates:number;fillCandidates:number}[];warnings:{key:number;reason:string}[]}
 export type KeyboardMode = 'normal' | 'hold' | 'toggle'
 export interface Patch{fx:MasterFx;version:number;keyLayoutVersion?:1;id?:string;name:string;keys:Key[];clips:Clip[];templateZones:Zone[];launchGrid:number;switchGrid:number;hardRelease:boolean;sustainCC:number;keyboardMode:KeyboardMode;latchQuantize?:boolean;latchBars?:number;volume:number;bpm:number;globalCC:number[];globalRoutes:Route[];neural?:NeuralResolution}
@@ -43,6 +44,7 @@ export function normalize(p:Patch):Patch{
  p.latchQuantize??=true;p.latchBars=Number.isFinite(p.latchBars)?Math.max(0,Math.min(16,Math.trunc(p.latchBars!))):1;
  p.keyboardMode=p.keyboardMode==='hold'||p.keyboardMode==='toggle'?p.keyboardMode:'normal';
  p.sustainCC=Number.isFinite(p.sustainCC)&&p.sustainCC!==74?Math.max(0,Math.min(119,Math.trunc(p.sustainCC))):64;
+ synchronizeTomZones(p);
  p.globalRoutes??=[];p.fx=normalizeFx(p.fx);return p
 }
 export function factory():Patch{
